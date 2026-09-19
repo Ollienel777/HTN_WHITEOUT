@@ -146,7 +146,8 @@ is not treated as sourced.
 Standing `assumption`, twice re-checked: **scored in an arena Dominion supplies,
 against a target Dominion drives.**
 
-**Booth questions, hour one of the sponsor bay opening — these change the build:**
+**Questions for the Dominion Dynamics API Workshop, 10:30 local =
+2026-09-19T14:30Z, hour 10.5 — these change the build:**
 
 1. Do you provide the harness and simulator, or do we stand up ArduPilot SITL
    ourselves?
@@ -183,10 +184,10 @@ is likely to exist. Select WHITEOUT regardless; it is the whole project.
 
 - **Dominion Dynamics WHITEOUT** — $2,000 / $1,000 / $500, three winners, plus a
   guaranteed first-round interview. The whole project.
-- **Solana: Best Badge Hack** — $2,500, explicitly decoupled ("does not need to
-  relate to the main project"). Run alongside per
-  `hackathon/ideation/BADGE-HACK-BRIEF.md`. Cheapest extra demo available: you
-  hand someone a badge.
+- **Solana: Best Badge Hack** — $2,500. **Out of scope for this repository and
+  this run.** The operator is pursuing it in a separate session, in a different
+  shape from the one `hackathon/ideation/BADGE-HACK-BRIEF.md` recorded. No
+  ticket here serves it and it costs this build nothing.
 - **Nothing else.** Each extra claim is another live demo in the 09:45–11:45
   sponsor window.
 
@@ -194,7 +195,10 @@ is likely to exist. Select WHITEOUT regardless; it is the whole project.
 
 - **None before building.** No key, no account, no card, no network, no borrowed
   hardware.
-- Download one public Arctic DEM tile (pre-event dataset gathering is permitted;
-  doing it now is fine).
-- **Visit the Dominion Dynamics booth when the sponsor bay opens**, with the six
-  questions above. This is the highest-value hour in the build.
+- **Not the Arctic DEM tile.** Fetching it is authorised as a loop action and
+  blocks nothing: D25 fetches and commits it, and `sim/terrain.py` falls back
+  to a deterministic synthetic generator when `WHITEOUT_DEM` is unset.
+- **Attend the Dominion Dynamics API Workshop at 10:30 local
+  (2026-09-19T14:30Z, hour 10.5)**, with the six questions above and D43's
+  printed checklist. This is the highest-value hour in the build, and it is
+  3.5 hours before the 18:00Z sponsor selection lock.

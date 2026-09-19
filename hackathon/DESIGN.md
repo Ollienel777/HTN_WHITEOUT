@@ -260,6 +260,9 @@ switched on.
   multiples on a 4-column grid.
 - **Beat 6** — back to the field; topbar `transport` reads `sitl`, and the
   fleet rows show MAVLink sysids. Nothing else changes, and that is the point.
+  If SITL could not be obtained at all (`SPEC.md` §2 beat 6), this beat is the
+  conformance suite against a `pymavlink` loopback instead, shown as terminal
+  output — no field view, and no topbar reading `sitl`.
 - **Beat 7** — `WeightsField` in the rail, four numbers typed, the dials and
   the beat-5 operating point move.
 

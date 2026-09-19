@@ -32,11 +32,13 @@ workflow that runs it.
   as stubs, `viz/`, `tests/`, `fixtures/`, `scripts/`, `artifacts/`.
 - `scripts/gate.py` running the eight steps in `SPEC.md` §6 in order, failing
   fast, with the smoke and determinism steps present but allowed to be trivial
-  until D2/D3 land.
+  until D2/D3 land. Copy the test step's command exactly, including
+  `-m "not slow"`.
 - `.github/workflows/ci.yml`: **on every pull request with no path filters**,
   and on every push to `main`. One job: checkout, `setup-python@v5` (3.11),
   `pip install -e ".[dev]"`, `python scripts/gate.py`.
-- Exclude `.claude/**` from ruff, mypy and pytest via `pyproject.toml`.
+- Exclude `.claude/**` from ruff, mypy and pytest via `pyproject.toml`, and
+  register the `slow` marker in `[tool.pytest.ini_options] markers`.
 - `.env.example` with the names in `SPEC.md` §7 and no values.
 - **Delete `hackathon/backlog-draft.md`.**
 
@@ -49,6 +51,8 @@ currently no `.github/workflows/` directory at all.
 - [ ] The CI workflow runs on this PR and shows a green check
 - [ ] The workflow has no `paths:` or `paths-ignore:` filter
 - [ ] `ruff`, `mypy` and `pytest` all exclude `.claude/**`
+- [ ] The gate's test step is `pytest -q -m "not slow"`, and `slow` is a
+      registered marker
 - [ ] `hackathon/backlog-draft.md` is deleted
 - [ ] No secret, key or value appears in `.env.example`
 
@@ -739,7 +743,7 @@ fallback that is a real run rather than invented data.
 
 ---
 
-### D43 — docs: the arena runbook and the booth checklist
+### D43 — docs: the arena runbook and the workshop checklist
 
 **Milestone:** M1 · **Demo beat:** — · **Size:** S
 **Labels:** `docs` `P1` `area:transport` `loop-ok`
@@ -749,18 +753,23 @@ fallback that is a real run rather than invented data.
 answer changes, and the exact mapping work each possible interface implies.
 
 ## Why
-The booth visit is the highest-value hour in the build. It should not be
-improvised — which is why this ticket **depends on nothing and is M1**. It is
-the input to the booth, not an output of it.
+The Dominion Dynamics API Workshop is the highest-value hour in the build. It
+should not be improvised — which is why this ticket **depends on nothing and is
+M1**. It is the input to the workshop, not an output of it.
 
 ## Acceptance
 - [ ] All five questions from `SPEC.md` §11 appear with the tickets they affect
 - [ ] Each possible answer to Q1 names the files that would change
 - [ ] The checklist has a blank line per question for the answer, and prints on
       one side of A4
+- [ ] The checklist is printed and in hand **before 2026-09-19T14:30Z**
 
 ## Notes
-**Depends on nothing.** D32 depends on this checklist coming back filled in.
+**Depends on nothing. Hard deadline: the Dominion Dynamics API Workshop,
+10:30 local = 2026-09-19T14:30Z, hour 10.5 of 32** (`SPEC.md` §11) — 3.5 hours
+before the 18:00Z sponsor selection lock. This ticket is worthless after that
+time, so it is scheduled against the clock rather than against its
+dependencies. D32 and D31 depend on this checklist coming back filled in.
 
 ---
 
@@ -916,8 +925,10 @@ step inside D21.
 
 ## Notes
 `SPEC.md` §9 item 4. Depends on D21, and transitively on **D46** for SITL
-itself. If D46 reported SITL unobtainable, this ticket is closed as such and
-the `§3` MAVLink-only fallback applies.
+itself. If D46 reported SITL unobtainable, this ticket is closed as such, the
+`§3` MAVLink-only fallback applies, and beat 6 is demoed as the D6 conformance
+suite against a `pymavlink` loopback per `SPEC.md` §2. **M1 does not exit on
+this ticket** — beat 6's evidence is M2 work (`SPEC.md` §8).
 
 ---
 
@@ -960,9 +971,11 @@ default. It lets the fleet act on a hypothesis with no supporting observation,
 which a cell-based information-gain searcher structurally cannot do.
 
 ## Blocked by
-**Open question Q2** (`SPEC.md` §11): is the target adversarial or scripted?
+**Open question Q2** (`SPEC.md` §11), answered at the Dominion Dynamics API
+Workshop, **2026-09-19T14:30Z** (hour 10.5), via D43's checklist. Until then
+this ticket stays `needs-decision`. Is the target adversarial or scripted?
 **This only pays against an evading target.** Against a scripted mover it is
-strictly worse than the effort spent elsewhere. If the booth answers
+strictly worse than the effort spent elsewhere. If the workshop answers
 "adversarial", this comes off the cut list immediately and is re-prioritised to
 P1.
 
@@ -1064,7 +1077,10 @@ If the sponsor supplies the arena, this is the only thing between our tuned
 coordinator and a scored run.
 
 ## Blocked by
-**Open question Q1** (`SPEC.md` §11): do they provide the harness, and
+**Open question Q1** (`SPEC.md` §11), answered at the Dominion Dynamics API
+Workshop, **2026-09-19T14:30Z** (hour 10.5). Until then this ticket stays
+`needs-decision`; after it, the answer is in D43's returned checklist. Do they
+provide the harness, and
 is the interface plain MAVLink over a socket or a hosted service with its own
 schema? `dominiondynamics.online` does not resolve and the Devpost block is the
 only public text in existence — this cannot be answered from a desk.
@@ -1076,7 +1092,7 @@ only public text in existence — this cannot be answered from a desk.
 
 ## Notes
 `SPEC.md` §4, §11. Depends on D6 and on **D43's checklist coming back from the
-booth with Q1 answered**.
+14:30Z API workshop with Q1 answered**.
 
 ---
 
@@ -1100,10 +1116,14 @@ a better score.
 
 ## Notes
 **Seventh on the cut list** (`SPEC.md` §9 item 7). Depends on D4.
-**The DEM tile is a human action** (`DECISION.md` "Human actions") and is not
-in the tree. `SPEC.md` §4 forbids network egress, so an implementer cannot
-fetch it. **Do not start this ticket until `fixtures/dem/` contains the tile**
-— if it is absent, say so and release the ticket rather than inventing one.
+**Fetching the tile is authorised as a loop action and blocks nothing.** If
+`fixtures/dem/` is empty, fetch one public Arctic DEM tile, downsample it and
+commit it as part of this ticket. The one-time fetch is a setup step outside
+the product, like D46's image build: `SPEC.md` §4 forbids network egress on a
+runtime code path in `whiteout/`, which this is not. Nothing waits on it
+either way — D7's terrain loader falls back to the deterministic synthetic
+generator whenever `WHITEOUT_DEM` is unset (`SPEC.md` §7), so the ticket is
+droppable rather than blocking.
 
 ---
 
