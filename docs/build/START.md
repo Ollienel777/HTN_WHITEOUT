@@ -14,7 +14,7 @@ The operator rewrites this block for each run. It holds settings, never rules.
 ```
 mode: build            # build | review-only | plan-only
 merge policy: auto     # auto | human
-wip limit: 3
+wip limit: 6
 ```
 
 **If the block is missing, or a value is one you do not recognise, stop and
