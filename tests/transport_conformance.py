@@ -43,6 +43,7 @@ breach against any check can be written in the usual
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -72,9 +73,11 @@ __all__ = [
 TransportFactory = Callable[[], Transport]
 
 #: How many ticks the multi-tick checks drive. Enough that a clock which only
-#: advances on the first call, or a fleet that changes shape after a tick or
-#: two, is caught; small enough that ten checks per transport stay far inside
-#: the gate's three-minute budget (``SPEC.md`` §6).
+#: advances on the first call, or a fleet that goes empty after a tick or two,
+#: is caught; small enough that ten checks per transport stay far inside the
+#: gate's three-minute budget (``SPEC.md`` §6). The roster's *shape* is
+#: deliberately not pinned — see
+#: :func:`check_silence_is_not_a_fault_and_every_report_is_attributable`.
 TICKS = 5
 
 #: The observation's whole shape. Pinned, not merely searched for a forbidden
@@ -246,9 +249,15 @@ def check_connect_is_idempotent_while_the_link_is_up(factory: TransportFactory) 
 def check_the_tick_clock_is_monotonic(factory: TransportFactory) -> None:
     """Every ``observe`` advances the world clock, and never turns it back.
 
-    ``whiteout/log.py`` refuses a record whose ``t`` goes backwards, so a
-    transport that repeated or rewound a tick would lose the whole episode at
-    write time rather than report the fault where it happened.
+    ``whiteout/transport/base.py`` makes each ``observe`` return one tick and
+    "advance to the next", so a clock that stands still is not serving ticks
+    even while the calls keep returning — which is why the assertion below is
+    a strict increase rather than merely non-decreasing.
+
+    A clock that goes *backwards* costs more than the tick: ``whiteout/log.py``
+    refuses a record whose ``t`` is less than the previous one, so a transport
+    that rewound would lose the whole episode at write time rather than report
+    the fault where it happened. A repeated ``t`` the log does accept.
     """
     with _connected(factory) as transport:
         where = _name(transport)
@@ -451,6 +460,18 @@ def check_observe_never_returns_ground_truth(factory: TransportFactory) -> None:
     fields, and its JSON shape is walked for a truth-named key — which is
     what a subclass carrying an extra field, or a dict smuggled through a
     member, would show up as.
+
+    The JSON shape is also fed back through
+    :meth:`~whiteout.types.WorldObservation.from_dict` and encoded the way
+    ``whiteout/log.py`` encodes it (``allow_nan=False``), so what crosses the
+    seam is a record this build can *write*. An in-process
+    :class:`~whiteout.types.Pose` validates only that its floats are floats
+    (``whiteout/types.py``), not that its ``cls`` is a known vehicle class
+    or that those floats are finite. So an adapter mapping ``MAV_TYPE`` to
+    ArduPilot's own ``plane`` / ``copter`` / ``tracker`` spellings, or one
+    passing through a NaN altitude from a vehicle with no lock, would
+    otherwise pass every check here and then be unable to write episode
+    record one.
     """
     with _connected(factory) as transport:
         where = _name(transport)
@@ -465,8 +486,17 @@ def check_observe_never_returns_ground_truth(factory: TransportFactory) -> None:
                 f"{where}: observe() returned an observation with fields "
                 f"{sorted(present)}, not {sorted(OBSERVATION_FIELDS)}"
             )
+            payload = observation.to_dict()
             _assert_no_truth(observation, f"{where} observation")
-            _assert_no_truth(observation.to_dict(), f"{where} observation.to_dict()")
+            _assert_no_truth(payload, f"{where} observation.to_dict()")
+            try:
+                WorldObservation.from_dict(payload)
+                json.dumps(payload, allow_nan=False)
+            except ValueError as rejected:  # RecordError, or a non-finite float
+                raise AssertionError(
+                    f"{where}: observe() returned an observation this build cannot "
+                    f"write to an episode log: {rejected}"
+                ) from rejected
 
 
 #: Every check, in lifecycle order. The runner parameterises over this, so a
@@ -495,12 +525,15 @@ def unavailable(factory: TransportFactory) -> str | None:
 
     An adapter whose link needs something this machine does not have refuses
     at ``connect`` (``SPEC.md`` §7 makes that the normal path for one of
-    them), and the suite has nothing to say about a transport it cannot
-    start. The runner skips those *by name*, so a refusal can never be
-    mistaken for a pass on the transport the gate actually runs.
+    them), or from its constructor, which
+    ``whiteout/transport/__init__.py`` documents as equally legitimate "for a
+    seed or a configuration it cannot use". Both are covered: the suite has
+    nothing to say about a transport it cannot start, however early it says
+    so. The runner skips those *by name*, so a refusal can never be mistaken
+    for a pass on the transport the gate actually runs.
     """
-    transport = factory()
     try:
+        transport = factory()
         with _closed_after(transport):
             transport.connect()
     except TransportError as refused:

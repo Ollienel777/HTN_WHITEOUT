@@ -25,11 +25,12 @@ suite promises a breach arrives as. Every check owns at least one planted
 breach: a check nothing is planted against is a check nobody has shown to be
 load-bearing, and the gap is invisible while everything is green.
 
-Two of the cases plant a *refusal* rather than a wrong answer — a link that
-drops mid-episode, and a ``close`` a live link will not take — because those
-are the breaches that arrive as the adapter's own ``TransportError``, and the
-suite's conversion of them into ``AssertionError`` is itself a claim worth a
-guard.
+Five of the fifteen cases plant a *refusal* rather than a wrong answer — a
+second ``connect`` on a live link, a link that drops mid-episode, a ``close``
+a live link will not take, a ``command`` the link rejects, and a ``connect``
+after a ``close`` — because those are the breaches that arrive as the
+adapter's own ``TransportError``, and the suite's conversion of them into
+``AssertionError`` is itself a claim worth a guard.
 """
 
 from __future__ import annotations
@@ -198,7 +199,7 @@ def test_the_suite_imports_no_module_inside_the_transport_package() -> None:
 
 
 class _RewindingTransport(KinematicTransport):
-    """Reports every tick at t=0.0 — the clock that costs the episode."""
+    """Reports every tick at t=0.0 — a clock that never advances."""
 
     def observe(self) -> WorldObservation:
         observation = super().observe()
