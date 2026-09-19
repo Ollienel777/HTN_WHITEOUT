@@ -133,13 +133,24 @@ _NOT_OURS = {
 _EXEMPT = (THE_ONE_CONVERTER, THE_GUARD)
 
 
+def _is_ours(rel_path: str) -> bool:
+    """Whether a repository-relative path is source of ours, and so walked.
+
+    A pure predicate over the path's parts, lifted out of :func:`_sources`
+    so that it pins without a filesystem. It is the one change in #82 that
+    *removes* files from the guards' reach, so it is the one that most needs
+    a test -- and being inline was the only thing that made it look untestable.
+    """
+    parts = Path(rel_path).parts
+    return not (set(parts) & _NOT_OURS) and not any(part.endswith(".egg-info") for part in parts)
+
+
 def _sources() -> list[Path]:
     """Every Python file in the repository but the converter and this guard."""
     sources = [
         path
         for path in sorted(REPO_ROOT.rglob("*.py"))
-        if not (set(path.relative_to(REPO_ROOT).parts) & _NOT_OURS)
-        and not any(part.endswith(".egg-info") for part in path.parts)
+        if _is_ours(path.relative_to(REPO_ROOT).as_posix())
     ]
     for required in _EXEMPT:
         assert required in sources, f"{required} is not in the tree"
@@ -155,37 +166,91 @@ def _sources() -> list[Path]:
 #: A metre-scale constant is how a second frame starts, and an allowlist of
 #: exact literals is the wrong shape for catching one: the naive
 #: ``METRES_PER_DEGREE = 111320.0`` that someone writes in a hurry would
-#: never have been on such a list, and it disagrees with ``whiteout.geo`` by
-#: about 90 m over the strait. So the guard is a *range*. An earth radius, a
+#: never have been on such a list, and as a two-axis converter it disagrees
+#: with ``whiteout.geo`` by 30.0 m at the arena's worst corner -- measured,
+#: against ``geodetic_to_local``. So the guard is a *range*. An earth radius, a
 #: polar semi-axis, a metres-per-degree factor and either circumference all
 #: fall in it, and nothing else in this repository does. A computed spelling
-#: does not help either: ``6_378_000.0 + 137.0`` is caught by its first term.
+#: is usually caught by its first term -- ``6_378_000.0 + 137.0`` is -- but
+#: not when the first term is an exempted wire factor: see ``_WIRE_FACTORS``,
+#: which is the hole this range knowingly has.
 _ELLIPSOID_SCALE_M = (1.0e5, 1.0e8)
 
-#: The one value inside that range this guard lets through, #82. MAVLink's
-#: ``GLOBAL_POSITION_INT`` reports ``lat`` and ``lon`` as integers of 1e-7
-#: degrees, so every adapter above the transport seam divides by this to get
-#: the degrees :mod:`whiteout.geo` and the episode log take. It is a
-#: dimensionless wire factor, not a metre, and the range as first written
-#: rejected the `arena` and `sitl` transports on sight -- citing earth radii.
+#: The values inside that range this guard lets through, #82. Both are
+#: dimensionless MAVLink wire factors rather than metres, and the one concern
+#: here is one sentence long: **the metre-scale range must not adjudicate
+#: MAVLink wire factors.**
+#:
+#: - ``1e7``: ``GLOBAL_POSITION_INT`` reports ``lat`` and ``lon`` as integers
+#:   of 1e-7 degrees, so every adapter above the transport seam divides by it
+#:   to get the degrees :mod:`whiteout.geo` and the episode log take. The
+#:   range as first written rejected the `arena` and `sitl` transports on
+#:   sight -- citing earth radii.
+#: - ``1e6``: ``time_usec`` is microseconds, the same class of fact about the
+#:   same wire format. It adds no derived-converter risk beyond ``1e7``, for
+#:   an exact reason: ``1e6 / 9`` and ``1e7 / 90`` are the same float
+#:   (111 111.111), so every metres-per-degree a ``1e6`` exemption can reach,
+#:   the ``1e7`` exemption already reached. And nothing geodetic lives near
+#:   1e6 -- ``1e6 / 90`` is 11 111 and ``1e6 / 360`` is 2 778; no radius, no
+#:   circumference, no quadrant -- unlike 1e7, which sits 2 km from the
+#:   meridian quadrant and is exempted anyway. It is here rather than in a
+#:   follow-up so that #64 and #68 do not have to open and defend a change to
+#:   this file mid-event.
 #:
 #: Exempted **by value** rather than by narrowing the top of the range, which
 #: was the other way to spell this. Narrowing below 1e7 would free the whole
 #: decade above it, and that decade is not empty: the equatorial circumference
 #: is 40 075 017 m and the polar meridian 40 007 863 m, and either divided by
 #: 360 is a metres-per-degree factor -- the second converter this guard exists
-#: to stop, reached without ever writing 111320. Exempting one literal costs
-#: one literal; narrowing the range costs a decade of them.
+#: to stop, reached without ever writing 111320. Exempting two literals costs
+#: two literals; narrowing the range costs a decade of them.
 #:
-#: What it does cost, stated rather than left to be found: 1e7 m is within
-#: 2 km of the quadrant of the meridian -- the metre's original definition --
-#: so ``north / (1e7 / 90)`` is now a latitude scale the range cannot see
-#: (0.02% low, about 0.2 m per km North). The longitude half of any such
-#: converter still needs a cosine, which
-#: :func:`test_nothing_but_whiteout_geo_does_trigonometry_on_a_latitude`
-#: refuses outside ``whiteout/geo.py``, and the quadrant's own value,
-#: 10 001 966 m, is still in range.
-_DEGE7 = 1.0e7
+#: **What the exemption costs, measured at the strait rather than estimated.**
+#: It is not small, and the honest statement is that the guards do not catch
+#: what it opens:
+#:
+#: - ``north / (1e7 / 90)`` is a latitude scale the range can no longer see.
+#:   1e7 m is within 2 km of the quadrant of the meridian, so it is only
+#:   0.02% off the *global mean* degree -- but this guard exists to stop a
+#:   converter disagreeing with :mod:`whiteout.geo`, and at 71.99 N
+#:   ``radii_of_curvature`` gives M = 6 393 414.1 m, i.e. 111 586.1 m/deg.
+#:   ``1e7 / 90`` = 111 111.1 is **0.426% low: about 4.3 m per km North, and
+#:   53.44 m at the arena's 12.5 km half-length.**
+#: - **The longitude half does not need a cosine call, so no guard stops it.**
+#:   A precomputed ``COS_ORIGIN = 0.3093051`` is neither an ``ast.Attribute``
+#:   nor a ``from math import``, and it is far below this range, so the whole
+#:   two-axis converter --
+#:   ``lat + north / (1e7 / 90)``, ``lon + east / ((1e7 / 90) * COS_ORIGIN)``
+#:   -- passes all three guards, with a worst disagreement of **53.63 m** over
+#:   the arena. That is within 3 m of the 51 m converter option 1 was rejected
+#:   to prevent. Option 2 is still the right call, because it opens one door
+#:   and option 1 opened the decade; but the door it opens is ~54 m wide, not
+#:   sub-metre. This is the same shape as PR #78's R2-N1 precomputed-cosine
+#:   bypass, which is still open, and closing that closes this too.
+#:
+#: Put plainly, so that the next person to widen this cannot cite a
+#: sub-metre cost: **this exemption opens a two-axis converter that is ~54 m
+#: out at the arena corner, and none of the three guards catches it.** The
+#: naive ``111320.0`` that ``_ELLIPSOID_SCALE_M`` above exists to catch is
+#: 30.0 m out -- the guard refuses the less wrong spelling and admits the more
+#: wrong one. That is accepted, not overlooked: the alternative was option 1,
+#: which frees a whole decade of them.
+#:
+#: What the exemption does contain: it is these values and not a band. Both
+#: neighbours of each are planted as breaches below, and the quadrant's own
+#: value, 10 001 966 m, is still in range.
+#:
+#: Each carries what it is for, so the failure message can name the whole
+#: list rather than the first of it, and so a third entry cannot be added
+#: without saying which wire field it decodes.
+_WIRE_FACTORS: dict[float, str] = {
+    1.0e7: "degE7 lat/lon",
+    1.0e6: "time_usec microseconds",
+}
+
+#: The exemptions as the failure message spells them, derived so it cannot
+#: drift from the dict above.
+_WIRE_FACTORS_NAMED = ", ".join(f"{value:.0e} ({why})" for value, why in _WIRE_FACTORS.items())
 
 #: The dimensionless half of the ellipsoid -- too small for the range above,
 #: and the other way every copy of this arithmetic starts.
@@ -260,17 +325,18 @@ def _check_the_ellipsoid(where: str, text: str) -> None:
         if isinstance(node.value, bool):
             continue
         value = abs(float(node.value))
-        if value == _DEGE7:
+        if value in _WIRE_FACTORS:
             continue
         assert not low <= value <= high, (
             f"{where} line {node.lineno} spells out {node.value!r}. The ellipsoid "
             f"guard (tests/test_geo.py::test_only_whiteout_geo_defines_the_ellipsoid) "
-            f"fails any literal whose magnitude falls in [{low:g}, {high:g}], because "
+            f"fails any literal whose magnitude falls in [{low:.0e}, {high:.0e}], because "
             f"a constant that size is an earth radius, a circumference or a "
             f"metres-per-degree factor -- and the ellipsoid lives in whiteout/geo.py "
-            f"and nowhere else. Its one exemption is {_DEGE7:g}, MAVLink's degE7 "
-            f"scaling. If yours is another unit factor rather than a second frame, "
-            f"name it beside that one in test_geo.py; do not widen the range"
+            f"and nowhere else. Its only exemptions are {_WIRE_FACTORS_NAMED}. If "
+            f"yours is another dimensionless wire factor rather than a second frame, "
+            f"name it beside those in test_geo.py's _WIRE_FACTORS; do not widen "
+            f"the range"
         )
         for shape in _ELLIPSOID_SHAPES:
             assert not math.isclose(value, shape, rel_tol=1e-6), (
@@ -289,9 +355,9 @@ def _check_a_frame_conversion_name(where: str, text: str) -> None:
             assert word not in lowered, (
                 f"{where} defines {name!r}. The frame-conversion-name guard "
                 f"(tests/test_geo.py::test_only_whiteout_geo_defines_a_frame_conversion) "
-                f"fails any bound name containing {', '.join(_CONVERSION_WORDS)} -- "
-                f"whiteout/geo.py is the one converter, and every other caller "
-                f"imports it"
+                f"fails any bound name containing {', '.join(_CONVERSION_WORDS)}, "
+                f"matched without regard to case -- whiteout/geo.py is the one "
+                f"converter, and every other caller imports it"
             )
 
 
@@ -328,8 +394,11 @@ def _check_the_trigonometry(where: str, text: str) -> None:
 
 
 #: Every static guard this section runs over the tree. The planted breaches
-#: below are checked against this tuple, so a guard added later cannot land
-#: without one.
+#: below are checked against this tuple, and :func:`_walk` refuses a guard
+#: that is not in it while :func:`test_every_walking_guard_is_registered`
+#: refuses a ``_check_*`` that never joined it -- so a guard added later
+#: cannot land without a planted breach, whether by being dropped from this
+#: tuple or by never being added to it.
 _GUARDS: tuple[Callable[[str, str], None], ...] = (
     _check_the_ellipsoid,
     _check_a_frame_conversion_name,
@@ -338,6 +407,17 @@ _GUARDS: tuple[Callable[[str, str], None], ...] = (
 
 
 def _walk(guard: Callable[[str, str], None]) -> None:
+    # The walking tests below name their guard directly rather than looping
+    # over `_GUARDS`, because each failure message embeds its own test name
+    # and pytest has to be able to run one of them. That left `_GUARDS` a
+    # registry nothing consulted: dropping an entry went red, but *never
+    # adding* one did not. Driving the walk through this assertion, and
+    # `test_every_walking_guard_is_registered` below, closes the other half.
+    assert guard in _GUARDS, (
+        f"{guard.__name__} is walked over the tree but is not in _GUARDS, so "
+        f"test_every_guard_owns_a_planted_breach never asked it for a planted "
+        f"breach. Add it to _GUARDS and plant one"
+    )
     for source in _sources():
         guard(source.relative_to(REPO_ROOT).as_posix(), source.read_text(encoding="utf-8"))
 
@@ -357,6 +437,46 @@ def test_nothing_but_whiteout_geo_does_trigonometry_on_a_latitude() -> None:
     _walk(_check_the_trigonometry)
 
 
+def test_every_walking_guard_is_registered() -> None:
+    """A fourth ``_check_*`` cannot land outside ``_GUARDS``.
+
+    ``_walk`` asserts the guard it is handed is registered, but only for
+    guards somebody remembered to walk. This is the other direction: every
+    ``_check_*`` this module defines must be in the tuple, so that
+    :func:`test_every_guard_owns_a_planted_breach` sees it and demands a
+    planted breach for it.
+    """
+    defined = {
+        value for name, value in globals().items() if name.startswith("_check_") and callable(value)
+    }
+    missing = sorted(guard.__name__ for guard in defined - set(_GUARDS))
+    assert not missing, f"defined but not in _GUARDS, so never asked for a breach: {missing}"
+
+
+def test_the_exclusion_of_other_agents_worktrees_holds() -> None:
+    """``.claude`` is the one change here that *removes* files from the walk.
+
+    It needs no filesystem to pin: :func:`_is_ours` is a pure predicate over
+    a path's parts. Getting this wrong in the permissive direction is how the
+    walk came to read another branch's source as this tree's (PR #78's R2-M2);
+    getting it wrong in the strict direction would silently unguard a
+    directory. ``.claude/**`` is outside every ruff, mypy and pytest glob in
+    ``SPEC.md`` §6, so a converter landing there would be unguarded by
+    everything at once.
+    """
+    assert not _is_ours(".claude/worktrees/agent-x/whiteout/geo.py")
+    assert not _is_ours(".claude/hooks/session_start.py")
+    assert not _is_ours("whiteout.egg-info/thing.py")
+    assert not _is_ours(".venv/lib/python3.12/site-packages/pymavlink/mavutil.py")
+    assert _is_ours("whiteout/geo.py")
+    assert _is_ours("scripts/gate.py")
+    assert _is_ours("tests/test_geo.py")
+    # Not a prefix match: a directory merely *starting* with a skipped name
+    # is ours, and so is a file whose name happens to contain one.
+    assert _is_ours("whiteout/build_plan.py")
+    assert _is_ours("scripts/claude_report.py")
+
+
 #: What a MAVLink adapter above the transport seam actually writes: degE7 in,
 #: degrees out, and not one line of geodesy. #64 and #68 are next to write it,
 #: and ``SPEC.md`` §3 and §9 make it demo beat 6.
@@ -368,19 +488,25 @@ from whiteout.geo import GeoPoint
 #: `GLOBAL_POSITION_INT` reports lat/lon as integers of 1e-7 degrees.
 DEGE7 = 1e7
 
+#: `time_usec` is microseconds since boot.
+USEC_PER_S = 1e6
 
-def position_of(message: object) -> GeoPoint:
-    return GeoPoint(message.lat / DEGE7, message.lon / 1e7)
+
+def position_of(message: object) -> tuple[float, GeoPoint]:
+    return (
+        message.time_usec / USEC_PER_S,
+        GeoPoint(message.lat / DEGE7, message.lon / 1e7),
+    )
 '''
 
 
-def test_a_mavlink_adapter_may_spell_the_dege7_scaling() -> None:
+def test_a_mavlink_adapter_may_spell_the_wire_factors() -> None:
     """#82's acceptance: degE7 in ``whiteout/transport/`` passes all three guards.
 
-    The range contains 1e7, so before the exemption this file failed the gate
-    with a message about earth radii, and the `arena` and `sitl` adapters were
-    blocked on sight. This runs the guards the walk runs, at the path the
-    adapter lands on, which is not in any allowlist.
+    The range contains both 1e7 and 1e6, so before the exemption this file
+    failed the gate with a message about earth radii, and the `arena` and
+    `sitl` adapters were blocked on sight. This runs the guards the walk
+    runs, at the path the adapter lands on, which is not in any allowlist.
     """
     for guard in _GUARDS:
         guard("whiteout/transport/mavlink.py", _A_MAVLINK_ADAPTER)
@@ -396,8 +522,9 @@ def test_a_mavlink_adapter_may_spell_the_dege7_scaling() -> None:
 #: Every spelling PR #78's reviews defeated a guard with is here, so that
 #: closing the degE7 hole cannot quietly reopen one: the naive
 #: metres-per-degree, a computed constant, an ``AnnAssign``, and a path
-#: outside ``whiteout/``. Two neighbours of the exemption are here too,
-#: because "allow 1e7" must mean one value and not a neighbourhood.
+#: outside ``whiteout/``. Both neighbours of both wire factors are here too,
+#: because "allow 1e7 and 1e6" must mean two values and not two
+#: neighbourhoods.
 _PLANTED_BREACHES: tuple[tuple[str, str, Callable[[str, str], None]], ...] = (
     ("a second semi-major axis", "WGS84_A = 6378137.0\n", _check_the_ellipsoid),
     ("the naive metres-per-degree", "METRES_PER_DEGREE = 111320.0\n", _check_the_ellipsoid),
@@ -423,8 +550,23 @@ _PLANTED_BREACHES: tuple[tuple[str, str, Callable[[str, str], None]], ...] = (
     ),
     ("the dimensionless half", "E2: float = 0.0066943799901413165\n", _check_the_ellipsoid),
     (
-        "a neighbour of the degE7 exemption, which is one value and not a gap",
+        "the upper neighbour of the degE7 exemption, which is one value and not a gap",
         "SCALE = 10000001.0\n",
+        _check_the_ellipsoid,
+    ),
+    (
+        "the lower neighbour of the degE7 exemption",
+        "SCALE = 9999999.0\n",
+        _check_the_ellipsoid,
+    ),
+    (
+        "the upper neighbour of the time_usec exemption",
+        "SCALE = 1000001.0\n",
+        _check_the_ellipsoid,
+    ),
+    (
+        "the lower neighbour of the time_usec exemption",
+        "SCALE = 999999.0\n",
         _check_the_ellipsoid,
     ),
     (
@@ -481,16 +623,46 @@ def test_a_guard_failure_names_the_guard_and_what_it_refuses() -> None:
         _check_the_ellipsoid("whiteout/transport/probe.py", "METRES_PER_DEGREE = 111320.0\n")
     message = str(caught.value)
     assert "test_only_whiteout_geo_defines_the_ellipsoid" in message, message
-    assert f"[{low:g}, {high:g}]" in message, message
-    assert f"{_DEGE7:g}" in message, message
+    assert f"[{low:.0e}, {high:.0e}]" in message, message
+    # The whole exemption list, not just its first entry: a reader who hits
+    # this while decoding `time_usec` has to be told 1e6 is already allowed.
+    for value, why in _WIRE_FACTORS.items():
+        assert f"{value:.0e}" in message, message
+        assert why in message, message
+    assert "_WIRE_FACTORS" in message, message
 
-    for guard, source in (
-        (_check_a_frame_conversion_name, "def to_latlon(east, north):\n    return east\n"),
-        (_check_the_trigonometry, "from math import radians\n"),
+    # The other two guards are pinned on their test name too, not merely on
+    # "tests/test_geo.py::" -- otherwise a regression that dropped the name
+    # and kept the path would pass here (R1-N1).
+    for guard, source, named in (
+        (
+            _check_a_frame_conversion_name,
+            "def to_latlon(east, north):\n    return east\n",
+            "test_only_whiteout_geo_defines_a_frame_conversion",
+        ),
+        (
+            _check_the_trigonometry,
+            "from math import radians\n",
+            "test_nothing_but_whiteout_geo_does_trigonometry_on_a_latitude",
+        ),
     ):
         with pytest.raises(AssertionError) as caught:
             guard("whiteout/transport/probe.py", source)
-        assert "tests/test_geo.py::" in str(caught.value), str(caught.value)
+        message = str(caught.value)
+        assert f"tests/test_geo.py::{named}" in message, message
+
+
+def test_the_name_guard_says_it_matches_regardless_of_case() -> None:
+    """``Geodetic`` is rejected by a guard that lists only ``geodetic`` (R1-N2).
+
+    The match is on ``name.lower()``, so a reader who sees a capitalised name
+    refused has to open this file to learn why unless the message says so.
+    """
+    with pytest.raises(AssertionError) as caught:
+        _check_a_frame_conversion_name("whiteout/transport/probe.py", "class GeodeticFix: ...\n")
+    message = str(caught.value)
+    assert "GeodeticFix" in message, message
+    assert "case" in message.lower(), message
 
 
 def test_every_guard_owns_a_planted_breach() -> None:
