@@ -551,18 +551,29 @@
     };
   }
 
+  /* validateLine checks that `observation.poses` is an array, not what is in
+   * it, so a pose with a missing or non-numeric lat/lon can reach the two
+   * measures below. They have to agree about what to do with it: `|| 0` in
+   * one and a raw `Number()` in the other would drag the origin toward
+   * (0, 0) *and* make the extent NaN, which leaves the grid undrawn and the
+   * scale bar reading "NaN m" with no error state to explain it. Both skip
+   * such a pose instead. */
+  function isPlaced(pose) {
+    return isFinite(Number(pose.lat)) && isFinite(Number(pose.lon));
+  }
+
   /* The origin is the fleet's centroid in the first record, so the axes cross
    * where the episode starts rather than at an arbitrary meridian. Measured
    * once per load, with the extent. */
   function measureOrigin() {
     var first = state.records[0];
-    var poses = first ? first.observation.poses : [];
+    var poses = (first ? first.observation.poses : []).filter(isPlaced);
     if (!poses.length) { return ARENA_ORIGIN; }
     var lat = 0;
     var lon = 0;
     poses.forEach(function (pose) {
-      lat += Number(pose.lat) || 0;
-      lon += Number(pose.lon) || 0;
+      lat += Number(pose.lat);
+      lon += Number(pose.lon);
     });
     return { lat: lat / poses.length, lon: lon / poses.length };
   }
@@ -577,7 +588,7 @@
     var span = DEFAULT_EXTENT;
     state.origin = measureOrigin();
     state.records.forEach(function (record) {
-      record.observation.poses.forEach(function (pose) {
+      record.observation.poses.filter(isPlaced).forEach(function (pose) {
         var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
         span = Math.max(span, Math.abs(local.east) * 1.2, Math.abs(local.north) * 1.2);
       });

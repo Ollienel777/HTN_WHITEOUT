@@ -16,12 +16,15 @@ standing job.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from whiteout.geo import ARENA_ORIGIN, WGS84_A, WGS84_F
+from whiteout.geo import ARENA_ORIGIN, WGS84_A, WGS84_F, LocalPoint, local_to_geodetic
 from whiteout.log import SCHEMA_VERSION, validate_episode_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -257,6 +260,79 @@ def test_the_viewers_local_frame_is_named_as_a_drawing_frame() -> None:
     assert "never written" in frame
     assert "never posted" in frame
     assert "frame of record" in frame
+
+
+#: The viewer's drawing frame, cut out of ``viewer.js`` so ``node`` can run
+#: it without the page around it. Both markers are asserted before the cut,
+#: so moving the block fails the test rather than silently narrowing it.
+_FRAME_OPENS = "var WGS84_A"
+_FRAME_CLOSES = "/* The origin is the fleet's centroid"
+
+#: Offsets in metres about ``ARENA_ORIGIN``, taken to the corners of the
+#: 25 km x 2 km strait and to a couple of points inside it. The axes differ
+#: by a factor of 3.2 up here, so a projection that crosses them is out by
+#: kilometres at the far end and this catches it at every case.
+_PINNED_OFFSETS = (
+    (0.0, 0.0),
+    (1000.0, 0.0),
+    (0.0, 1000.0),
+    (12500.0, 1000.0),
+    (-12500.0, -1000.0),
+    (-3000.0, 750.0),
+)
+
+
+def _viewer_frame_metres(offsets: tuple[tuple[float, float], ...]) -> list[dict[str, float]]:
+    """Run ``viewer.js``'s ``toLocal`` under ``node`` and return its metres."""
+    node = shutil.which("node")
+    assert node is not None, (
+        "node is needed to pin the viewer's arithmetic to whiteout.geo. It is "
+        "already a dependency of this repository (scripts/toutc.mjs) and is "
+        "present on the CI runner; this test is not skipped because skipping "
+        "it is how the viewer's formulae stopped being checked at all."
+    )
+    js = _read("viewer.js")
+    assert _FRAME_OPENS in js and _FRAME_CLOSES in js, "the drawing frame block has moved"
+    frame = js[js.index(_FRAME_OPENS) : js.index(_FRAME_CLOSES)]
+    assert "function toLocal" in frame, "the cut did not include toLocal"
+
+    places = [local_to_geodetic(ARENA_ORIGIN, LocalPoint(east, north)) for east, north in offsets]
+    driver = (
+        frame
+        + "var origin = { lat: "
+        + repr(ARENA_ORIGIN.lat_deg)
+        + ", lon: "
+        + repr(ARENA_ORIGIN.lon_deg)
+        + " };\n"
+        + "var places = "
+        + json.dumps([[place.lat_deg, place.lon_deg] for place in places])
+        + ";\n"
+        + "process.stdout.write(JSON.stringify(places.map(function (p) {\n"
+        + "  return toLocal(origin, p[0], p[1]);\n"
+        + "})));\n"
+    )
+    done = subprocess.run(  # noqa: S603
+        [node, "-e", driver], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, f"node refused the drawing frame: {done.stderr}"
+    return json.loads(done.stdout)
+
+
+def test_the_viewers_projection_returns_the_same_metres_as_whiteout_geo() -> None:
+    """The half of the pin that is a number rather than a constant.
+
+    The constants test below compares ``WGS84_A``, ``WGS84_F`` and the
+    origin, which leaves the formulae between them unpinned: swapping the two
+    radii inside ``toLocal`` keeps every constant correct, makes the East
+    axis 3.2x too large and the North axis 3.2x too small, and used to leave
+    the whole suite green. This runs the block and compares metres, so the
+    arithmetic is pinned too.
+    """
+    metres = _viewer_frame_metres(_PINNED_OFFSETS)
+    assert len(metres) == len(_PINNED_OFFSETS)
+    for (east, north), got in zip(_PINNED_OFFSETS, metres, strict=True):
+        assert got["east"] == pytest.approx(east, abs=1e-6)
+        assert got["north"] == pytest.approx(north, abs=1e-6)
 
 
 def test_the_viewers_projection_is_pinned_to_whiteout_geo() -> None:

@@ -64,9 +64,10 @@ def _resolve_seed(explicit: int | None) -> int | None:
 def _placeholder_digest(t: float) -> BeliefDigest:
     """A belief digest for a build with no belief field yet.
 
-    Every field is finite and zero-valued over a 1×1 grid, so the record
-    validates and the viewer has something to parse. The belief ticket
-    replaces this; nothing may read these numbers as meaning anything.
+    Every field is finite, and zero-valued apart from the peak, over a 1×1
+    grid, so the record validates and the viewer has something to parse. The
+    belief ticket replaces this; nothing may read these numbers as meaning
+    anything.
 
     The peak is :data:`~whiteout.geo.ARENA_ORIGIN` rather than ``(0, 0)``: the
     frame of record is lat/lon (``SPEC.md`` §5), where ``(0, 0)`` is a real

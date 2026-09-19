@@ -308,8 +308,13 @@ One per module, so parallel worktrees do not collide:
   /api/tracks` body is lat/lon; `ARENA.md` §5 scores *accuracy* on exactly
   that. A local East–North metric frame exists only as a **projection for
   drawing and geometry**: it is never logged and never posted. **`whiteout/geo.py`
-  is the one module that converts**, and a test fails if a second one appears.
-  (Altitude is a separate question — which datum the arena reports is #76.)
+  is the one module that converts**, and a test walks every Python file in the
+  repository and fails on a second one — on an ellipsoid-scale constant, on a
+  name that reads as a conversion, or on any call to trigonometry. The
+  viewer's JavaScript copy cannot be walked, so it is pinned numerically: a
+  test runs it under `node` and compares the metres it returns to
+  `whiteout.geo`'s. (Altitude is a separate question — which datum the arena
+  reports is #76.)
 - Frozen dataclasses for all record types. No dicts crossing module boundaries.
 - Policy parameters live in **one** dataclass, `policy/params.py`, serialisable
   to and from JSON. The tuner writes that JSON; nothing else configures policy.

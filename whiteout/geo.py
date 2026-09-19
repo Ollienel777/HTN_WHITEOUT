@@ -30,9 +30,15 @@ Two guards make the rule mechanical rather than aspirational:
 * :class:`~whiteout.types.RecordError` on a record whose ``lat``/``lon`` is
   out of geodetic range. A swapped pair at the strait is ``lat=-94.84``, which
   is not a latitude, so the classic mix-up fails loudly at construction.
-* ``tests/test_geo.py`` walks ``whiteout/`` with :mod:`ast` and fails if any
-  module other than this one defines the ellipsoid constants or its own
-  geodetic conversion.
+* ``tests/test_geo.py`` walks **every Python file in the repository** with
+  :mod:`ast` and fails if any of them spells an ellipsoid-scale constant,
+  defines a name that reads as a frame conversion, or calls trigonometry at
+  all. Two files are exempt and no others: this module, and the guard itself,
+  which needs both to name the rule. The viewer's JavaScript copy
+  (``viz/viewer.js``) is outside :mod:`ast`'s reach, so it is pinned
+  numerically instead — ``tests/test_viz_shell.py`` runs its projection under
+  ``node`` and compares the metres it returns to
+  :func:`geodetic_to_local`'s.
 
 The tangent-plane approximation
 -------------------------------
@@ -53,12 +59,69 @@ evaluated at the *origin's* latitude:
 
 :func:`geodetic_to_local` is the algebraic inverse of that, with the radii
 taken at the same origin latitude, so the pair round-trips to floating-point
-noise rather than to the approximation's error. The approximation itself is a
-first-order expansion of the geodesic whose error grows as the square of the
-range: under a centimetre at 3 km and under a decimetre at 10 km at this
-latitude. The strait is 25 km × 2 km, so a corner-to-corner projection is
-still well inside the pose error, and a full geodesic solver would buy
-nothing.
+noise rather than to the approximation's error. **That round trip is not a
+statement about accuracy**: both directions share the same model, so the
+model's error cancels and cannot show up there.
+
+How wrong the model is, and where that matters
+----------------------------------------------
+
+The two axes are scaled independently and the cross term is dropped, so an
+East displacement produces no change in latitude — but on the ellipsoid,
+moving East at 71.99° N curves poleward. The error is therefore **not
+symmetric**: it is essentially zero along the meridian and quadratic along the
+parallel, which is the strait's long axis and the axis ``ARENA.md`` §5 scores
+*accuracy* on. A mixed offset is worse than either alone, because the dropped
+cross term couples them. Measured against an exact ENU → ECEF → geodetic round trip and
+against a Vincenty direct solution, which agree with each other to under a
+centimetre (``tests/test_geo.py`` pins these):
+
+===================  ==============
+offset from origin   position error
+===================  ==============
+3 km North           0.004 m
+10 km North          0.055 m
+500 m East           0.060 m
+1 km East            0.240 m
+1 km E, 1 km N       0.538 m
+2 km East            0.962 m
+3 km East            2.164 m
+10 km East           24.039 m
+12.5 km E, 1 km N    38.033 m
+===================  ==============
+
+**The verdict: this is fine for a nearby origin and is not fine for a
+strait-wide one.** The error passes 0.1 m at about 650 m East, 1 m at about
+2 km East, and reaches 38 m at the far corner of a 25 km × 2 km arena — which
+is not inside the pose error, and which would be posted as a confident wrong
+answer on the scored axis. So the rule for callers is:
+
+**Project about an origin near the point.** A camera converting its own
+detection (#66) has its lat/lon to hand and works at detection range, where
+the error is centimetres to a couple of metres; that is what
+:func:`enu_to_geodetic`'s positional signature is for. Taking
+:data:`ARENA_ORIGIN` and offsetting 10 km down the channel is the case this
+table forbids.
+
+If a strait-wide origin is ever needed, the fix is to carry the two
+second-order terms rather than to swap in a geodesic solver:
+
+.. math::
+
+    \\Delta\\varphi = \\frac{\\text{north}}{M}
+        - \\frac{\\text{east}^2 \\tan\\varphi}{2 M N}
+    \\qquad
+    \\Delta\\lambda = \\frac{\\text{east}}{N\\cos\\varphi}
+        \\left(1 + \\frac{\\text{north}\\tan\\varphi}{M}\\right)
+
+Measured: the first term alone takes 10 km East from 24.039 m to 0.085 m, but
+still leaves 5.843 m at the corner — the cross term is what the corner needs,
+and the pair together bring it to 0.169 m. That change is deliberately **not**
+made here. It is not a one-liner: :func:`geodetic_to_local` would have to
+solve for ``north`` and ``east`` rather than divide, and the exact round trip
+that :func:`geodetic_to_local` and its test rely on has to move with it. #66
+and #67 are being written against this signature now, and the table above
+tells them what they are getting; widening it is a separate change.
 
 **Altitude is not this module's.** Nothing here reads or returns one. The
 arena reports altitude in more than one datum and settling which is issue #76,
@@ -96,12 +159,16 @@ WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 
 #: Below this East radius, in metres per radian, a position is at a pole and
-#: has no usable local frame. One metre per radian is about six metres of
-#: East around the *whole* parallel, so nothing in an arena is near it —
-#: while a bare ``> 0`` test is not enough, because ``cos(radians(90.0))`` is
-#: 6.1e-17 rather than zero and would hand the caller a frame in which a
-#: metre East is ninety thousand degrees.
-_POLE_EAST_RADIUS_M = 1.0
+#: has no usable local frame. A bare ``> 0`` test is not enough, because
+#: ``cos(radians(90.0))`` is 6.1e-17 rather than zero and would hand the
+#: caller a frame in which one metre East is a hundred billion degrees. But 1.0
+#: m/rad is barely better — it is one metre East to 57°, and it only bites
+#: within about a millimetre of the pole. A thousand metres per radian is
+#: 0.06° of longitude per metre East, still absurd, and it draws the line
+#: about 0.01° (roughly a kilometre) from the pole, which is what the guard
+#: is meant to mean. Nothing in an arena at 72° N is within nine degrees of
+#: it.
+_POLE_EAST_RADIUS_M = 1.0e3
 
 
 class GeoError(ValueError):
