@@ -60,7 +60,13 @@ __all__ = [
 
 #: The episode log schema version. Bump on any change to the record shape,
 #: and expect every artifact under ``artifacts/`` to be regenerated.
-SCHEMA_VERSION = 1
+#:
+#: Version 2 moved every position from a local x/y frame to the geodetic
+#: ``lat``/``lon`` that ``SPEC.md`` §5 names as the frame of record. A
+#: version-1 line is refused rather than read as version 2: the two shapes
+#: differ by field *name*, so a reader that guessed would be guessing about
+#: the one thing the arena scores.
+SCHEMA_VERSION = 2
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")
