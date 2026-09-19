@@ -83,11 +83,25 @@ finding:
 - `loop: fixer dispatched @ SHA7 — JOB`, which is posted with every fixer
   dispatch and is what the fix caps count
 
-**The open set** is every Critical and Medium ID raised on the PR, minus those
-whose latest semi-cold verdict is `closed` or `withdrawn`. Build it from the
-round reviews, meaning the reviews whose body starts with a round marker. A
-scratch script is fine. **The open set, not the marker type, decides whether
-anything is open.**
+**The open set** is every **Critical** ID raised on the PR, minus those whose
+latest semi-cold verdict is `closed` or `withdrawn`. Build it from the round
+reviews, meaning the reviews whose body starts with a round marker. A scratch
+script is fine. **The open set, not the marker type, decides whether anything
+is open.**
+
+**A Medium does not block.** It is recorded and left. Before settling a PR
+that has any, post one `loop: known limitations @ SHA7` comment listing each
+open Medium with its ID, its `file:line` and one sentence of consequence, so
+the cost is on the PR where a later reader meets it. Do not file cards for
+them: at this scale that is a backlog nobody reads.
+
+Fix a Medium only when a fixer is already on the PR for a Critical, a check or
+a human comment, and the fix is genuinely cheap. Otherwise leave it.
+
+**Why:** an event this size cannot afford a round per Medium, and the rounds
+that found them said so themselves. A Critical is wrong behaviour or a false
+claim shipping to `main`; a Medium is a cost someone pays later, and later may
+never come. Operator decision, 2026-09-19T12:25Z.
 
 Read the latest round marker, and its SHA:
 

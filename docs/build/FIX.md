@@ -83,9 +83,10 @@ Apply `review-settled`, and post `settled: @ SHA7`, only when **all** of these
 hold at the current head:
 
 - **The latest round is a cold round at this head**, and it raised no
-  Critical and no Medium.
-- **The open set is empty.** Every Critical and Medium ever raised has been
-  closed or withdrawn by a semi-cold verdict.
+  Critical.
+- **The open set is empty** ([open set](REVIEW.md#what-a-prs-state-is-made-of)):
+  every Critical ever raised has been closed or withdrawn by a semi-cold
+  verdict. Open Mediums do not block, and are recorded on the PR first.
 - **The checks pass** ([checks](REVIEW.md#checks)): every run completed green,
   and at least one exists.
   - **Pre-CI exception:** while `origin/main` has no workflow and the PR
@@ -102,10 +103,12 @@ leans on the gate's demo-path smoke test and on the rehearsals
 
 ## Freeze the head once nothing is open
 
-**Once the open set is empty, only a new Critical or Medium, a failing check, a
-conflict, or a human request may change the head.** A nit fix would earn
-another cold round, which can find another nit. A converged PR can cycle that
-way until the ceiling stops it. Nits wait for a polish card, or are left alone.
+**Once the open set is empty, only a new Critical, a failing check, a conflict,
+or a human request may change the head.** A Medium or nit fix would earn
+another cold round, which can find another Medium or nit. A converged PR can
+cycle that way until the ceiling stops it — which is how this brief spent
+seven rounds on one PR before Mediums stopped blocking. Mediums are recorded
+([open set](REVIEW.md#what-a-prs-state-is-made-of)); nits are left alone.
 
 ## When a PR cannot be fixed
 
