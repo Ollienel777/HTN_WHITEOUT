@@ -121,6 +121,19 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
+def _running_from(venv: Path) -> bool:
+    """Is the interpreter executing this gate itself inside ``venv``?
+
+    ``sys.executable`` and not ``PY``: ``PY`` is reassigned to the fallback
+    environment on the way in, and that one is ours to rebuild. The question
+    here is only whether deleting ``venv`` would saw off the branch we sit on.
+    """
+    try:
+        return Path(sys.executable).resolve().is_relative_to(venv.resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _resolved_whiteout(python: str) -> Path | None:
     """Where ``import whiteout`` lands for ``python``, asked from outside the repo.
 
@@ -264,14 +277,37 @@ def _bootstrap_worktree_env() -> str | None:
     permanently, and neither message said to delete anything. So an adopted
     environment that will not take the install is thrown away and rebuilt
     once, and a failure that survives that names the directory to remove.
+
+    Two things the rebuild must not do. It must not delete the environment the
+    gate is itself running from -- ``.venv`` is the conventional name, so a
+    developer who launched the gate from their own ``<repo>/.venv`` would watch
+    it be destroyed underneath them. And it must not retry against a carcass:
+    ``ignore_errors=True`` leaves a locked ``python.exe`` behind, and
+    ``_build_worktree_env`` treats that one file as evidence that a usable
+    environment exists, so the retry would reinstall into a gutted tree and
+    report a second, more confusing exit code. A partial deletion ends the
+    attempt and says what survived.
     """
     adopted = _venv_python(VENV_DIR).is_file()
     failure = _build_worktree_env()
     if failure is None:
         return None
     if adopted:
+        if _running_from(VENV_DIR):
+            return (
+                f"{failure} -- this gate is running from {sys.executable}, inside "
+                f"{VENV_DIR}, so it will not delete it; rerun from an interpreter "
+                f"outside that directory to have it rebuilt"
+            )
         print(f"  ! {failure}; rebuilding {VENV_DIR.name}/ from scratch", flush=True)
         shutil.rmtree(VENV_DIR, ignore_errors=True)
+        survivor = _venv_python(VENV_DIR)
+        if survivor.exists():
+            return (
+                f"{failure}, and {VENV_DIR} could not be emptied: {survivor} survived, "
+                f"most likely locked by a running process -- close it, delete "
+                f"{VENV_DIR} and rerun"
+            )
         failure = _build_worktree_env()
         if failure is None:
             return None

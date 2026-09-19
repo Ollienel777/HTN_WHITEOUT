@@ -314,6 +314,63 @@ def test_gate_names_the_venv_when_the_rebuild_also_fails(
     assert "delete" in failure
 
 
+def test_gate_will_not_delete_the_venv_it_is_running_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R4-1: `.venv` is the conventional name, so it may be the gate's own.
+
+    A developer debugging by hand launches the gate from `<repo>/.venv`. The
+    rebuild would then delete the interpreter mid-run. It refuses, and says so.
+    """
+    gate = _load_gate()
+    venv = tmp_path / ".venv"
+    python = gate._venv_python(venv)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    keep = venv / "keep.marker"
+    keep.write_text("the developer's own environment", encoding="utf-8")
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+    monkeypatch.setattr(gate.sys, "executable", str(python))
+    calls = _recorder(gate, monkeypatch, returncode=lambda command: 2)
+
+    failure = gate._bootstrap_worktree_env()
+
+    assert keep.exists(), "the gate deleted the environment it is running from"
+    assert failure is not None
+    assert "running from" in failure
+    assert str(venv) in failure
+    assert len([command for command, _ in calls if "pip" in command]) == 1
+
+
+def test_gate_stops_when_the_rebuild_cannot_empty_the_venv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R4-1: a surviving `python.exe` is not evidence of a usable environment.
+
+    `rmtree(ignore_errors=True)` leaves a locked interpreter behind, and
+    `_build_worktree_env` builds only `if not python.is_file()`. Retrying then
+    installs into a gutted tree and reports a second, unrelated exit code.
+    """
+    gate = _load_gate()
+    venv = tmp_path / ".venv"
+    python = gate._venv_python(venv)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+    calls = _recorder(gate, monkeypatch, returncode=lambda command: 2)
+    # Stand in for the lock Windows puts on a running interpreter.
+    monkeypatch.setattr(gate.shutil, "rmtree", lambda path, ignore_errors=False: None)
+
+    failure = gate._bootstrap_worktree_env()
+
+    assert failure is not None
+    assert str(python) in failure, "the survivor is not named"
+    assert str(venv) in failure and "delete" in failure
+    assert len([command for command, _ in calls if "pip" in command]) == 1, (
+        "reinstalled into an environment the rebuild failed to delete"
+    )
+
+
 def test_gate_rejects_a_frozen_copy_of_the_source_inside_this_worktree() -> None:
     """Issue #53: containment alone accepts the gate's own build outputs.
 
