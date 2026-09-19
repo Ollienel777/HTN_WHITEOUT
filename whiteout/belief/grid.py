@@ -51,38 +51,40 @@ The vessel spawns at random and walks at random, with no evasion (``ARENA.md``
 convenient one — there is no adversary to model — and it makes the rate the
 only thing to choose.
 
-**Speed is a parameter, not a constant.** The constructor takes ``speed_mps``
-and :meth:`ChannelBeliefGrid.speed_mps` reports what a field is running at;
-:data:`DEFAULT_SPEED_MPS` is only its default, **8.0 m/s** — about 15.5 kn,
-which covers essentially anything a small boat can do. It is set from the
-shape of the loss rather than from a point estimate, because **there is no
-measurement of the vessel's speed to set it from**:
+**Speed is a parameter, but its default is now sourced.** The constructor
+takes ``speed_mps`` and :meth:`ChannelBeliefGrid.speed_mps` reports what a
+field is running at; :data:`DEFAULT_SPEED_MPS` is its default, **3.0 m/s** —
+about 6 kn. That is not an estimate chosen from loss asymmetry. **It is the
+constant the simulator moves the vessel with**, and three independent
+witnesses agree on it:
 
-- ``ARENA.md`` §5's ``speed: 6.5`` is **a field inside a payload we POST**.
-  It is the example body of a ``POST /api/tracks`` update — an illustration
-  of *our own submission format*, the number we fill in when reporting a
-  track we detected. It is not a measurement of the vessel and carries no
-  information about how fast it moves.
-- **2.96 m/s on course 304.5°** — the operator's reading off the live sim,
-  reported verbally during the build and **not recorded anywhere in this
-  repository**. It came from displacement over elapsed time on a
-  randomly-walking target, and a chord is never longer than the arc it
-  subtends, so a measurement of that shape is **structurally a lower bound**
-  — worse the more the vessel turns.
+- ``SHIP_SPEED=3.0`` — ``GET http://<sim>:8090/api/env`` on the live arena.
+- ``private: double speed{3.0};   // ~6 knots`` —
+  ``sim/plugins/VesselPathPlugin.cc:150`` in the sponsor's public repository,
+  ``github.com/Dominion-Dynamics/arctic-sim``.
+- **2.96 m/s** measured over a 12 s baseline off the running sim, which now
+  corroborates the other two rather than standing alone.
 
-So the value is chosen on the asymmetry of being wrong, which is not
-symmetric at all. **Over-diffusing** flattens the field and degrades the
-policy toward a coverage search: that is #27, the designed fallback, so the
-failure is graceful, gradual, visible, and undone by the next detection.
-**Under-diffusing** leaves belief confidently tight around the **wrong
-water** — the fleet concentrates there and stops searching the water the
-vessel is actually in. One direction costs sharpness; the other loses the
-vessel.
+The plugin advances the vessel with ``s += speed * dir * dt``, so 3.0 m/s is
+the **exact along-path speed**. An earlier revision of this docstring set the
+default to 8.0 m/s on the argument that the only available figure was a chord
+measurement of a turning target and therefore a lower bound that should
+*raise* the parameter. That argument is sound about a measurement and does not
+apply to a configuration value, which is why it no longer governs.
 
-**Still wanted:** the speed re-measured over a long baseline once the sim is
-up, which is one argument to the constructor. That number would be a **floor
-too** — a straight-line measurement of a turning vessel always is — so it
-should raise this parameter, not simply replace it.
+``ARENA.md`` §5's ``speed: 6.5`` remains irrelevant either way: it is a field
+inside a payload we ``POST``, an illustration of *our own submission format*,
+and carries no information about how fast the vessel moves.
+
+**Why the size of this matters.** Variance goes as ``v²``, so the old default
+over-diffused by ``(8.0 / 3.0)² ≈ 7.1×`` in area per unit time. The previous
+revision called over-diffusion graceful, because a flattened field degrades the
+policy toward the coverage search of #27. That is true of the *failure mode*
+and beside the point for the *cost*: **detection speed is one of the seven
+scored criteria** (``ARENA.md`` §5), and a belief smeared over seven times the
+water is directly slower to search. Under-diffusing still loses the vessel and
+is still the worse direction — but 3.0 is not a tighter guess, it is the
+right number, so the asymmetry no longer has to be traded against anything.
 
 **Heading persistence.** A boat is not a Brownian particle: it holds a course
 for a while. With speed ``v`` and a heading that decorrelates over a time
@@ -91,20 +93,20 @@ velocity variance is ``v² / 2`` and the per-axis diffusion coefficient is
 
 .. math::
 
-    D = \\frac{v^2 \\tau}{2} = \\frac{8.0^2 \\times 30}{2} = 960\\ \\mathrm{m^2/s}
+    D = \\frac{v^2 \\tau}{2} = \\frac{3.0^2 \\times 30}{2} = 135\\ \\mathrm{m^2/s}
 
 so the variance a tick of length ``dt`` adds to each axis is
 
 .. math::
 
     \\sigma^2 = 2 D\\, dt = v^2 \\tau\\, dt
-    = 8.0^2 \\times 30 \\times 1.0 = 1920\\ \\mathrm{m^2}
+    = 3.0^2 \\times 30 \\times 1.0 = 270\\ \\mathrm{m^2}
 
-**The number, stated: σ = 43.8 m per axis per 1 s tick.** Equivalently 339 m
-after a minute, 1.07 km after ten minutes, and 2.6 km after an hour — at which
-point belief is smeared over a tenth of the strait and the field is doing what
-it should. ``tests/test_belief_grid.py`` asserts all four of those figures
-against the arithmetic *and* against this docstring's own text, so neither can
+**The number, stated: σ = 16.4 m per axis per 1 s tick.** Equivalently 127 m
+after a minute, 402 m after ten minutes, and 986 m after an hour — at which
+point belief is smeared over a twenty-fifth of the strait and the field is
+doing what it should. ``tests/test_belief_grid.py`` asserts all four of those
+figures against the arithmetic *and* against this docstring's own text, so neither can
 drift from the other.
 
 ``tau`` itself is a **judgement call and not a derivation**, and an earlier
@@ -178,9 +180,10 @@ DEFAULT_ACROSS_M = 100.0
 #: measurement. No measurement of the vessel's speed exists: ``ARENA.md`` §5's
 #: ``speed: 6.5`` is a field inside a payload *we* POST, and the one verbal
 #: observation (2.96 m/s) is a chord over elapsed time and so structurally a
-#: lower bound. 8.0 m/s, about 15.5 kn, is set from the loss asymmetry — see
-#: the module docstring. Callers with a better number pass ``speed_mps``.
-DEFAULT_SPEED_MPS = 8.0
+#: lower bound. 3.0 m/s, about 6 kn, is the simulator's own ``SHIP_SPEED`` and
+#: the ``VesselPathPlugin`` constant — see the module docstring for the three
+#: sources. Callers with a better number pass ``speed_mps``.
+DEFAULT_SPEED_MPS = 3.0
 
 #: Heading decorrelation time, seconds. A boat holds a course; this is how
 #: long for. Together with the speed it fixes the diffusion coefficient. A
