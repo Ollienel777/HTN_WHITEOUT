@@ -762,7 +762,14 @@ def test_a_pose_reports_no_measurement_time_by_default() -> None:
     without one.
     """
     pose = Pose(
-        asset_id="a", cls="quad", t=4.0, x=0.0, y=0.0, z=0.0, heading=0.0, speed=0.0,
+        asset_id="a",
+        cls="quad",
+        t=4.0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        heading=0.0,
+        speed=0.0,
         energy_used=0.0,
     )
     assert pose.measured_t is None
@@ -785,7 +792,15 @@ def test_a_measurement_time_round_trips_through_the_log(tmp_path: Path) -> None:
 def test_an_int_measurement_time_is_coerced_like_every_other_float() -> None:
     """The gate compares bytes, so ``measured_t=0`` may not serialise as ``0``."""
     integral = Pose(
-        asset_id="a", cls="quad", t=0, x=0, y=0, z=0, heading=0, speed=0, energy_used=0,
+        asset_id="a",
+        cls="quad",
+        t=0,
+        x=0,
+        y=0,
+        z=0,
+        heading=0,
+        speed=0,
+        energy_used=0,
         measured_t=0,
     )
     assert isinstance(integral.measured_t, float)

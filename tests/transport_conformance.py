@@ -385,8 +385,7 @@ def check_a_reported_measurement_time_is_finite_and_never_after_its_tick(
                     f"measured_t={measured_t!r}, not a float"
                 )
                 assert math.isfinite(measured_t), (
-                    f"{where} tick {tick}: pose {pose.asset_id} reports "
-                    f"measured_t={measured_t!r}"
+                    f"{where} tick {tick}: pose {pose.asset_id} reports measured_t={measured_t!r}"
                 )
                 assert measured_t <= pose.t, (
                     f"{where} tick {tick}: pose {pose.asset_id} was measured at "

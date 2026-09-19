@@ -367,9 +367,7 @@ class _BackstampingTransport(KinematicTransport):
 
 def _restamp(observation: WorldObservation, measured_t: float) -> WorldObservation:
     """The same observation, with every pose's ``measured_t`` overwritten."""
-    poses = tuple(
-        replace(pose, measured_t=measured_t) for pose in observation.poses
-    )
+    poses = tuple(replace(pose, measured_t=measured_t) for pose in observation.poses)
     return WorldObservation(t=observation.t, poses=poses, reports=observation.reports)
 
 
