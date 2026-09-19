@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "note": "Synthetic Bellot Strait frames from whiteout.vision.scene, seed 66, 1 per camera. NOT arena imagery: no frame from Dominion Dynamics' render exists in this repository. Regenerate with scripts/score_detector.py --write-fixtures.",
+  "frames": [
+    {
+      "file": "quadcopter-0000.pgm",
+      "asset_id": "quadcopter",
+      "camera": "quadcopter",
+      "seq": 0,
+      "t": 0.0,
+      "pose": {
+        "lat_deg": 71.99,
+        "lon_deg": -94.5,
+        "alt_m": 120.0,
+        "yaw_deg": 90.0,
+        "pitch_deg": -55.0,
+        "roll_deg": 0.0
+      },
+      "ground_alt_m": 0.0,
+      "label": {
+        "present": true,
+        "px": 497.7028727857014,
+        "py": 315.39867890261354,
+        "tolerance_px": 18.751670290971692
+      }
+    },
+    {
+      "file": "fixed-wing-0000.pgm",
+      "asset_id": "fixed-wing",
+      "camera": "fixed-wing",
+      "seq": 0,
+      "t": 0.0,
+      "pose": {
+        "lat_deg": 71.99,
+        "lon_deg": -94.52,
+        "alt_m": 200.0,
+        "yaw_deg": 90.0,
+        "pitch_deg": -35.0,
+        "roll_deg": 0.0
+      },
+      "ground_alt_m": 0.0,
+      "label": {
+        "present": false,
+        "px": null,
+        "py": null,
+        "tolerance_px": 12.0
+      }
+    },
+    {
+      "file": "tower-1-0000.pgm",
+      "asset_id": "tower-1",
+      "camera": "tower",
+      "seq": 0,
+      "t": 0.0,
+      "pose": {
+        "lat_deg": 71.985,
+        "lon_deg": -94.4,
+        "alt_m": 60.0,
+        "yaw_deg": 75.0,
+        "pitch_deg": -22.0,
+        "roll_deg": 0.0
+      },
+      "ground_alt_m": 0.0,
+      "label": {
+        "present": true,
+        "px": 328.6530380018484,
+        "py": 222.03579228903038,
+        "tolerance_px": 15.442911663827912
+      }
+    },
+    {
+      "file": "tower-2-0000.pgm",
+      "asset_id": "tower-2",
+      "camera": "tower",
+      "seq": 0,
+      "t": 0.0,
+      "pose": {
+        "lat_deg": 71.995,
+        "lon_deg": -94.6,
+        "alt_m": 60.0,
+        "yaw_deg": 250.0,
+        "pitch_deg": -22.0,
+        "roll_deg": 0.0
+      },
+      "ground_alt_m": 0.0,
+      "label": {
+        "present": false,
+        "px": null,
+        "py": null,
+        "tolerance_px": 12.0
+      }
+    }
+  ]
+}

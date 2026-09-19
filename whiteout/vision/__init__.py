@@ -13,9 +13,18 @@ confined to water.
 | :mod:`~whiteout.vision.projection` | pixel → ENU ray → water plane → lat/lon |
 | :mod:`~whiteout.vision.tower` | AntennaTracker servo PWM → camera orientation |
 | :mod:`~whiteout.vision.frames` | MJPEG from a live camera or a recording of one |
+| :mod:`~whiteout.vision.imagery` | frames as *pixels*: the real source, and the fake |
+| :mod:`~whiteout.vision.detect` | a pixel, a confidence and the pose it was seen from |
+| :mod:`~whiteout.vision.scene` | a synthetic channel, to measure the detector against |
 
-The detector itself is not here: that needs the arena's imagery, and it has
-its own ticket. What is here is everything around it, which needs none.
+The detector (issue #66) is here now, and so is the thing it is measured
+against. **No arena imagery exists in this repository** — there is no route to
+the arena from the machine this was built on — so
+:mod:`~whiteout.vision.scene` renders the channel issue #66 describes and
+``scripts/score_detector.py`` scores against that. Every rate in the pull
+request is a rate on those frames. Measuring on real ones is a human action
+and is outstanding; :mod:`~whiteout.vision.imagery` is shaped so that it is
+running the script at a directory.
 """
 
 from __future__ import annotations
@@ -28,6 +37,12 @@ from whiteout.vision.camera import (
     CameraModel,
     VisionError,
 )
+from whiteout.vision.detect import (
+    DEFAULT_PARAMS,
+    DetectorParams,
+    VesselDetection,
+    detect_vessel,
+)
 from whiteout.vision.frames import (
     DEFAULT_FPS,
     Frame,
@@ -35,6 +50,19 @@ from whiteout.vision.frames import (
     live_frames,
     read_mjpeg,
     recorded_frames,
+)
+from whiteout.vision.imagery import (
+    DEFAULT_FIXTURE_DIR,
+    FixtureFrames,
+    FrameSource,
+    Label,
+    LumaFrame,
+    MjpegFrames,
+    decode_jpeg_luma,
+    frame_source_from_env,
+    read_pgm,
+    write_fixtures,
+    write_pgm,
 )
 from whiteout.vision.projection import (
     EARTH_MEAN_RADIUS_M,
@@ -53,6 +81,15 @@ from whiteout.vision.projection import (
     pixel_ray_enu,
     project_pixel_to_ground,
 )
+from whiteout.vision.scene import (
+    CLEAR,
+    FOGGY,
+    HEAVY_FOG,
+    RenderedScene,
+    SceneParams,
+    at_fog,
+    render_scene,
+)
 from whiteout.vision.tower import (
     TOWER_PAN_TILT,
     PanTiltCalibration,
@@ -63,9 +100,14 @@ from whiteout.vision.tower import (
 
 __all__ = [
     "CAMERAS",
+    "CLEAR",
+    "DEFAULT_FIXTURE_DIR",
+    "DEFAULT_PARAMS",
     "DEFAULT_FPS",
     "EARTH_MEAN_RADIUS_M",
     "FIXED_WING_CAMERA",
+    "FOGGY",
+    "HEAVY_FOG",
     "MAX_FLAT_PLANE_RANGE_ERROR",
     "QUADCOPTER_CAMERA",
     "TOWER_CAMERA",
@@ -75,16 +117,29 @@ __all__ = [
     "WGS84_F",
     "CameraModel",
     "CameraPose",
+    "DetectorParams",
+    "FixtureFrames",
     "Frame",
     "FrameError",
+    "FrameSource",
     "GeoPoint",
+    "Label",
+    "LumaFrame",
+    "MjpegFrames",
     "PanTiltCalibration",
     "ProjectionError",
+    "RenderedScene",
+    "SceneParams",
     "ServoRange",
     "Vec3",
+    "VesselDetection",
     "VisionError",
+    "at_fog",
     "camera_basis",
+    "decode_jpeg_luma",
+    "detect_vessel",
     "enu_to_geodetic",
+    "frame_source_from_env",
     "horizon_range_m",
     "live_frames",
     "max_flat_plane_range_m",
@@ -92,6 +147,10 @@ __all__ = [
     "pixel_ray_enu",
     "project_pixel_to_ground",
     "read_mjpeg",
+    "read_pgm",
     "recorded_frames",
+    "render_scene",
     "tower_camera_pose",
+    "write_fixtures",
+    "write_pgm",
 ]
