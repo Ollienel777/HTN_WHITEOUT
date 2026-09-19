@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WHITEOUT run viewer</title>
+<meta name="description" content="Replays a WHITEOUT episode log: one JSON record per tick, over Arctic terrain.">
+<!-- No build step, no bundler, no package manager. Two stylesheets and two
+     classic scripts, so that this file opens from file:// as well as it does
+     from `whiteout serve` (SPEC.md section 5). A module script would not: the
+     file:// origin is opaque, and the module fetch fails CORS. -->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="viewer.css">
+</head>
+
+<body data-state="empty">
+
+<!-- ── topbar ─────────────────────────────────────────────── 48px ── -->
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">WHITEOUT</span>
+    <span class="brand-sub">run viewer</span>
+  </div>
+
+  <dl class="meta" id="meta">
+    <div class="meta-slot"><dt>seed</dt><dd class="num" data-meta="seed">&mdash;</dd></div>
+    <div class="meta-slot"><dt>transport</dt><dd class="num" data-meta="transport">&mdash;</dd></div>
+    <div class="meta-slot"><dt>policy</dt><dd class="num" data-meta="policy">&mdash;</dd></div>
+    <div class="meta-slot"><dt>terrain</dt><dd class="num" data-meta="terrain">&mdash;</dd></div>
+  </dl>
+
+  <!-- ScoreDial x4. The arc and the value are driven by the scorer; until it
+       lands the value is an em dash, never a zero — a number on this screen
+       is a number the system produced (DESIGN.md "Data and copy voice"). -->
+  <div class="dials" id="dials" role="group" aria-label="score axes">
+    <div class="dial-row" id="dial-row"></div>
+    <div class="dial-row" data-skeleton>
+      <span class="sk sk-dial"></span><span class="sk sk-dial"></span>
+      <span class="sk sk-dial"></span><span class="sk sk-dial"></span>
+    </div>
+  </div>
+</header>
+
+<!-- ── stage: field + rail ────────────────────────────────────────── -->
+<main class="stage">
+
+  <section class="field" aria-label="episode field">
+    <canvas id="field-canvas" class="field-canvas"
+            aria-label="Field: terrain, belief and assets over the episode extent"
+            role="img"></canvas>
+
+    <!-- The one hero readout. Beat 3 (issue #20) fills it; the shell only
+         reserves and positions it. -->
+    <div class="field-badge" id="field-badge" hidden></div>
+
+    <div class="field-overlay" id="field-overlay" aria-live="polite">
+
+      <!-- state 1 of 7 — no log loaded -->
+      <section class="state" data-view="empty">
+        <h1 class="state-title">no episode loaded</h1>
+        <p class="state-body">
+          The viewer replays an episode log: one JSON record per tick, written
+          by <code class="num">whiteout run</code>. Load the bundled episode,
+          or open a log from disk.
+        </p>
+        <div class="state-actions">
+          <button type="button" class="btn btn-primary" data-act="load-bundled">
+            Load the bundled episode
+          </button>
+          <button type="button" class="btn" data-act="open-file">
+            Open a log file&hellip;
+          </button>
+        </div>
+        <p class="state-note num">fixtures/episodes/demo.jsonl</p>
+      </section>
+
+      <!-- state 2 of 7 — log loading. A skeleton in the shape of the final
+           layout: the field block here, dial blocks in the topbar, card
+           blocks in the rail. Never a spinner. -->
+      <section class="state state-loading" data-view="loading">
+        <p class="state-note num" data-loading-source>reading the episode log</p>
+        <span class="sk sk-field"></span>
+      </section>
+
+      <!-- state 3 of 7 — log malformed -->
+      <section class="state" data-view="error">
+        <h1 class="state-title" data-error-title>episode log is malformed</h1>
+        <p class="state-body" data-error-summary>
+          The log stopped validating and nothing after the failing line was read.
+        </p>
+        <dl class="kv kv-error">
+          <div class="kv-row">
+            <dt>source</dt><dd class="num" data-error-source>&mdash;</dd>
+          </div>
+          <div class="kv-row">
+            <dt>failing line</dt><dd class="num" data-error-line>&mdash;</dd>
+          </div>
+          <div class="kv-row">
+            <dt>reader schema</dt><dd class="num" data-error-schema>&mdash;</dd>
+          </div>
+        </dl>
+        <pre class="state-detail num" data-error-detail></pre>
+        <div class="state-actions">
+          <button type="button" class="btn btn-primary" data-act="open-file">
+            Open another log&hellip;
+          </button>
+          <button type="button" class="btn" data-act="load-bundled">
+            Load the bundled episode
+          </button>
+        </div>
+      </section>
+
+    </div>
+
+    <input type="file" id="file-input" accept=".jsonl,.json,.log,.txt"
+           class="visually-hidden" tabindex="-1" aria-hidden="true"
+           aria-label="episode log file">
+  </section>
+
+  <aside class="rail" aria-label="episode detail">
+
+    <!-- CONTACTS — states 6 and 7 of 7 live here: zero contacts, and many.
+         The list scrolls; the field never does. -->
+    <section class="panel panel-contacts">
+      <header class="panel-head">
+        <h2>contacts</h2>
+        <span class="panel-count num" data-count="contacts">&mdash;</span>
+      </header>
+      <div class="panel-body panel-scroll" id="contacts-body">
+        <p class="panel-empty" data-empty="contacts">
+          No contacts. A detection, or a tower cue on the strait, posts one here.
+        </p>
+        <ul class="contact-list" id="contact-list"></ul>
+      </div>
+      <div class="panel-body" data-skeleton>
+        <span class="sk sk-line"></span>
+        <span class="sk sk-block"></span>
+      </div>
+    </section>
+
+    <!-- FLEET -->
+    <section class="panel panel-fleet">
+      <header class="panel-head">
+        <h2>fleet</h2>
+        <span class="panel-count num" data-count="fleet">&mdash;</span>
+      </header>
+      <div class="panel-body panel-scroll" id="fleet-body">
+        <p class="panel-empty" data-empty="fleet">
+          No assets in this tick. The transport reports the fleet each tick.
+        </p>
+        <ul class="fleet-list" id="fleet-list"></ul>
+      </div>
+      <div class="panel-body" data-skeleton>
+        <span class="sk sk-line"></span>
+        <span class="sk sk-line"></span>
+        <span class="sk sk-line"></span>
+      </div>
+    </section>
+
+    <!-- INSPECTOR -->
+    <section class="panel panel-inspector">
+      <header class="panel-head">
+        <h2>inspector</h2>
+        <span class="panel-count num" data-count="inspector">&mdash;</span>
+      </header>
+      <div class="panel-body panel-scroll">
+        <p class="panel-empty" data-empty="inspector">
+          Nothing selected. Pick a fleet row to read its pose.
+        </p>
+        <dl class="kv" id="inspector-kv"></dl>
+      </div>
+      <div class="panel-body" data-skeleton>
+        <span class="sk sk-line"></span>
+        <span class="sk sk-block"></span>
+      </div>
+    </section>
+
+  </aside>
+</main>
+
+<!-- ── transport bar ──────────────────────────────────────── 64px ── -->
+<footer class="transport">
+  <div class="transport-controls">
+    <!-- The primary action, and the only accent-filled control on screen
+         once an episode is loaded (DESIGN.md "Layout"). -->
+    <button type="button" class="btn-glyph btn-primary" id="play"
+            aria-label="play" data-act="play" disabled></button>
+    <button type="button" class="btn-glyph" id="step-back"
+            aria-label="step back one tick" data-act="step-back" disabled></button>
+    <button type="button" class="btn-glyph" id="step-forward"
+            aria-label="step forward one tick" data-act="step-forward" disabled></button>
+  </div>
+
+  <div class="scrub">
+    <input type="range" id="scrub" class="scrub-input" min="0" max="0" value="0"
+           step="1" aria-label="episode position, in ticks" disabled>
+  </div>
+
+  <div class="transport-readout">
+    <span class="clock num"><span data-clock="t">0:00</span><span
+      class="clock-sep">/</span><span data-clock="duration">0:00</span></span>
+    <span class="run-state" data-run-state hidden></span>
+  </div>
+
+  <div class="speeds" role="group" aria-label="replay speed">
+    <button type="button" class="chip" data-speed="1" aria-pressed="true" disabled>1&times;</button>
+    <button type="button" class="chip" data-speed="5" aria-pressed="false" disabled>5&times;</button>
+    <button type="button" class="chip" data-speed="20" aria-pressed="false" disabled>20&times;</button>
+    <button type="button" class="chip" data-speed="100" aria-pressed="false" disabled>100&times;</button>
+  </div>
+</footer>
+
+<!-- ── templates ─────────────────────────────────────────────────────
+     Cloned by viewer.js. Kept as markup rather than built from strings so
+     that the shell's structure is readable in one file. -->
+
+<template id="tpl-dial">
+  <div class="dial">
+    <svg class="dial-arc" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <circle class="dial-track" cx="16" cy="16" r="13"></circle>
+      <circle class="dial-fill" cx="16" cy="16" r="13" data-arc></circle>
+    </svg>
+    <span class="dial-text">
+      <span class="dial-label" data-label></span>
+      <span class="dial-value num" data-value>&mdash;</span>
+    </span>
+  </div>
+</template>
+
+<template id="tpl-fleet-row">
+  <li class="fleet-row">
+    <button type="button" class="fleet-btn" data-select>
+      <span class="cls-dot" data-dot aria-hidden="true"></span>
+      <span class="callsign num" data-callsign></span>
+      <span class="task" data-task></span>
+      <span class="energy" aria-hidden="true"><span class="energy-fill" data-energy></span></span>
+    </button>
+  </li>
+</template>
+
+<template id="tpl-contact-row">
+  <li class="contact-row">
+    <span class="contact-id num" data-contact-id></span>
+    <span class="contact-state" data-contact-state></span>
+    <span class="contact-confidence num" data-contact-confidence></span>
+  </li>
+</template>
+
+<template id="tpl-kv-row">
+  <div class="kv-row"><dt data-key></dt><dd class="num" data-val></dd></div>
+</template>
+
+<script src="icons.js" defer></script>
+<script src="viewer.js" defer></script>
+</body>
+</html>

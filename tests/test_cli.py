@@ -61,7 +61,12 @@ def test_score_rejects_a_missing_log(tmp_path: Path) -> None:
 
 
 def test_unimplemented_subcommands_refuse_loudly() -> None:
-    for name in ("replay", "sweep", "ablate", "serve"):
+    """``serve`` is not in this list any more: it binds a port and blocks.
+
+    Its own behaviour — ``PORT``, no reuse, what it hands out — is
+    ``tests/test_serve.py``.
+    """
+    for name in ("replay", "sweep", "ablate"):
         assert main([name]) == 1
 
 
@@ -77,8 +82,11 @@ def test_a_bad_seed_env_does_not_break_seedless_subcommands(
     monkeypatch.setenv("WHITEOUT_SEED", "random")
     build_parser()
     assert main(["score", str(tmp_path / "nope.jsonl")]) == 1
-    for name in ("replay", "sweep", "ablate", "serve"):
+    for name in ("replay", "sweep", "ablate"):
         assert main([name]) == 1
+    # `serve` binds a port rather than returning, so the parser is as far as
+    # this test follows it.
+    assert build_parser().parse_args(["serve"]).command == "serve"
 
 
 def test_run_diagnoses_a_bad_seed_env(
