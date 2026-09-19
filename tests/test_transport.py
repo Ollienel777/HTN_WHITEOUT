@@ -598,7 +598,9 @@ def test_the_stub_reports_static_poses_and_an_advancing_clock() -> None:
     second = transport.observe()
     assert first.t == 0.0
     assert second.t == 0.5
-    assert [(pose.x, pose.y) for pose in first.poses] == [(pose.x, pose.y) for pose in second.poses]
+    assert [(pose.lat, pose.lon) for pose in first.poses] == [
+        (pose.lat, pose.lon) for pose in second.poses
+    ]
     assert all(pose.t == first.t for pose in first.poses)
     assert all(pose.t == second.t for pose in second.poses)
 
@@ -753,7 +755,7 @@ def test_the_stub_is_a_pure_function_of_its_seed() -> None:
         transport.connect()
         observation = transport.observe()
         transport.close()
-        return tuple((pose.x, pose.y) for pose in observation.poses)
+        return tuple((pose.lat, pose.lon) for pose in observation.poses)
 
     assert first_observation(7) == first_observation(7)
     assert first_observation(7) != first_observation(8)
@@ -769,7 +771,8 @@ def test_the_stub_accepts_intents_without_acting_on_them() -> None:
             WaypointIntent(
                 asset_id=before.poses[0].asset_id,
                 t=before.t,
-                target_xy=(10_000.0, 10_000.0),
+                target_lat=72.05,
+                target_lon=-94.60,
                 target_z=100.0,
                 speed=20.0,
                 reason="sweep",
@@ -780,7 +783,9 @@ def test_the_stub_accepts_intents_without_acting_on_them() -> None:
     transport.command(intent)
     after = transport.observe()
     assert transport.last_intent is intent
-    assert [(pose.x, pose.y) for pose in after.poses] == [(pose.x, pose.y) for pose in before.poses]
+    assert [(pose.lat, pose.lon) for pose in after.poses] == [
+        (pose.lat, pose.lon) for pose in before.poses
+    ]
 
 
 def test_calls_before_connect_fail_loudly() -> None:

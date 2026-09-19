@@ -32,7 +32,7 @@
   /* Kept in step with whiteout.log.SCHEMA_VERSION by a test: the viewer must
    * reject a log this build cannot read, with the same version in the message
    * the Python reader would have printed. */
-  var SCHEMA_VERSION = 2;
+  var SCHEMA_VERSION = 3;
 
   /* Relative, so it resolves the same from `whiteout serve` and from file://
    * (where the fetch is blocked, and the file picker takes over). */
@@ -63,6 +63,7 @@
     source: "",
     selected: null,
     extent: 1000,            /* metres of half-width the field frames */
+    origin: null,            /* the drawing frame's origin, as {lat, lon} */
     failure: null            /* { line, reason } */
   };
 
@@ -318,9 +319,9 @@
   }
 
   function renderMeta() {
-    /* seed, transport, policy and terrain are episode provenance, and schema
-     * 1 does not carry them — so the slots read as unknown rather than as a
-     * value the viewer invented. */
+    /* seed, transport, policy and terrain are episode provenance, and the
+     * record shape does not carry them at any version this viewer reads — so
+     * the slots read as unknown rather than as a value the viewer invented. */
     each("[data-meta]", function (node) {
       text(node, UNKNOWN);
       node.classList.add("is-unknown");
@@ -446,8 +447,8 @@
         return [
           ["callsign", String(pose.asset_id)],
           ["class", String(pose.cls)],
-          ["x", fixed(pose.x, 1) + " m"],
-          ["y", fixed(pose.y, 1) + " m"],
+          ["latitude", fixed(pose.lat, 5) + "\u00b0"],
+          ["longitude", fixed(pose.lon, 5) + "\u00b0"],
           ["altitude", fixed(pose.z, 1) + " m"],
           ["heading", fixed((Number(pose.heading) * 180) / Math.PI, 1) + "°"],
           ["speed", fixed(pose.speed, 2) + " m/s"],
@@ -503,6 +504,80 @@
       : "The log could not be read, so no record was parsed.");
   }
 
+  /* ── the drawing frame ────────────────────────────────────── */
+
+  /* The log is lat/lon and nothing else: SPEC.md section 5 names geodetic
+   * WGS-84 degrees as the frame of record, and whiteout/geo.py is the one
+   * module that converts. A canvas needs metres, so this block is the
+   * viewer's local projection and is *only* that: an East-North offset in
+   * metres about an origin this file picks, used to place pixels. It is
+   * never written anywhere, never posted anywhere, and no number it produces
+   * leaves the browser.
+   *
+   * It is a second implementation of whiteout.geo's arithmetic because the
+   * page has no Python; tests/test_viz_shell.py pins the constants and the
+   * origin below against whiteout.geo, so the two cannot drift apart. The
+   * formulae are whiteout/geo.py's, with the radii of curvature taken at the
+   * origin's latitude. */
+  var WGS84_A = 6378137.0;
+  var WGS84_F = 1 / 298.257223563;
+  var WGS84_E2 = WGS84_F * (2 - WGS84_F);
+
+  /* Bellot Strait, ARENA.md section 2. The fallback origin, for an episode
+   * whose first record carries no pose to centre on. */
+  var ARENA_ORIGIN = { lat: 71.99, lon: -94.84 };
+
+  /* Metres per radian of latitude, and metres per radian of longitude, at
+   * `latDeg`. The second collapses toward the pole: at 71.99 N it is about
+   * 0.31 of the first, which is why a frame mix-up up here looks plausible
+   * instead of absurd. */
+  function radii(latDeg) {
+    var phi = (latDeg * Math.PI) / 180;
+    var sinPhi = Math.sin(phi);
+    var w = 1 - WGS84_E2 * sinPhi * sinPhi;
+    return {
+      meridional: (WGS84_A * (1 - WGS84_E2)) / Math.pow(w, 1.5),
+      east: (WGS84_A / Math.sqrt(w)) * Math.cos(phi)
+    };
+  }
+
+  /* lat/lon -> {east, north} metres about `origin`. The drawing frame, and
+   * the only conversion this file performs. */
+  function toLocal(origin, latDeg, lonDeg) {
+    var scale = radii(origin.lat);
+    return {
+      east: ((lonDeg - origin.lon) * Math.PI * scale.east) / 180,
+      north: ((latDeg - origin.lat) * Math.PI * scale.meridional) / 180
+    };
+  }
+
+  /* validateLine checks that `observation.poses` is an array, not what is in
+   * it, so a pose with a missing or non-numeric lat/lon can reach the two
+   * measures below. They have to agree about what to do with it: `|| 0` in
+   * one and a raw `Number()` in the other would drag the origin toward
+   * (0, 0) *and* make the extent NaN, which leaves the grid undrawn and the
+   * scale bar reading "NaN m" with no error state to explain it. Both skip
+   * such a pose instead. */
+  function isPlaced(pose) {
+    return isFinite(Number(pose.lat)) && isFinite(Number(pose.lon));
+  }
+
+  /* The origin is the fleet's centroid in the first record, so the axes cross
+   * where the episode starts rather than at an arbitrary meridian. Measured
+   * once per load, with the extent. */
+  function measureOrigin() {
+    var first = state.records[0];
+    var poses = (first ? first.observation.poses : []).filter(isPlaced);
+    if (!poses.length) { return ARENA_ORIGIN; }
+    var lat = 0;
+    var lon = 0;
+    poses.forEach(function (pose) {
+      lat += Number(pose.lat);
+      lon += Number(pose.lon);
+    });
+    return { lat: lat / poses.length, lon: lon / poses.length };
+  }
+
   /* ── the field's chrome ──────────────────────────────────────────── */
 
   var DEFAULT_EXTENT = 1000;   /* metres of half-width before a log says otherwise */
@@ -511,9 +586,11 @@
    * rather than per frame. */
   function measureExtent() {
     var span = DEFAULT_EXTENT;
+    state.origin = measureOrigin();
     state.records.forEach(function (record) {
-      record.observation.poses.forEach(function (pose) {
-        span = Math.max(span, Math.abs(Number(pose.x)) * 1.2, Math.abs(Number(pose.y)) * 1.2);
+      record.observation.poses.filter(isPlaced).forEach(function (pose) {
+        var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
+        span = Math.max(span, Math.abs(local.east) * 1.2, Math.abs(local.north) * 1.2);
       });
     });
     state.extent = span;
@@ -706,6 +783,7 @@
     SCHEMA_VERSION: SCHEMA_VERSION,
     BUNDLED_EPISODE: BUNDLED_EPISODE,
     parseEpisodeLog: parseEpisodeLog,
+    toLocal: toLocal,
     state: state,
     reducedMotion: reducedMotion
   };

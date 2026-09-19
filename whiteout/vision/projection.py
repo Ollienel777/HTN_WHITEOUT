@@ -138,6 +138,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from whiteout.geo import WGS84_A, WGS84_E2, WGS84_F, GeoError, GeoPoint, enu_to_geodetic
 from whiteout.vision.camera import CameraModel, VisionError
 
 __all__ = [
@@ -161,15 +162,6 @@ __all__ = [
 #: A vector in the local ENU frame: ``(east, north, up)``, metres or unitless.
 Vec3 = tuple[float, float, float]
 
-#: WGS-84 semi-major axis, metres.
-WGS84_A = 6378137.0
-
-#: WGS-84 flattening.
-WGS84_F = 1.0 / 298.257223563
-
-#: WGS-84 first eccentricity squared, ``f (2 - f)``.
-WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
-
 #: WGS-84 mean radius ``R1 = (2a + b) / 3``, metres. Used only for the two
 #: curvature quantities in the module docstring — the drop of the sea below
 #: the tangent plane and the horizon that follows from it — where the
@@ -183,12 +175,6 @@ EARTH_MEAN_RADIUS_M = (2.0 * WGS84_A + WGS84_A * (1.0 - WGS84_F)) / 3.0
 #: the default bound at ``d_horizon / sqrt(10)``.
 MAX_FLAT_PLANE_RANGE_ERROR = 0.10
 
-#: Smallest East radius of curvature, metres, for which a longitude offset is
-#: meaningful. ``cos(radians(90))`` is ``6.12e-17`` rather than ``0``, so a
-#: guard written against zero never fires; at this radius one metre East is
-#: already 57° of longitude.
-_MIN_EAST_RADIUS_M = 1.0
-
 
 class ProjectionError(VisionError):
     """A pixel has no well-defined point on the water plane.
@@ -197,7 +183,10 @@ class ProjectionError(VisionError):
     horizon — when it descends so shallowly that the intersection is past the
     range the flat water plane can be trusted to, when the camera is not
     above the plane it is being projected onto, and when the pixel is outside
-    the frame. All are real conditions in the arena rather than programming
+    the frame. It also wraps a :class:`whiteout.geo.GeoError` from the final
+    conversion, so that this stays the one type a caller of
+    :func:`project_pixel_to_ground` has to catch. The rest are real
+    conditions in the arena rather than programming
     errors: a fixed-wing at 500 m with a 42.6° vertical field of view sees
     the horizon in the top of almost every frame, and a tower scanning at
     ``mode scan`` sweeps through it. The caller's response is to discard the
@@ -210,20 +199,6 @@ class ProjectionError(VisionError):
     :class:`GeoPoint` tens of kilometres away. Refusing is the whole point —
     that point would be submitted to the tracks API as a detection.
     """
-
-
-@dataclass(frozen=True, slots=True)
-class GeoPoint:
-    """A geodetic position on the water plane: what the tracks API takes.
-
-    ``ARENA.md`` §5's ``POST /api/tracks`` body is ``{"name": …, "lat": …,
-    "lon": …}``, degrees, so this type is deliberately two floats and not a
-    third: the altitude is the water plane and carrying it would invite
-    someone to submit it.
-    """
-
-    lat_deg: float
-    lon_deg: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,54 +373,6 @@ def pixel_ray_enu(camera: CameraModel, pose: CameraPose, px: float, py: float) -
     )
 
 
-def enu_to_geodetic(lat_deg: float, lon_deg: float, east_m: float, north_m: float) -> GeoPoint:
-    """Offset a geodetic position by a local ENU displacement.
-
-    .. math::
-
-        \\Delta\\varphi = \\frac{\\text{north}}{M(\\varphi)}
-        \\qquad
-        \\Delta\\lambda = \\frac{\\text{east}}{N(\\varphi)\\cos\\varphi}
-
-    in radians, with the WGS-84 radii of curvature at the origin latitude:
-
-    .. math::
-
-        N = \\frac{a}{\\sqrt{1 - e^2 \\sin^2\\varphi}}
-        \\qquad
-        M = \\frac{a(1 - e^2)}{(1 - e^2 \\sin^2\\varphi)^{3/2}}
-
-    See the module docstring for the error this carries, which was measured
-    against an exact ECEF round trip: sub-millimetre along the meridian, and
-    about 2.2 m at 3 km East at Bellot Strait's latitude, growing as the
-    square of the East offset.
-    """
-    for name, value in (
-        ("lat_deg", lat_deg),
-        ("lon_deg", lon_deg),
-        ("east_m", east_m),
-        ("north_m", north_m),
-    ):
-        if not math.isfinite(value):
-            raise ProjectionError(f"{name} must be finite, got {value!r}")
-    phi = math.radians(lat_deg)
-    sin_phi = math.sin(phi)
-    cos_phi = math.cos(phi)
-    w = 1.0 - WGS84_E2 * sin_phi * sin_phi
-    prime_vertical = WGS84_A / math.sqrt(w)
-    meridional = WGS84_A * (1.0 - WGS84_E2) / (w**1.5)
-    east_radius = prime_vertical * cos_phi
-    if abs(east_radius) < _MIN_EAST_RADIUS_M:
-        raise ProjectionError(
-            f"longitude is undefined at latitude {lat_deg!r}: the East radius of "
-            f"{east_radius!r} m is below {_MIN_EAST_RADIUS_M!r} m"
-        )
-    return GeoPoint(
-        lat_deg + math.degrees(north_m / meridional),
-        lon_deg + math.degrees(east_m / east_radius),
-    )
-
-
 def project_pixel_to_ground(
     camera: CameraModel,
     pose: CameraPose,
@@ -547,4 +474,11 @@ def project_pixel_to_ground(
             f"past the {limit:.0f} m this camera's {height_above_plane!r} m height supports "
             f"(geometric horizon {horizon_range_m(height_above_plane):.0f} m)"
         )
-    return enu_to_geodetic(pose.lat_deg, pose.lon_deg, east_m, north_m)
+    try:
+        return enu_to_geodetic(pose.lat_deg, pose.lon_deg, east_m, north_m)
+    except GeoError as exc:
+        # The converter is whiteout.geo's, so it raises whiteout.geo's error;
+        # this function documents one catchable failure and callers discard
+        # the detection on it. A pose whose lat/lon is out of range or at a
+        # pole reaches here because CameraPose checks only finiteness.
+        raise ProjectionError(f"pixel ({px!r}, {py!r}) has no geodetic fix: {exc}") from exc

@@ -71,9 +71,18 @@ __all__ = [
 #: written by a different build" — the one message the field exists to
 #: produce.
 #:
-#: 2 — ``Pose.measured_t``, a required record key (see
-#: :class:`~whiteout.types.Pose`).
-SCHEMA_VERSION = 2
+#: 2 — every position moved from a local x/y frame to the geodetic
+#: ``lat``/``lon`` that ``SPEC.md`` §5 names as the frame of record. A
+#: version-1 line is refused rather than read as version 2: the two shapes
+#: differ by field *name*, so a reader that guessed would be guessing about
+#: the one thing the arena scores.
+#:
+#: 3 — ``Pose.measured_t``, a required record key (see
+#: :class:`~whiteout.types.Pose`). It is 3 and not 2 because 2 is already
+#: spent on the lat/lon shape above: two shapes that both answered to 2 would
+#: leave the field unable to say "this log is not the shape you expect" about
+#: either of them, which is the whole of what it is for.
+SCHEMA_VERSION = 3
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")

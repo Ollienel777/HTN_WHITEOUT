@@ -50,6 +50,7 @@ from contextlib import contextmanager
 from dataclasses import fields, is_dataclass
 from typing import Any
 
+from whiteout.geo import enu_to_geodetic
 from whiteout.transport import TRANSPORT_METHODS, Transport, TransportError
 from whiteout.types import (
     VEHICLE_CLASSES,
@@ -428,17 +429,19 @@ def check_command_is_accepted_for_every_tick(factory: TransportFactory) -> None:
             # Tick zero sends the empty intent — the ordinary quiet tick —
             # and the rest steer every posed asset that can be steered.
             steerable = [pose for pose in observation.poses if pose.cls in STEERABLE_CLASSES]
+            targets = [enu_to_geodetic(pose.lat, pose.lon, 100.0, 100.0) for pose in steerable]
             intents = tuple(
                 WaypointIntent(
                     asset_id=pose.asset_id,
                     t=observation.t,
-                    target_xy=(pose.x + 100.0, pose.y + 100.0),
+                    target_lat=target.lat_deg,
+                    target_lon=target.lon_deg,
                     target_z=pose.z,
                     speed=10.0,
                     reason="sweep",
                     task_id=f"conformance-{tick}-{index}",
                 )
-                for index, pose in enumerate(steerable)
+                for index, (pose, target) in enumerate(zip(steerable, targets, strict=True))
             )
             if tick == 0:
                 intents = ()

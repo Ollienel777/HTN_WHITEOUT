@@ -51,6 +51,7 @@ from transport_conformance import (
     unavailable,
 )
 
+from whiteout.geo import ARENA_ORIGIN
 from whiteout.transport import (
     IMPLEMENTED_TRANSPORTS,
     TRANSPORT_FACTORIES,
@@ -400,7 +401,14 @@ class _UnlockedTransport(KinematicTransport):
 
 def _footprint() -> SensorFootprint:
     """Some footprint. Nothing in the guard below depends on its shape."""
-    return SensorFootprint(kind="circle", x=0.0, y=0.0, radius=100.0, heading=0.0, half_angle=0.0)
+    return SensorFootprint(
+        kind="circle",
+        lat=ARENA_ORIGIN.lat_deg,
+        lon=ARENA_ORIGIN.lon_deg,
+        radius=100.0,
+        heading=0.0,
+        half_angle=0.0,
+    )
 
 
 class _MisattributingTransport(KinematicTransport):
@@ -443,8 +451,8 @@ class _SmugglingTransport(KinematicTransport):
             negative=True,
             context=TargetTruth(
                 target_id="vessel-1",
-                x=0.0,
-                y=0.0,
+                lat=ARENA_ORIGIN.lat_deg,
+                lon=ARENA_ORIGIN.lon_deg,
                 z=0.0,
                 heading=0.0,
                 speed=0.0,

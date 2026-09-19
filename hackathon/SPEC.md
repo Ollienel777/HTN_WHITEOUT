@@ -198,9 +198,9 @@ Three record types, and everything else is derived from them.
 ```python
 # whiteout/types.py  —  frozen dataclasses, JSON-serialisable
 
-Pose        : asset_id, cls, t, x, y, z, heading, speed, energy_used
+Pose        : asset_id, cls, t, lat, lon, z, heading, speed, energy_used
 SensorReport: asset_id, t, footprint, detections[], negative: bool
-WaypointIntent: asset_id, t, target_xy, target_z, speed, reason, task_id
+WaypointIntent: asset_id, t, target_lat, target_lon, target_z, speed, reason, task_id
 ```
 
 - `WorldObservation` = `{t, poses[], reports[]}` — everything in.
@@ -303,6 +303,18 @@ One per module, so parallel worktrees do not collide:
   `numpy.random.Generator` derived from the episode seed. No module-level
   `np.random`. A test asserts byte-identical episode logs across two runs at the
   same seed, and it is a P0 when it fails.
+- **The frame of record is geodetic WGS-84 `lat`/`lon`, in degrees.** Every
+  position in the episode log, across the transport seam and in a `POST
+  /api/tracks` body is lat/lon; `ARENA.md` §5 scores *accuracy* on exactly
+  that. A local East–North metric frame exists only as a **projection for
+  drawing and geometry**: it is never logged and never posted. **`whiteout/geo.py`
+  is the one module that converts**, and a test walks every Python file in the
+  repository and fails on a second one — on an ellipsoid-scale constant, on a
+  name that reads as a conversion, or on any call to trigonometry. The
+  viewer's JavaScript copy cannot be walked, so it is pinned numerically: a
+  test runs it under `node` and compares the metres it returns to
+  `whiteout.geo`'s. (Altitude is a separate question — which datum the arena
+  reports is #76.)
 - Frozen dataclasses for all record types. No dicts crossing module boundaries.
 - Policy parameters live in **one** dataclass, `policy/params.py`, serialisable
   to and from JSON. The tuner writes that JSON; nothing else configures policy.

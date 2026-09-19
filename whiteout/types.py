@@ -17,6 +17,20 @@ Three record types cross the transport seam:
 They aggregate into ``WorldObservation`` (everything in) and ``FleetIntent``
 (everything out), and one tick of an episode is an ``EpisodeRecord``.
 
+**Every position in this file is geodetic ``lat``/``lon`` in degrees**, the
+frame of record named in ``SPEC.md`` §5 and owned by :mod:`whiteout.geo`. No
+record carries a local x/y: a local East–North frame exists only as a
+projection for drawing and geometry, it is never written here, and
+:func:`whiteout.geo.geodetic_to_local` is the one place it is computed.
+Construction range-checks every pair, so the mix-up that matters — a swapped
+lat/lon, which at Bellot Strait's 71.99° N would otherwise read as a
+plausible position a few kilometres out — raises :class:`RecordError` rather
+than reaching the episode log.
+
+``z`` and ``target_z`` are altitudes in metres and are **not** settled by that
+decision: which datum the arena reports is issue #76, and nothing in this file
+or in :mod:`whiteout.geo` converts one.
+
 **``truth`` is a top-level field of ``EpisodeRecord``, never nested inside
 ``WorldObservation``.** The observation is exactly what the coordinator sees;
 ground truth is written by the sim and read only by the scorer and the viewer.
@@ -41,6 +55,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from typing import Any
+
+from whiteout.geo import GeoError, check_geodetic
 
 __all__ = [
     "CONTACT_STATES",
@@ -94,9 +110,9 @@ class RecordError(ValueError):
 #
 # Declared ``float`` fields are coerced on construction. Python accepts an
 # ``int`` where a ``float`` is declared and mypy's numeric tower does too, so
-# ``Pose(x=0)`` would serialise ``"x": 0`` while ``Pose(x=0.0)`` serialises
-# ``"x": 0.0`` — two equal records, two different byte streams, and the
-# gate's determinism step compares bytes.
+# ``Pose(lat=0)`` would serialise ``"lat": 0`` while ``Pose(lat=0.0)``
+# serialises ``"lat": 0.0`` — two equal records, two different byte streams,
+# and the gate's determinism step compares bytes.
 # --------------------------------------------------------------------------
 
 
@@ -121,9 +137,20 @@ def _as_floats(record: Any, *names: str) -> None:
             object.__setattr__(record, name, float(value))
 
 
-def _as_float_pair(record: Any, name: str) -> None:
-    first, second = getattr(record, name)
-    object.__setattr__(record, name, (float(first), float(second)))
+def _check_position(record: Any, where: str, lat: str = "lat", lon: str = "lon") -> None:
+    """Reject a position that is not a geodetic one, naming the record.
+
+    The frame of record is lat/lon (``whiteout.geo``), and the mix-up this
+    catches is the one that matters: at Bellot Strait a swapped pair reads
+    ``lat=-94.84``, which is inside no latitude range and outside every
+    plausible-looking wrong answer. Constructing the record is where it is
+    caught, so a bad position cannot reach the episode log or the tracks API
+    whether it was parsed from JSON or built in Python.
+    """
+    try:
+        check_geodetic(getattr(record, lat), getattr(record, lon))
+    except GeoError as exc:
+        raise RecordError(f"{where}: {exc}") from exc
 
 
 def _as_int_pair(record: Any, name: str) -> None:
@@ -227,20 +254,6 @@ def _sequence(payload: Mapping[str, Any], where: str, name: str) -> Sequence[Any
     return items
 
 
-def _pair(payload: Mapping[str, Any], where: str, name: str) -> tuple[float, float]:
-    items = _sequence(payload, where, name)
-    if len(items) != 2:
-        raise RecordError(f"{where}.{name}: expected 2 numbers, got {len(items)}")
-    out: list[float] = []
-    for index, item in enumerate(items):
-        if isinstance(item, bool) or not isinstance(item, int | float):
-            raise RecordError(
-                f"{where}.{name}[{index}]: expected a number, got {type(item).__name__}"
-            )
-        out.append(_to_float(item, f"{where}.{name}[{index}]"))
-    return (out[0], out[1])
-
-
 def _int_pair(payload: Mapping[str, Any], where: str, name: str) -> tuple[int, int]:
     items = _sequence(payload, where, name)
     if len(items) != 2:
@@ -313,8 +326,8 @@ class Pose:
     asset_id: str
     cls: str
     t: float
-    x: float
-    y: float
+    lat: float
+    lon: float
     z: float
     heading: float
     speed: float
@@ -322,9 +335,10 @@ class Pose:
     measured_t: float | None = None
 
     def __post_init__(self) -> None:
-        _as_floats(self, "t", "x", "y", "z", "heading", "speed", "energy_used")
+        _as_floats(self, "t", "lat", "lon", "z", "heading", "speed", "energy_used")
         if self.measured_t is not None:
             _as_floats(self, "measured_t")
+        _check_position(self, "pose")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -337,8 +351,8 @@ class Pose:
             asset_id=_str(data, where, "asset_id"),
             cls=_one_of(_str(data, where, "cls"), VEHICLE_CLASSES, where, "cls"),
             t=_float(data, where, "t"),
-            x=_float(data, where, "x"),
-            y=_float(data, where, "y"),
+            lat=_float(data, where, "lat"),
+            lon=_float(data, where, "lon"),
             z=_float(data, where, "z"),
             heading=_float(data, where, "heading"),
             speed=_float(data, where, "speed"),
@@ -358,14 +372,15 @@ class SensorFootprint:
     """
 
     kind: str
-    x: float
-    y: float
+    lat: float
+    lon: float
     radius: float
     heading: float
     half_angle: float
 
     def __post_init__(self) -> None:
-        _as_floats(self, "x", "y", "radius", "heading", "half_angle")
+        _as_floats(self, "lat", "lon", "radius", "heading", "half_angle")
+        _check_position(self, "footprint")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -376,8 +391,8 @@ class SensorFootprint:
         _check_keys(data, where, SensorFootprint)
         return SensorFootprint(
             kind=_one_of(_str(data, where, "kind"), FOOTPRINT_KINDS, where, "kind"),
-            x=_float(data, where, "x"),
-            y=_float(data, where, "y"),
+            lat=_float(data, where, "lat"),
+            lon=_float(data, where, "lon"),
             radius=_float(data, where, "radius"),
             heading=_float(data, where, "heading"),
             half_angle=_float(data, where, "half_angle"),
@@ -393,13 +408,14 @@ class Detection:
     """
 
     detection_id: str
-    x: float
-    y: float
+    lat: float
+    lon: float
     confidence: float
     classification: str
 
     def __post_init__(self) -> None:
-        _as_floats(self, "x", "y", "confidence")
+        _as_floats(self, "lat", "lon", "confidence")
+        _check_position(self, "detection")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -410,8 +426,8 @@ class Detection:
         _check_keys(data, where, Detection)
         return Detection(
             detection_id=_str(data, where, "detection_id"),
-            x=_float(data, where, "x"),
-            y=_float(data, where, "y"),
+            lat=_float(data, where, "lat"),
+            lon=_float(data, where, "lon"),
             confidence=_float(data, where, "confidence"),
             classification=_str(data, where, "classification"),
         )
@@ -468,15 +484,16 @@ class WaypointIntent:
 
     asset_id: str
     t: float
-    target_xy: tuple[float, float]
+    target_lat: float
+    target_lon: float
     target_z: float
     speed: float
     reason: str
     task_id: str
 
     def __post_init__(self) -> None:
-        _as_floats(self, "t", "target_z", "speed")
-        _as_float_pair(self, "target_xy")
+        _as_floats(self, "t", "target_lat", "target_lon", "target_z", "speed")
+        _check_position(self, "intent", "target_lat", "target_lon")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -488,7 +505,8 @@ class WaypointIntent:
         return WaypointIntent(
             asset_id=_str(data, where, "asset_id"),
             t=_float(data, where, "t"),
-            target_xy=_pair(data, where, "target_xy"),
+            target_lat=_float(data, where, "target_lat"),
+            target_lon=_float(data, where, "target_lon"),
             target_z=_float(data, where, "target_z"),
             speed=_float(data, where, "speed"),
             reason=_str(data, where, "reason"),
@@ -556,7 +574,8 @@ class BeliefDigest:
     The field itself is a raster and does not belong in a JSONL line. The
     digest is what the viewer's header and the scorer's coverage axis read:
     ``entropy`` in nats, ``mass`` the field's total probability mass,
-    ``peak_xy`` the most likely target location with ``peak_p`` its density,
+    ``peak_lat``/``peak_lon`` the most likely target location with ``peak_p``
+    its density,
     ``covered_fraction`` the share of cells swept at least once, and
     ``grid_shape`` the field's dimensions **in cells**.
 
@@ -571,14 +590,17 @@ class BeliefDigest:
     t: float
     entropy: float
     mass: float
-    peak_xy: tuple[float, float]
+    peak_lat: float
+    peak_lon: float
     peak_p: float
     covered_fraction: float
     grid_shape: tuple[int, int]
 
     def __post_init__(self) -> None:
-        _as_floats(self, "t", "entropy", "mass", "peak_p", "covered_fraction")
-        _as_float_pair(self, "peak_xy")
+        _as_floats(
+            self, "t", "entropy", "mass", "peak_lat", "peak_lon", "peak_p", "covered_fraction"
+        )
+        _check_position(self, "belief_digest", "peak_lat", "peak_lon")
         _as_int_pair(self, "grid_shape")
 
     def to_dict(self) -> dict[str, Any]:
@@ -592,7 +614,8 @@ class BeliefDigest:
             t=_float(data, where, "t"),
             entropy=_float(data, where, "entropy"),
             mass=_float(data, where, "mass"),
-            peak_xy=_pair(data, where, "peak_xy"),
+            peak_lat=_float(data, where, "peak_lat"),
+            peak_lon=_float(data, where, "peak_lon"),
             peak_p=_float(data, where, "peak_p"),
             covered_fraction=_float(data, where, "covered_fraction"),
             grid_shape=_int_pair(data, where, "grid_shape"),
@@ -603,7 +626,7 @@ class BeliefDigest:
 class Contact:
     """The coordinator's hypothesis about a target, and its lifecycle state.
 
-    Estimated, never true: ``x``/``y`` are the estimator's belief.
+    Estimated, never true: ``lat``/``lon`` are the estimator's belief.
     ``assigned_asset_id`` is the asset currently holding the contact, or
     ``None`` when nothing is assigned.
     """
@@ -611,14 +634,15 @@ class Contact:
     contact_id: str
     t: float
     state: str
-    x: float
-    y: float
+    lat: float
+    lon: float
     confidence: float
     classification: str
     assigned_asset_id: str | None
 
     def __post_init__(self) -> None:
-        _as_floats(self, "t", "x", "y", "confidence")
+        _as_floats(self, "t", "lat", "lon", "confidence")
+        _check_position(self, "contact")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -631,8 +655,8 @@ class Contact:
             contact_id=_str(data, where, "contact_id"),
             t=_float(data, where, "t"),
             state=_one_of(_str(data, where, "state"), CONTACT_STATES, where, "state"),
-            x=_float(data, where, "x"),
-            y=_float(data, where, "y"),
+            lat=_float(data, where, "lat"),
+            lon=_float(data, where, "lon"),
             confidence=_float(data, where, "confidence"),
             classification=_str(data, where, "classification"),
             assigned_asset_id=_optional_str(data, where, "assigned_asset_id"),
@@ -644,15 +668,16 @@ class TargetTruth:
     """One target's true state. Written by the sim; never observed."""
 
     target_id: str
-    x: float
-    y: float
+    lat: float
+    lon: float
     z: float
     heading: float
     speed: float
     target_class: str
 
     def __post_init__(self) -> None:
-        _as_floats(self, "x", "y", "z", "heading", "speed")
+        _as_floats(self, "lat", "lon", "z", "heading", "speed")
+        _check_position(self, "target")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -663,8 +688,8 @@ class TargetTruth:
         _check_keys(data, where, TargetTruth)
         return TargetTruth(
             target_id=_str(data, where, "target_id"),
-            x=_float(data, where, "x"),
-            y=_float(data, where, "y"),
+            lat=_float(data, where, "lat"),
+            lon=_float(data, where, "lon"),
             z=_float(data, where, "z"),
             heading=_float(data, where, "heading"),
             speed=_float(data, where, "speed"),
