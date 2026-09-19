@@ -152,44 +152,71 @@ a human decision (§11).
 
 ## 4. Architecture
 
-### The seam — structural and non-negotiable
+> **Re-planned 2026-09-19T17:15Z against `hackathon/ARENA.md`**, which is
+> ground truth for this track. The version below replaces one written when no
+> public source about the arena existed. Sections not yet re-planned are
+> marked where they stand.
 
-The coordinator talks to the world through **one interface**. Poses and sensor
-reports in; waypoint intents out. Nothing else crosses it.
+### The seam — structural, and it paid off
+
+The coordinator talks to the world through **one interface**. Observations in;
+intents out. Nothing else crosses it.
 
 ```
-                        ┌──────────────────────────────────┐
-                        │          coordinator             │
-                        │  belief · contacts · allocation  │
-                        └───────────▲──────────┬───────────┘
-                    WorldObservation│          │FleetIntent
-                        ┌───────────┴──────────▼───────────┐
-                        │          Transport (ABC)         │
-                        └──┬──────────────┬──────────────┬─┘
-                           │              │              │
-                     ┌─────▼────┐   ┌─────▼────┐   ┌─────▼────┐
-                     │kinematic │   │   sitl   │   │  arena   │
-                     │dev+tuning│   │validation│   │ sponsor  │
-                     └──────────┘   └──────────┘   └──────────┘
+                  ┌──────────────────────────────────────┐
+                  │             coordinator              │
+                  │   belief · contacts · allocation     │
+                  └────────▲──────────┬──────────┬───────┘
+          WorldObservation │          │FleetIntent│ Track
+                  ┌────────┴──────────▼───────┐  │
+                  │      Transport (Protocol) │  │
+                  └──┬──────────┬─────────────┘  │
+                     │          │                │
+              ┌──────▼───┐ ┌────▼─────┐   ┌──────▼───────┐
+              │kinematic │ │   sitl   │   │  arena       │
+              │ fast fake│ │local dev │   │ ArcticSim    │
+              │  no deps │ │ harness  │   │ ** the one   │
+              │          │ │ ArduPilot│   │  that counts**│
+              └──────────┘ └──────────┘   └──────────────┘
 ```
 
-If the sponsor's interface turns out not to be plain MAVLink over a socket,
-**only the adapter is lost** — never the estimator, never the policy, never a
-single tuned parameter. This is the single most important structural decision
-in the build and it is made now.
+**The roles have inverted from the original plan, and that is the whole
+story.** `arena` was the speculative third implementation against an unknown
+interface; it is now the target, and its interface is known. `sitl` was the
+validation step; it is now a **local development harness** — ArcticSim's
+assets are stock ArduPilot Copter, Plane and AntennaTracker, so a vanilla
+local SITL of those three is a near-exact stand-in that costs nothing to run
+and does not compete for the one heavyweight Docker stack. `kinematic` remains
+the fast fake that CI runs.
+
+The seam earned its keep exactly as intended: the arena turned out **not** to
+be a single MAVLink socket — it is MAVLink per asset **plus an HTTP tracks
+API** — and the cost of that surprise was an adapter.
+
+**Note the third arrow.** A `Track` leaves the coordinator by a second path,
+to the sponsor's tracks API. That is the artifact the judges read, and it does
+not travel as a `FleetIntent`.
+
+It is a `Protocol`, not an ABC.
 
 ### Components
 
 | component | package | what it owns |
 |---|---|---|
-| **Transport** | `whiteout/transport/` | The one interface and its three implementations. Adapters only: no belief, no policy, no scoring ever lives here. |
-| **Sim** | `whiteout/sim/` | Terrain, vehicle kinematics per class, sensor footprints and detection models, the target mover, the episode clock. Headless, deterministic under a seed, hundreds of × real time. |
-| **Scorer** | `whiteout/score/` | Our model of coverage, collaboration, efficiency, tracking accuracy. **Weights are parameters.** Consumes an episode log; pure function of it. |
-| **Belief** | `whiteout/belief/` | The decaying occupancy field, the **negative-information** update, the particle/target estimator, the terrain flow network and its cuts. |
-| **Policy** | `whiteout/policy/` | Allocation (auction), information-gain routing, choke-point posting, the contact lifecycle machine, re-tasking hysteresis, and the **frontier-coverage fallback**. Objective = the scorer. |
-| **Tune** | `whiteout/tune/` | Batch runner, random search and CMA-ES over policy parameters, sweep artifacts, ablations, reports. |
-| **Viz** | `viz/` | The run viewer. Static HTML + canvas over the episode log. Zero build step. |
-| **CLI** | `whiteout/cli.py` | `run`, `replay`, `score`, `sweep`, `ablate`, `serve`. |
+| **Transport** | `whiteout/transport/` | The one interface and its implementations. Adapters only: no belief, no policy, no scoring ever lives here. |
+| **Vision** | `whiteout/vision/` | **New, and the hard part.** Read camera frames, detect the vessel, and project a pixel to a lat/lon using the asset's pose and its published FOV. |
+| **Tracks** | `whiteout/tracks/` | **New.** The client for the sponsor's `/api/tracks`, and the track-maintenance loop that keeps posting once the vessel is held. **The only artifact the judges read.** |
+| **Belief** | `whiteout/belief/` | The decaying field **over the water of the strait**, and the **negative-information** update keyed on real camera footprints. |
+| **Policy** | `whiteout/policy/` | Allocation, information-gain routing, tower placement, the contact lifecycle machine, re-tasking hysteresis, and the **frontier-coverage fallback**. |
+| **Viz** | `viz/` | The run viewer. Static HTML + canvas. Zero build step. Debugging tool *and* presentation material. |
+| **CLI** | `whiteout/cli.py` | `run`, `replay`, `score`, `serve`. |
+
+**Gone, and why.** `whiteout/sim/` — ArcticSim supplies terrain, vehicles,
+sensing and the target; we were building a second, worse copy.
+`whiteout/tune/` — the sweep needed a fast simulator and a faithful scorer,
+and has neither. `whiteout/score/` survives only as a **development
+instrument** for comparing two policies, rebuilt small against the seven real
+criteria; it is not a target and nothing optimises against it.
 
 ### The data model
 
@@ -204,55 +231,63 @@ WaypointIntent: asset_id, t, target_xy, target_z, speed, reason, task_id
 ```
 
 - `WorldObservation` = `{t, poses[], reports[]}` — everything in.
-- `FleetIntent` = `{t, intents[]}` — everything out.
-- **`EpisodeLog`** (JSONL, one `{t, observation, intent, belief_digest,
-  contacts[], truth}` record per tick) is the **only** artifact the scorer, the
-  viewer, the tuner and the ablation harness read. It is the project's spine.
-  Its schema is versioned and validated in the gate.
+- `FleetIntent` = `{t, intents[]}` — everything out, to the fleet.
+- **`Track`** — `{name, lat, lon, heading?, speed?}`, posted to the sponsor's
+  API. **This is the scored artifact.** Everything else exists to produce it.
+- **`EpisodeLog`** (JSONL, one record per tick) is our own instrument: it
+  drives the viewer and lets two runs be compared. Versioned and validated, as
+  seven review rounds established — but it is **no longer the project's
+  spine**, because the judges never see it.
 
-**Ground truth (`truth`) is written by the sim and read only by the scorer and
-the viewer.** The coordinator never sees it. This is enforced by a test — it is
-the single easiest way to accidentally cheat ourselves and believe a number.
+**There is no ground truth.** The original model had the sim write a `truth`
+field read only by the scorer, with a test stopping the coordinator importing
+it. **ArcticSim gives us nothing of the kind**: we never learn where the
+vessel actually was. The guard is harmless and can stay, but the thing it
+guarded against no longer exists — and the consequence is sharper than it
+sounds. **We cannot measure our own accuracy.** Nothing tells us whether a
+posted lat/lon was right, which is why a confident wrong detection is worse
+than none.
 
 ### Where the hard part lives
 
-Three places, in order of risk:
+Three places, in order of risk. **All three are different from the original.**
 
-1. **`belief/negative.py`** — the non-detection likelihood given range, terrain
-   occlusion and sensor class. Get the likelihood wrong and the field erodes
-   confidently in the wrong places; it looks plausible for hours.
-2. **`belief/flow.py`** — terrain as a flow network, and the min-cut that yields
-   posting stations. Genuinely different from a raster, and genuinely the
-   thing most likely to be over-engineered.
-3. **`policy/objective.py`** — that the coordinator's objective is the scorer,
-   evaluated on a rollout, not a hand-written proxy that drifts from it.
+1. **`vision/detect.py`** — find a small dark vessel among bright ice floes in
+   a 640×480 or 640×360 frame, with no labelled data and no time to train. It
+   was absent from this spec entirely until the workshop, and nothing
+   downstream works without it.
+2. **`belief/negative.py`** — the non-detection likelihood given range and the
+   camera's field of view. Get it wrong and belief erodes confidently in the
+   wrong water; it looks plausible for hours, and the fleet never looks there
+   again.
+3. **`vision/project.py`** — pixel to lat/lon, via pose and FOV. It converts a
+   detection into the only number that scores, and *accuracy* is a judged
+   criterion. It is also the one piece here that is **fully determined and
+   testable before the sim arrives**.
 
 ### External services
 
-**There are none at runtime.** No network egress on any code path in
-`whiteout/`; no API keys anywhere; no account, no card. The only external
-dependency is **ArduPilot SITL**, and it sits behind the `Transport` interface
-like everything else.
+**The arena is a network service, and this section used to deny that.**
+It previously read "there are none at runtime". That is false: at runtime we
+speak MAVLink to four ArcticSim assets and **HTTP POST to their tracks API**,
+which is the scored path. What remains true is that we hold **no API keys, no
+accounts and no cards**, and that nothing leaves the local network.
 
-**SITL is not installed on the build machine, and it is not natively supported
-on Windows 11.** It is acquired by **D46**, a loop action, as a **Docker
-image** — Docker 29.4.1 is installed and working on this machine, and the image
-needs no account, no key and no purchase. Two sources, in order: build
-ArduPilot's own `docker/Dockerfile` from a clone of `ArduPilot/ardupilot`
-(submodules included), or `https://github.com/radarku/sitl-swarm`, which our
-own research recorded as a Docker-based multi-vehicle bring-up shortcut.
-**Time cost: one hour, timeboxed**, most of it the clone and the waf build
-inside the image. The image pull/clone is a one-time setup step outside the
-product; it is not a runtime path and the "no network egress" rule above is
-unaffected. The `kinematic` transport is its fake, is what CI runs, is
-what the tuner runs, and is what the demo runs. See §7.
+| service | what | when |
+|---|---|---|
+| **ArcticSim** | four MAVLink endpoints; asset camera streams | runtime — it is the arena |
+| **`/api/tracks`** | `POST` a name, lat and lon; update by name | runtime — the scored path |
+| **Mapbox** | a free token for hi-res terrain **inside their sim** | setup only, optional |
+| **ArduPilot SITL** | local dev harness, three vehicle types | development only |
 
-One data input: a **public Arctic DEM tile**, fetched and committed as a
-downsampled fixture by **D25**. That fetch is **a loop action, not a human
-one**, and is a one-time setup step rather than a runtime path, so the
-no-egress rule above is unaffected. `sim/terrain.py` also ships a deterministic
-synthetic terrain generator used whenever `WHITEOUT_DEM` is unset, so
-**nothing blocks on the DEM arriving** and D25 is droppable (§9 item 7).
+**ArcticSim runs on our machine or theirs.** `git clone`, `cp .env.example
+.env`, `docker compose up --build`, needing **8 cores (12 recommended), 16 GB
+RAM (24 recommended) and 50 GB disk**. If the machine falls short, Dominion
+Dynamics issue a **WireGuard config to a dedicated cloud instance** and need
+the team roster — a human round-trip, and the first thing to resolve.
+
+**The DEM is gone.** ArcticSim renders Bellot Strait itself; we ship no
+terrain and load no tile.
 
 ---
 
@@ -489,6 +524,47 @@ rather than a tuned parameter before either of those is touched.
 ---
 
 ## 10. Risks and spikes
+
+**Re-planned 2026-09-19T17:15Z against `hackathon/ARENA.md`.** The original
+table's top risks were an unknown sponsor interface, a sweep that might not
+finish, and a flow network that might eat a day. The first is answered; the
+other two are closed. **The table below is the live one. The superseded table
+follows it, struck, so the reasoning is not lost.**
+
+| risk | severity | mitigation | ticket |
+|---|---|---|---|
+| **Vision does not work.** Find a small dark vessel among bright ice floes in a 640×480 frame, with no labelled data and no time to train. Nothing downstream scores without it, and it was absent from this spec until the workshop. | **highest** | Start with the cheap thing: floes are bright and static, the vessel is dark, and it is **the only moving object in the world**. Background subtraction, contrast against water, motion across frames. Build the pipeline and the evaluation harness **before** the sim arrives; fit the detector when real imagery exists. | #66 |
+| **The machine cannot run ArcticSim.** 8 cores, 16 GB, 50 GB. Nothing can be validated until the arena runs somewhere. | **highest** | Check the specs **now**. If short, DD issue a WireGuard config to a cloud instance and need the team roster — a human round-trip that does not get faster by starting it later. | #63 |
+| **We never see the vessel at all.** A 25 × 2 km channel, four assets, a random spawn and a random path. A search that never intersects the target scores nothing on every criterion at once. | **high** | Towers posted deliberately across the narrows, the fixed-wing sweeping the long axis, and a belief field that rules out water already swept. This is what *search efficiency* and *coverage* measure. | #68, #12, #13 |
+| **The negative-information likelihood is subtly wrong.** It looks plausible for hours, and an over-confident update empties belief from water the vessel is in — after which the fleet never looks there again. | **high** | Property test over many seeds: entropy non-increasing under non-detections, posterior always in [0,1]. A single-camera closed-form case checked by hand. A detector with a known false-negative rate must not drive belief to zero on one empty frame. | #13 |
+| **A wrong lat/lon is posted and we cannot tell.** *Accuracy* is judged, and **the arena gives no ground truth** — nothing ever confirms a fix was right. | **high** | Treat a confident wrong detection as worse than none: the detector degrades to silence rather than guessing. Sanity-check every fix against the belief field and the channel — a fix on land is a bug we *can* catch. | #66, #67 |
+| **One judged run, on Sunday.** No leaderboard, no retries, no iterating against their scorer. | **high** | Rehearse end to end against their sim, more than once. The original answer to risk was a tuning sweep; the answer now is rehearsal. | #63, #69 |
+| **The sim crashes.** DD said so plainly in their own deck. | medium | Reset, and wait five minutes before asking them. Do not edit `.env` beyond tower lat/lon. Everything above the transport is developed against local SITL, so a crash costs minutes. | #45, #63 |
+| **Information-gain routing loses to a systematic sweep.** Against a target on a random walk — now **confirmed** non-adversarial — betting an asset on unobserved water and being wrong scores worse than sweeping. | medium | The **frontier-coverage fallback is a first-class, selectable policy**, not a stub. The original mitigation was "the scorer tells us which wins" — **that arbiter is gone**, so choose by rehearsal, and be ready to ship frontier. | #27, #16 |
+| **The presentation is unprepared.** Half the judging, and this spec used to say presentation work was worth nothing here. | medium | Draft early, rehearse against a clock. Blocked by nothing. | #69 |
+| **Autonomy is overclaimed.** It is judged, and the panel watches the run. | medium | State plainly what is autonomous and what is hand-flown. Overclaiming to people who can see the screen is the worst available move. | #69 |
+
+**Spikes**, timeboxed, run before the work they de-risk:
+
+- **S1 (1h, before #47):** stand up local ArduPilot SITL for **copter, plane
+  and antennatracker** — the last especially, since towers are driven by raw
+  servo PWM. Confirm `guided <lat> <lon> <alt>` moves a vehicle and `servo
+  set` moves a tracker. Answer: can the control layer be built before the
+  arena arrives.
+- **S2 (1h, immediately after #63):** point one asset's camera at the vessel
+  by hand and look at the frames. Answer: **is it visibly detectable at all**,
+  and at what range. The earliest possible read on the project's highest risk,
+  and it needs no code.
+
+**Dropped:** the eleven-SITL-instance ceiling (ArcticSim runs its own four),
+SITL-unobtainable (a dev convenience now, not a deliverable), the overnight
+sweep, "teaching to the test reads as gaming" (no scorer to teach to), the
+flow-network over-engineering risk (#14 closed), and accidentally reading
+ground truth (there is none).
+
+---
+
+### Superseded table, kept for its reasoning
 
 | risk | severity | mitigation | owner ticket |
 |---|---|---|---|
