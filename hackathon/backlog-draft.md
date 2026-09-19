@@ -762,9 +762,12 @@ M1**. It is the input to the workshop, not an output of it.
 - [ ] Each possible answer to Q1 names the files that would change
 - [ ] The checklist has a blank line per question for the answer, and prints on
       one side of A4
-- [ ] The checklist is printed and in hand **before 2026-09-19T14:30Z**
+- [ ] The checklist is finished and its PR open **before 2026-09-19T14:30Z**
 
 ## Notes
+Printing the checklist and carrying it to the workshop is a human action
+(`DECISION.md` "Human actions"). This ticket's job is to have it ready to
+print in time.
 **Depends on nothing. Hard deadline: the Dominion Dynamics API Workshop,
 10:30 local = 2026-09-19T14:30Z, hour 10.5 of 32** (`SPEC.md` §11) — 3.5 hours
 before the 18:00Z sponsor selection lock. This ticket is worthless after that
@@ -815,6 +818,15 @@ that clause has only the MAVLink-only fallback in §3.
 - [ ] **On overrun:** the ticket closes with "SITL unobtainable in the timebox"
       and the reason. It does **not** silently extend, and it does not block
       any M1 ticket. M2(a) then exits per `SPEC.md` §8.
+- [ ] **On overrun, before closing:** stand a host-side `pymavlink` loopback —
+      two processes over a UDP socket, no ArduPilot behind it, one sending
+      `SET_POSITION_TARGET_GLOBAL_INT` and replying `GLOBAL_POSITION_INT` —
+      and record in `docs/sitl.md` the exact command that runs it and the
+      output it prints. **This is beat 6's fallback artifact** (`SPEC.md` §2):
+      the loopback and its recorded run are the only thing on screen in that
+      branch, so nothing else may be named as its evidence. Still no
+      production code — the loopback is a script under `scripts/`, not a
+      transport under `whiteout/`.
 
 ## Notes
 `SPEC.md` §3, §4, §8. No production code — nothing under `whiteout/` changes.
@@ -926,9 +938,9 @@ step inside D21.
 ## Notes
 `SPEC.md` §9 item 4. Depends on D21, and transitively on **D46** for SITL
 itself. If D46 reported SITL unobtainable, this ticket is closed as such, the
-`§3` MAVLink-only fallback applies, and beat 6 is demoed as the D6 conformance
-suite against a `pymavlink` loopback per `SPEC.md` §2. **M1 does not exit on
-this ticket** — beat 6's evidence is M2 work (`SPEC.md` §8).
+`§3` MAVLink-only fallback applies, and beat 6 is demoed as the `pymavlink`
+loopback D46 stands and records on overrun, per `SPEC.md` §2. **M1 does not
+exit on this ticket** — beat 6's evidence is M2 work (`SPEC.md` §8).
 
 ---
 
