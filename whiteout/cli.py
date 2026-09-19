@@ -36,14 +36,34 @@ def _transport() -> str:
     return os.environ.get("WHITEOUT_TRANSPORT") or "kinematic"
 
 
-def _default_seed() -> int:
-    """Episode seed. ``WHITEOUT_SEED`` absent means 0, never "random"."""
+def _resolve_seed(explicit: int | None) -> int | None:
+    """Episode seed: ``--seed`` wins, else ``WHITEOUT_SEED``, else 0.
+
+    Returns ``None`` when the environment holds something that is not an
+    integer, so the caller diagnoses it instead of raising. This resolution is
+    deliberately deferred to ``cmd_run`` rather than used as an argparse
+    default: as a default it ran at parser-construction time, so a bad
+    ``WHITEOUT_SEED`` took down every subcommand, including the five that
+    accept no seed at all, and ``--help``.
+    """
+    if explicit is not None:
+        return explicit
     raw = os.environ.get("WHITEOUT_SEED")
-    return int(raw) if raw else 0
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Write a placeholder episode log determined by seed, ticks and transport."""
+    seed = _resolve_seed(args.seed)
+    if seed is None:
+        raw = os.environ.get("WHITEOUT_SEED")
+        print(f"run: WHITEOUT_SEED={raw} is not an integer", file=sys.stderr)
+        return 1
     out = Path(args.out)
     if out.parent != Path():
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +71,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "type": "header",
-                "seed": args.seed,
+                "seed": seed,
                 "ticks": args.ticks,
                 "transport": _transport(),
                 "schema": "placeholder",
@@ -62,7 +82,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     for tick in range(args.ticks):
         lines.append(
             json.dumps(
-                {"type": "tick", "tick": tick, "seed": args.seed},
+                {"type": "tick", "tick": tick, "seed": seed},
                 sort_keys=True,
             )
         )
@@ -83,12 +103,23 @@ def cmd_score(args: argparse.Namespace) -> int:
         if not weights_path.is_file():
             print(f"score: no such weights file: {weights_path}", file=sys.stderr)
             return 1
-        loaded = json.loads(weights_path.read_text(encoding="utf-8"))
+        try:
+            loaded = json.loads(weights_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            print(f"score: weights file is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(loaded, dict):
+            print("score: weights file is not a JSON object", file=sys.stderr)
+            return 1
         missing = [axis for axis in AXES if axis not in loaded]
         if missing:
             print(f"score: weights file is missing axes: {missing}", file=sys.stderr)
             return 1
-        weights = {axis: float(loaded[axis]) for axis in AXES}
+        try:
+            weights = {axis: float(loaded[axis]) for axis in AXES}
+        except (TypeError, ValueError) as exc:
+            print(f"score: weights file has a non-numeric axis: {exc}", file=sys.stderr)
+            return 1
     records = sum(1 for line in log.read_text(encoding="utf-8").splitlines() if line)
     scores = {axis: 0.0 for axis in AXES}
     total = sum(weights[axis] * scores[axis] for axis in AXES)
@@ -108,7 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="run an episode and write its log")
-    run.add_argument("--seed", type=int, default=_default_seed())
+    run.add_argument("--seed", type=int, default=None)
     run.add_argument("--ticks", type=int, default=400)
     run.add_argument("--out", default="artifacts/episode.jsonl")
     run.set_defaults(func=cmd_run)

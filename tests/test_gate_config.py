@@ -105,6 +105,19 @@ def test_workflow_runs_the_gate_script() -> None:
     assert "'3.11'" in body
 
 
+def test_workflow_only_cancels_in_progress_pull_request_runs() -> None:
+    """On push the concurrency group is refs/heads/main, shared by every merge."""
+    body = WORKFLOW.read_text(encoding="utf-8")
+    assert "cancel-in-progress: true" not in body
+    assert "github.event_name == 'pull_request'" in body
+
+
+def test_gate_build_step_prunes_both_output_trees() -> None:
+    source = GATE.read_text(encoding="utf-8")
+    for tree in ("build", "dist"):
+        assert f'rmtree(REPO_ROOT / "{tree}", ignore_errors=True)' in source
+
+
 def test_workflow_has_no_path_filter() -> None:
     body = WORKFLOW.read_text(encoding="utf-8")
     for line in body.splitlines():

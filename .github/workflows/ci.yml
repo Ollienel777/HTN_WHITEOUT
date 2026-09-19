@@ -9,7 +9,12 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only for pull requests, where the group is per-PR and a superseded run is
+  # worth cancelling. On push the group is `refs/heads/main`, shared by every
+  # merge: two squash-merges close together would leave the earlier commit on
+  # main carrying a cancelled check whose gate never ran, and post-merge main
+  # is the only place a semantic conflict between two green PRs shows up.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:

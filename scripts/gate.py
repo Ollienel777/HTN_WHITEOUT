@@ -135,7 +135,11 @@ def step_build() -> str | None:
     # modules that have since been deleted. CI never sees it (fresh checkout),
     # which makes it exactly the machine that builds the submission artifact
     # that gets the wrong wheel.
+    # `python -m build` writes into dist/ and never prunes either, so once the
+    # version moves off 0.1.0 the same machine ends up holding two wheels and
+    # "the wheel the submission links" stops being a single file.
     shutil.rmtree(REPO_ROOT / "build", ignore_errors=True)
+    shutil.rmtree(REPO_ROOT / "dist", ignore_errors=True)
     return _shell_step([PY, "-m", "build", "--wheel", "--no-isolation"])
 
 
