@@ -535,3 +535,104 @@ def test_reading_one_tick_does_not_hold_the_file_open(tmp_path: Path) -> None:
     assert next(records).t == 0.0
     os.remove(log)
     assert not log.exists()
+
+
+# --- R2-1: the writer refuses anything the reader would reject --------------
+
+
+def test_writer_refuses_an_unknown_enum_and_keeps_the_existing_log(
+    tmp_path: Path,
+) -> None:
+    """The enum guard is reader-side only unless the writer runs the reader.
+
+    ``__post_init__`` coerces but does not check, so a sim holding a typo'd
+    ``cls`` reaches the writer with no warning upstream. Without the write-path
+    round trip the atomic replace succeeds and hands the scorer an unreadable
+    log in place of a good one.
+    """
+    log = tmp_path / "episode.jsonl"
+    write_episode_log(log, [make_record(tick) for tick in range(5)])
+    before = log.read_bytes()
+
+    doomed = [make_record(tick) for tick in range(5)]
+    observation = doomed[3].observation
+    poses = list(observation.poses)
+    poses[0] = dataclasses.replace(poses[0], cls="typo")
+    doomed[3] = dataclasses.replace(
+        doomed[3],
+        observation=dataclasses.replace(observation, poses=tuple(poses)),
+    )
+
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, doomed)
+    assert caught.value.line == 4
+    assert "cls" in str(caught.value)
+    assert log.read_bytes() == before
+    assert validate_episode_log(log) == 5
+    assert list(tmp_path.iterdir()) == [log]
+
+
+def test_writer_refuses_an_unknown_footprint_kind(tmp_path: Path) -> None:
+    """Any reader-side rule is mirrored, not just the one R2-1 reproduced."""
+    log = tmp_path / "kind.jsonl"
+    record = make_record(0)
+    reports = list(record.observation.reports)
+    reports[0] = dataclasses.replace(
+        reports[0],
+        footprint=dataclasses.replace(reports[0].footprint, kind="blob"),
+    )
+    doomed = dataclasses.replace(
+        record,
+        observation=dataclasses.replace(record.observation, reports=tuple(reports)),
+    )
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [doomed])
+    assert "kind" in str(caught.value)
+    assert not log.exists()
+
+
+def test_writer_refuses_a_backwards_t_and_keeps_the_existing_log(
+    tmp_path: Path,
+) -> None:
+    """The monotonic clock lived only in the reader, so the writer could
+    replace a good five-record log with one that throws on line 3."""
+    log = tmp_path / "episode.jsonl"
+    write_episode_log(log, [make_record(tick) for tick in range(5)])
+    before = log.read_bytes()
+
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [make_record(tick) for tick in (1, 3, 2, 4)])
+    assert caught.value.line == 3
+    assert "before the previous record's" in str(caught.value)
+    assert log.read_bytes() == before
+    assert validate_episode_log(log) == 5
+    assert list(tmp_path.iterdir()) == [log]
+
+
+def test_a_repeated_t_is_written(tmp_path: Path) -> None:
+    """The rule is non-decreasing, not strictly increasing; the reader agrees."""
+    log = tmp_path / "flat.jsonl"
+    assert write_episode_log(log, [make_record(1), make_record(1)]) == 2
+    assert validate_episode_log(log) == 2
+
+
+# --- R2-2: an overflowing literal is a non-finite float ---------------------
+
+
+def test_validator_rejects_an_overflowing_number_literal(tmp_path: Path) -> None:
+    """``1e999`` is valid JSON grammar, so ``parse_constant`` never sees it.
+
+    ``json.loads`` yields ``inf``, the line survives ``JSON.parse`` so the
+    viewer renders an infinite entropy, and a scorer averaging it returns
+    ``nan`` for the whole episode.
+    """
+    log = tmp_path / "overflow.jsonl"
+    payload = make_record(0).to_dict()
+    payload["belief_digest"]["entropy"] = "@OVERFLOW@"
+    poisoned = json.dumps(payload, sort_keys=True).replace('"@OVERFLOW@"', "1e999")
+    assert math.isinf(json.loads(poisoned)["belief_digest"]["entropy"])
+    _write_lines(log, [poisoned])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert caught.value.line == 1
+    assert "record.belief_digest.entropy" in str(caught.value)

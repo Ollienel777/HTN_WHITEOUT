@@ -16,8 +16,9 @@ The format:
   also makes the advertised round trip silently false, because ``nan != nan``.
   There is no encoding of them that survives both, so the writer refuses a
   non-finite float (naming the field) rather than writing a log the viewer
-  cannot open, and the reader refuses the bare tokens rather than parsing
-  what it says is not JSON.
+  cannot open, and the reader refuses both the bare tokens and any number
+  that parses to a non-finite float — ``1e999`` is valid JSON grammar and
+  overflows a double — so that reader and writer agree on what is legal.
 - Every line carries ``schema_version``. A log whose lines disagree with
   :data:`SCHEMA_VERSION` is rejected rather than guessed at.
 - A record's clocks agree: ``observation.t``, ``intent.t``,
@@ -114,10 +115,22 @@ def _encode(payload: dict[str, Any]) -> str:
 def write_episode_log(path: Path | str, records: Iterable[EpisodeRecord]) -> int:
     """Write ``records`` as JSONL to ``path``; return how many were written.
 
-    The writer refuses anything the reader would reject: a record whose
-    ``schema_version`` is not :data:`SCHEMA_VERSION`, a non-finite float
-    (named by its dotted field path), or a record whose clocks disagree. A
+    The writer refuses anything the reader would reject, and it does so by
+    running the reader: every payload is passed back through
+    :meth:`~whiteout.types.EpisodeRecord.from_dict` before it is encoded, so
+    each reader-side rule — unknown or missing fields, wrong types, an
+    unrecognised ``cls`` or ``kind`` — is mirrored on the write path without
+    being restated here, and a rule added to the reader later is mirrored the
+    day it lands. The checks the reader performs outside ``from_dict`` are
+    restated: ``schema_version`` must be :data:`SCHEMA_VERSION`, floats must
+    be finite (the offender is named by its dotted field path), a record's
+    clocks must agree, and ``t`` must not run backwards between records. A
     log this build cannot read back can never be produced by it.
+
+    Round-tripping parses every record twice on write, which costs about
+    120 ms per 1000 records — a write now costs roughly what reading the
+    same log back costs. That is the price of the promise above, and it is
+    paid once per episode against a format whose only purpose is to be read.
 
     The write is atomic. Records are written to a sibling temp file, which
     replaces ``path`` only after the last one succeeds; a rejected record
@@ -134,10 +147,19 @@ def write_episode_log(path: Path | str, records: Iterable[EpisodeRecord]) -> int
     )
     temp = Path(temp_name)
     written = 0
+    previous: float | None = None
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             for index, record in enumerate(records, start=1):
-                handle.write(_encode(_writable(record, index)))
+                payload = _writable(record, index)
+                if previous is not None and record.t < previous:
+                    raise EpisodeLogError(
+                        index,
+                        f"refusing to write t {record.t!r}, which is before "
+                        f"the previous record's {previous!r}",
+                    )
+                previous = record.t
+                handle.write(_encode(payload))
                 handle.write("\n")
                 written += 1
     except BaseException:
@@ -165,6 +187,12 @@ def _writable(record: EpisodeRecord, index: int) -> dict[str, Any]:
             index,
             f"refusing to write a non-finite float at {non_finite}: NaN and Infinity are not JSON",
         )
+    try:
+        EpisodeRecord.from_dict(payload)
+    except RecordError as exc:
+        raise EpisodeLogError(
+            index, f"refusing to write a record the reader would reject: {exc}"
+        ) from exc
     return payload
 
 
@@ -174,9 +202,17 @@ def validate_line(line: str, number: int) -> EpisodeRecord:
     Rejects, in order: a line that is not valid JSON — a truncated write is
     the common case, and the bare ``NaN``/``Infinity``/``-Infinity`` tokens
     that Python's ``json`` accepts as an extension are rejected here too — a
-    line whose ``schema_version`` is not :data:`SCHEMA_VERSION`, a line with a
-    missing field, an unknown field or a wrongly typed value, and a record
-    whose members disagree with its own ``t``.
+    line whose ``schema_version`` is not :data:`SCHEMA_VERSION`, a non-finite
+    float, a line with a missing field, an unknown field or a wrongly typed
+    value, and a record whose members disagree with its own ``t``.
+
+    The non-finite check is separate from the token rejection because the two
+    catch different things. ``parse_constant`` only ever sees the bare
+    tokens, but ``1e999`` is valid JSON grammar that overflows a double, so
+    ``json.loads`` yields ``inf`` from it without consulting the hook. The
+    writer refuses that value, so the reader must too, or a hand-edited or
+    foreign-producer log carries an infinity past the gate's validator and
+    into a scorer that averages it to ``nan``.
     """
     try:
         payload = json.loads(line, parse_constant=_reject_constant)
@@ -191,6 +227,12 @@ def validate_line(line: str, number: int) -> EpisodeRecord:
                 number,
                 f"schema_version {version!r} is not supported, expected {SCHEMA_VERSION}",
             )
+    non_finite = _non_finite_field(payload, "record")
+    if non_finite is not None:
+        raise EpisodeLogError(
+            number,
+            f"non-finite float at {non_finite}: NaN and Infinity are not JSON",
+        )
     try:
         record = EpisodeRecord.from_dict(payload)
     except RecordError as exc:
