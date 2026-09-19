@@ -686,6 +686,8 @@ D12 and D13.
 `DESIGN.md` "Components". Every number in `--font-mono` with `tabular-nums`.
 
 ## Acceptance
+- [ ] Each `ScoreDial` renders its value at `--t-24` mono tabular and its
+      label at `--t-12` `--n-400`, fitting the 48px topbar
 - [ ] Score values do not jitter horizontally as they tick
 - [ ] Callsigns are `WING-1`/`QUAD-1`/`ROVR-1`/`TOWR-1` style, never "Vehicle 1"
 - [ ] Inspector values share one right edge

@@ -116,7 +116,7 @@ One family plus one monospace.
 --t-16: 16px/24px;   /* panel titles */
 --t-20: 20px/28px;   /* section heads */
 --t-24: 24px/32px;   /* score values */
---t-48: 48px/1.0;    /* the hero readout: the four axis numbers, and the clock */
+--t-48: 48px/1.0;    /* the hero readout: the beat-3 `TRACKED` badge, and the clock */
 ```
 
 Weights in use: **400, 500, 600.** Three, not five.
@@ -250,7 +250,7 @@ switched on.
   The `TRACKED` badge appears in the field's top-left, `--t-48` mono,
   `--ok`, with the clock — big enough to read from the back of the room, and
   it is the only time type that size appears on the map. (`--t-48` is also the
-  topbar dials and the clock; the topbar is not the map. D34 builds this
+  clock; the topbar dials are `--t-24`, per "Components". D34 builds this
   badge.)
 - **Beat 4** — camera holds, rail's CONTACTS section expands, handoff arcs draw
   between assets on the field in the two class colours.
