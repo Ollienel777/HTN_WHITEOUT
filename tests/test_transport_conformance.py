@@ -4,10 +4,10 @@
 owes its caller. This module is the runner, and it is deliberately thin: it
 derives what to run from :data:`~whiteout.transport.TRANSPORT_FACTORIES`, so
 the `sitl` and `arena` adapters inherit the suite by being registered and
-nothing here is edited when they arrive. ``hackathon/ARENA.md`` §7 settled
-what `arena` will be — MAVLink per asset plus an HTTP tracks API — which is
-the adapter the seam was built for, and the one this suite exists to hand a
-definition of done to.
+nothing here is edited when they arrive. ``hackathon/ARENA.md`` settled what
+`arena` will be — MAVLink per asset (§7, and §1 Q6) plus an HTTP tracks API
+for submitting detections (§1 Q6) — which is the adapter the seam was built
+for, and the one this suite exists to hand a definition of done to.
 
 Three groups, one per acceptance criterion:
 
@@ -20,7 +20,10 @@ Three groups, one per acceptance criterion:
 The last group here is the suite's own guard: a conformance suite that passes
 everything is worse than none, because it is believed. Each case plants one
 breach in a transport that is otherwise conforming and asserts the check that
-owns that breach fails on it.
+owns that breach fails on it — as an ``AssertionError``, which is what the
+suite promises a breach arrives as. Every check owns at least one planted
+breach: a check nothing is planted against is a check nobody has shown to be
+load-bearing, and the gap is invisible while everything is green.
 """
 
 from __future__ import annotations
@@ -41,9 +44,16 @@ from whiteout.transport import (
     TRANSPORT_NAMES,
     KinematicTransport,
     Transport,
+    TransportError,
     create_transport,
 )
-from whiteout.types import WorldObservation
+from whiteout.types import (
+    FleetIntent,
+    SensorFootprint,
+    SensorReport,
+    TargetTruth,
+    WorldObservation,
+)
 
 SUITE = Path(conformance.__file__)
 
@@ -121,7 +131,7 @@ def test_every_check_takes_one_transport_factory_and_says_what_it_checks() -> No
 def test_the_suite_covers_every_behaviour_the_ticket_names() -> None:
     """Ordering, tick monotonicity, silence, close mid-episode, no truth."""
     names = " ".join(check.__name__ for check in CONFORMANCE_CHECKS)
-    for behaviour in ("before_connect", "monotonic", "silent", "close_mid_episode", "truth"):
+    for behaviour in ("before_connect", "monotonic", "silence", "close_mid_episode", "truth"):
         assert behaviour in names, f"no check covers {behaviour}"
 
 
@@ -140,7 +150,14 @@ def test_the_suite_names_no_transport_implementation() -> None:
     for name in TRANSPORT_NAMES:
         assert name not in text, f"the suite names the {name!r} transport"
     for implementation in TRANSPORT_FACTORIES.values():
-        assert implementation.__name__.lower() not in text
+        # A factory need not be a class: TRANSPORT_FACTORIES is typed
+        # `Callable[..., Transport]`, and a `functools.partial` carrying an
+        # adapter's endpoint config has no `__name__`. An anonymous factory
+        # has no name for the suite to leak, so there is nothing to check.
+        registered = getattr(implementation, "__name__", "")
+        assert not registered or registered.lower() not in text, (
+            f"the suite names the {registered!r} implementation"
+        )
 
 
 def test_the_suite_imports_no_module_inside_the_transport_package() -> None:
@@ -176,7 +193,7 @@ class _RewindingTransport(KinematicTransport):
         return WorldObservation(t=0.0, poses=observation.poses, reports=observation.reports)
 
 
-class _EagerTransport(KinematicTransport):
+class _LazyTransport(KinematicTransport):
     """Connects lazily on first use, so ordering is never enforced."""
 
     def observe(self) -> WorldObservation:
@@ -212,8 +229,8 @@ class _LeakingTransport(KinematicTransport):
         )
 
 
-class _FabricatingTransport(KinematicTransport):
-    """Stamps stale poses with the current tick for an asset that is silent."""
+class _DoublePosingTransport(KinematicTransport):
+    """Reports one asset twice in a tick, so the fleet is not what it says."""
 
     def observe(self) -> WorldObservation:
         observation = super().observe()
@@ -221,15 +238,143 @@ class _FabricatingTransport(KinematicTransport):
         return WorldObservation(t=observation.t, poses=doubled, reports=observation.reports)
 
 
+class _NarrowTransport:
+    """Three of the four methods. Not a subclass: the hole is the point.
+
+    A wrapper rather than a subclass because the breach is a *missing*
+    method, and the seam is a ``Protocol`` — an adapter wrapping something
+    the sponsor hands us is exactly the shape that arrives with a hole in it.
+    """
+
+    def __init__(self, seed: int = 0) -> None:
+        self._inner = KinematicTransport(seed=seed)
+
+    def connect(self) -> None:
+        self._inner.connect()
+
+    def observe(self) -> WorldObservation:
+        return self._inner.observe()
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _JealousTransport(KinematicTransport):
+    """Refuses a second connect on a live link instead of ignoring it."""
+
+    def connect(self) -> None:
+        if self.connected:
+            raise TransportError("the link is already up")
+        super().connect()
+
+
+class _RefusingTransport(KinematicTransport):
+    """Takes the empty intent and faults on a commanded one."""
+
+    def command(self, intent: FleetIntent) -> None:
+        if intent.intents:
+            raise TransportError("this link carries no intents")
+        super().command(intent)
+
+
+class _ReopeningTransport(KinematicTransport):
+    """Reconnects after close(), rewinding a clock the caller has seen."""
+
+    def connect(self) -> None:
+        self._closed = False
+        super().connect()
+
+
+class _SpentTransport(KinematicTransport):
+    """close() is final even on a link that was never up."""
+
+    def close(self) -> None:
+        self._closed = True
+        self._connected = False
+
+
+def _footprint() -> SensorFootprint:
+    """Some footprint. Nothing in the guard below depends on its shape."""
+    return SensorFootprint(kind="circle", x=0.0, y=0.0, radius=100.0, heading=0.0, half_angle=0.0)
+
+
+class _MisattributingTransport(KinematicTransport):
+    """Reports from an asset it is not posing — a sighting from nobody."""
+
+    def observe(self) -> WorldObservation:
+        observation = super().observe()
+        report = SensorReport(
+            asset_id="not-in-this-fleet",
+            t=observation.t,
+            footprint=_footprint(),
+            detections=(),
+            negative=True,
+        )
+        return WorldObservation(t=observation.t, poses=observation.poses, reports=(report,))
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportWithContext(SensorReport):
+    """A report with room for something the seam never agreed to carry."""
+
+    context: object = None
+
+
+class _SmugglingTransport(KinematicTransport):
+    """Nests ground truth inside a report, under an innocent field name.
+
+    The leak the field-set pin and the truth-named-field walk both miss: the
+    observation's own shape is untouched, nothing is called `truth`, and only
+    the type walk finds it.
+    """
+
+    def observe(self) -> WorldObservation:
+        observation = super().observe()
+        report = _ReportWithContext(
+            asset_id=observation.poses[0].asset_id,
+            t=observation.t,
+            footprint=_footprint(),
+            detections=(),
+            negative=True,
+            context=TargetTruth(
+                target_id="vessel-1",
+                x=0.0,
+                y=0.0,
+                z=0.0,
+                heading=0.0,
+                speed=0.0,
+                target_class="vessel",
+            ),
+        )
+        return WorldObservation(t=observation.t, poses=observation.poses, reports=(report,))
+
+
+#: Every planted breach, as ``(transport, the check that owns it)``. A tuple
+#: and not an inline parameter list, because
+#: :func:`test_every_check_owns_a_planted_breach` reads it: a check nothing is
+#: planted against is one nobody has shown to be load-bearing, and that gap is
+#: invisible while the suite is green.
+_SILENCE_CHECK = "check_silence_is_not_a_fault_and_every_report_is_attributable"
+
+_PLANTED_BREACHES: tuple[tuple[type, str], ...] = (
+    (_NarrowTransport, "check_the_protocol_surface_is_the_whole_seam"),
+    (_LazyTransport, "check_observe_and_command_refuse_before_connect"),
+    (_JealousTransport, "check_connect_is_idempotent_while_the_link_is_up"),
+    (_RewindingTransport, "check_the_tick_clock_is_monotonic"),
+    (_DoublePosingTransport, _SILENCE_CHECK),
+    (_MisattributingTransport, _SILENCE_CHECK),
+    (_RefusingTransport, "check_command_is_accepted_for_every_tick"),
+    (_LenientTransport, "check_close_mid_episode_ends_the_episode"),
+    (_ReopeningTransport, "check_connect_after_close_refuses_rather_than_rewinding"),
+    (_SpentTransport, "check_close_is_safe_before_connect"),
+    (_LeakingTransport, "check_observe_never_returns_ground_truth"),
+    (_SmugglingTransport, "check_observe_never_returns_ground_truth"),
+)
+
+
 @pytest.mark.parametrize(
     ("transport_class", "check_name"),
-    [
-        (_RewindingTransport, "check_the_tick_clock_is_monotonic"),
-        (_EagerTransport, "check_observe_and_command_refuse_before_connect"),
-        (_LenientTransport, "check_close_mid_episode_ends_the_episode"),
-        (_LeakingTransport, "check_observe_never_returns_ground_truth"),
-        (_FabricatingTransport, "check_a_silent_asset_is_absent_and_never_fabricated"),
-    ],
+    _PLANTED_BREACHES,
     ids=lambda value: value.__name__ if isinstance(value, type) else value,
 )
 def test_the_suite_fails_a_transport_that_breaches_the_contract(
@@ -238,6 +383,22 @@ def test_the_suite_fails_a_transport_that_breaches_the_contract(
     check = getattr(conformance, check_name)
     with pytest.raises(AssertionError):
         check(lambda: transport_class(seed=SEED))
+
+
+def test_every_check_owns_a_planted_breach() -> None:
+    """The guard covers the whole suite, and keeps covering it.
+
+    Without this, a check added later is green from the day it lands and
+    nobody finds out whether it can fail until an adapter's behaviour turns
+    on it.
+    """
+    covered = {check_name for _, check_name in _PLANTED_BREACHES}
+    unguarded = sorted(
+        check.__name__ for check in CONFORMANCE_CHECKS if check.__name__ not in covered
+    )
+    assert not unguarded, f"no planted breach for: {unguarded}"
+    unknown = sorted(covered - {check.__name__ for check in CONFORMANCE_CHECKS})
+    assert not unknown, f"a breach is planted against something the suite does not run: {unknown}"
 
 
 @pytest.mark.parametrize("check", CONFORMANCE_CHECKS, ids=check_id)
