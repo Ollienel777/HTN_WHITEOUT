@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
+import os
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
+import whiteout.types
 from whiteout.log import (
     SCHEMA_VERSION,
     EpisodeLogError,
+    iter_episode_log,
     read_episode_log,
     validate_episode_log,
     validate_line,
@@ -353,3 +357,181 @@ def test_writer_refuses_a_foreign_schema_version(tmp_path: Path) -> None:
 def test_from_dict_raises_record_error_on_a_non_object() -> None:
     with pytest.raises(RecordError):
         EpisodeRecord.from_dict([1, 2, 3])
+
+
+# --- R1-1: non-finite floats are not JSON -----------------------------------
+
+
+def _with_non_finite() -> EpisodeRecord:
+    record = make_record(0)
+    digest = dataclasses.replace(record.belief_digest, entropy=math.nan, peak_p=math.inf)
+    return dataclasses.replace(record, belief_digest=digest)
+
+
+def test_writer_refuses_a_non_finite_float_naming_the_field(tmp_path: Path) -> None:
+    """NaN and Infinity are not JSON; the viewer's JSON.parse throws on them."""
+    log = tmp_path / "nan.jsonl"
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [_with_non_finite()])
+    assert "record.belief_digest.entropy" in str(caught.value)
+    assert not log.exists()
+
+
+def test_validator_rejects_the_nan_token_naming_the_line(tmp_path: Path) -> None:
+    """A hand-made or older log carrying bare NaN is not valid JSON."""
+    log = tmp_path / "nan_token.jsonl"
+    payload = make_record(1).to_dict()
+    payload["belief_digest"]["entropy"] = math.nan
+    poisoned = json.dumps(payload, sort_keys=True)
+    assert "NaN" in poisoned
+    _write_lines(log, [_good_line(0), poisoned])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert caught.value.line == 2
+    assert "not valid JSON" in str(caught.value)
+
+
+def test_a_written_log_parses_under_strict_json(tmp_path: Path) -> None:
+    """What the viewer does: JSON.parse, which has no NaN or Infinity."""
+    log = tmp_path / "strict.jsonl"
+    write_episode_log(log, [make_record(tick) for tick in range(3)])
+
+    def _reject(token: str) -> float:
+        raise AssertionError(f"non-JSON constant {token}")
+
+    for line in log.read_text(encoding="utf-8").splitlines():
+        json.loads(line, parse_constant=_reject)
+
+
+# --- R1-2: a failed write never replaces a good log -------------------------
+
+
+def test_a_failed_write_leaves_the_existing_log_untouched(tmp_path: Path) -> None:
+    """A truncated log that validates clean is worse than a failed write."""
+    log = tmp_path / "episode.jsonl"
+    good = [make_record(tick) for tick in range(5)]
+    write_episode_log(log, good)
+    before = log.read_bytes()
+
+    doomed = [make_record(tick) for tick in range(5)]
+    doomed[3] = dataclasses.replace(doomed[3], schema_version=SCHEMA_VERSION + 1)
+    with pytest.raises(EpisodeLogError):
+        write_episode_log(log, doomed)
+
+    assert log.read_bytes() == before
+    assert validate_episode_log(log) == 5
+    assert list(log.parent.iterdir()) == [log]
+
+
+def test_a_failed_first_write_leaves_no_log_at_all(tmp_path: Path) -> None:
+    log = tmp_path / "never.jsonl"
+    doomed = [dataclasses.replace(make_record(0), schema_version=SCHEMA_VERSION + 1)]
+    with pytest.raises(EpisodeLogError):
+        write_episode_log(log, doomed)
+    assert not log.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+# --- R1-3: the documented enums are enforced --------------------------------
+
+
+def test_validator_rejects_an_unknown_vehicle_class(tmp_path: Path) -> None:
+    log = tmp_path / "cls.jsonl"
+    payload = make_record(0).to_dict()
+    payload["observation"]["poses"][0]["cls"] = "fixed_wing_typo"
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "cls" in str(caught.value)
+    assert "is not one of" in str(caught.value)
+
+
+def test_validator_rejects_an_unknown_footprint_kind(tmp_path: Path) -> None:
+    log = tmp_path / "kind.jsonl"
+    payload = make_record(0).to_dict()
+    payload["observation"]["reports"][0]["footprint"]["kind"] = "blob"
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "kind" in str(caught.value)
+    assert "is not one of" in str(caught.value)
+
+
+def test_the_enums_are_public() -> None:
+    for name in ("CONTACT_STATES", "VEHICLE_CLASSES", "FOOTPRINT_KINDS"):
+        assert name in whiteout.types.__all__
+
+
+# --- R1-5: the clocks of one record agree, and time does not run back -------
+
+
+def test_validator_rejects_a_record_whose_members_disagree_on_t(tmp_path: Path) -> None:
+    log = tmp_path / "desync.jsonl"
+    payload = make_record(0).to_dict()
+    payload["t"] = 99.0
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "record.observation.t" in str(caught.value)
+
+
+def test_validator_rejects_t_running_backwards(tmp_path: Path) -> None:
+    log = tmp_path / "backwards.jsonl"
+    _write_lines(log, [_good_line(0), _good_line(3), _good_line(2)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert caught.value.line == 3
+
+
+def test_writer_refuses_a_record_whose_clocks_disagree(tmp_path: Path) -> None:
+    log = tmp_path / "desync_write.jsonl"
+    record = dataclasses.replace(make_record(0), t=99.0)
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [record])
+    assert "clocks disagree" in str(caught.value)
+    assert not log.exists()
+
+
+# --- R1-7 and R1-9: one record, one byte stream, one JSON shape -------------
+
+
+def test_an_int_in_a_float_field_serialises_as_a_float() -> None:
+    """The gate compares bytes; an int where a float is declared breaks that."""
+    integral = Pose(asset_id="a", cls="quad", t=0, x=0, y=0, z=0, heading=0, speed=0, energy_used=0)
+    floating = Pose(
+        asset_id="a",
+        cls="quad",
+        t=0.0,
+        x=0.0,
+        y=0.0,
+        z=0.0,
+        heading=0.0,
+        speed=0.0,
+        energy_used=0.0,
+    )
+    assert integral == floating
+    assert json.dumps(integral.to_dict(), sort_keys=True) == json.dumps(
+        floating.to_dict(), sort_keys=True
+    )
+    assert isinstance(integral.x, float)
+
+
+def test_to_dict_is_the_json_shape() -> None:
+    """A golden file or an ablation diff compares to_dict against a parsed line."""
+    payload = make_record(0).to_dict()
+    assert payload == json.loads(json.dumps(payload))
+    assert isinstance(payload["contacts"], list)
+    assert isinstance(payload["belief_digest"]["peak_xy"], list)
+
+
+# --- R1-8: the reader does not hold the file open ---------------------------
+
+
+def test_reading_one_tick_does_not_hold_the_file_open(tmp_path: Path) -> None:
+    """On Windows a held handle blocks the next run from rewriting the log."""
+    log = tmp_path / "peek.jsonl"
+    write_episode_log(log, [make_record(tick) for tick in range(3)])
+    records = iter_episode_log(log)
+    assert next(records).t == 0.0
+    os.remove(log)
+    assert not log.exists()

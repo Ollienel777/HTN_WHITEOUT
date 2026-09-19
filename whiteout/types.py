@@ -25,11 +25,15 @@ construction, and the guard that the policy cannot read it would have nothing
 left to guard.
 
 Every type is a frozen dataclass with ``to_dict``/``from_dict``. Sequences are
-tuples so that records stay hashable and immutable; JSON round-trips them as
-arrays and ``from_dict`` converts them back. ``from_dict`` is strict: a
-missing field, an unknown field or a wrongly typed value raises
-``RecordError``. That strictness is what ``whiteout.log``'s validator is built
-on — no dicts cross a module boundary (``SPEC.md`` §5).
+tuples so that records stay hashable and immutable; ``to_dict`` returns the
+JSON shape (tuples as lists), so ``d == json.loads(json.dumps(d))`` holds, and
+``from_dict`` converts the arrays back to tuples. Declared ``float`` fields
+are coerced to ``float`` on construction, because an ``int`` that Python and
+mypy both accept there would serialise different bytes for an equal record.
+``from_dict`` is strict: a missing field, an unknown field, a wrongly typed
+value or a value outside a documented enum raises ``RecordError``. That
+strictness is what ``whiteout.log``'s validator is built on — no dicts cross a
+module boundary (``SPEC.md`` §5).
 """
 
 from __future__ import annotations
@@ -39,6 +43,9 @@ from dataclasses import asdict, dataclass, fields
 from typing import Any
 
 __all__ = [
+    "CONTACT_STATES",
+    "FOOTPRINT_KINDS",
+    "VEHICLE_CLASSES",
     "BeliefDigest",
     "Contact",
     "Detection",
@@ -64,9 +71,64 @@ CONTACT_STATES: tuple[str, ...] = (
     "lost",
 )
 
+#: Vehicle classes (``Pose.cls``). The heterogeneity the collaboration axis
+#: scores is keyed on these, so a typo must fail rather than mis-score.
+VEHICLE_CLASSES: tuple[str, ...] = ("fixedwing", "quad", "rover", "tower")
+
+#: Sensor footprint shapes (``SensorFootprint.kind``). ``kind`` decides
+#: circle-versus-cone geometry in the coverage computation.
+FOOTPRINT_KINDS: tuple[str, ...] = ("circle", "cone")
+
 
 class RecordError(ValueError):
     """A JSON payload does not match the record type it was read as."""
+
+
+# --------------------------------------------------------------------------
+# Serialising helpers.
+#
+# ``to_dict`` returns the *JSON* shape, not the Python one: tuples become
+# lists, so that ``d == json.loads(json.dumps(d))`` holds and a golden-file
+# test or an ablation diff can compare a constructed record against a parsed
+# line. ``from_dict`` converts the arrays back to tuples.
+#
+# Declared ``float`` fields are coerced on construction. Python accepts an
+# ``int`` where a ``float`` is declared and mypy's numeric tower does too, so
+# ``Pose(x=0)`` would serialise ``"x": 0`` while ``Pose(x=0.0)`` serialises
+# ``"x": 0.0`` — two equal records, two different byte streams, and the
+# gate's determinism step compares bytes.
+# --------------------------------------------------------------------------
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _to_json_dict(record: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {key: _json_safe(value) for key, value in asdict(record).items()}
+    return out
+
+
+def _as_floats(record: Any, *names: str) -> None:
+    """Coerce declared-``float`` fields in place, on a frozen dataclass."""
+    for name in names:
+        value = getattr(record, name)
+        if type(value) is not float:
+            object.__setattr__(record, name, float(value))
+
+
+def _as_float_pair(record: Any, name: str) -> None:
+    first, second = getattr(record, name)
+    object.__setattr__(record, name, (float(first), float(second)))
+
+
+def _as_int_pair(record: Any, name: str) -> None:
+    first, second = getattr(record, name)
+    object.__setattr__(record, name, (int(first), int(second)))
 
 
 # --------------------------------------------------------------------------
@@ -180,9 +242,9 @@ def _one_of(value: str, allowed: tuple[str, ...], where: str, name: str) -> str:
 class Pose:
     """One asset's state at one instant, as the transport reports it.
 
-    ``cls`` is the vehicle class (``fixedwing``, ``quad``, ``rover``,
-    ``tower``); ``energy_used`` is cumulative over the episode and is what the
-    efficiency axis of the scorer consumes.
+    ``cls`` is the vehicle class, one of :data:`VEHICLE_CLASSES`;
+    ``energy_used`` is cumulative over the episode and is what the efficiency
+    axis of the scorer consumes.
     """
 
     asset_id: str
@@ -195,8 +257,11 @@ class Pose:
     speed: float
     energy_used: float
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t", "x", "y", "z", "heading", "speed", "energy_used")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "pose") -> Pose:
@@ -204,7 +269,7 @@ class Pose:
         _check_keys(data, where, Pose)
         return Pose(
             asset_id=_str(data, where, "asset_id"),
-            cls=_str(data, where, "cls"),
+            cls=_one_of(_str(data, where, "cls"), VEHICLE_CLASSES, where, "cls"),
             t=_float(data, where, "t"),
             x=_float(data, where, "x"),
             y=_float(data, where, "y"),
@@ -219,9 +284,10 @@ class Pose:
 class SensorFootprint:
     """The ground area a sensor covered during a tick.
 
-    ``kind`` is ``circle`` (towers, nadir sensors) or ``cone`` (gimballed and
-    forward-looking sensors), in which case ``heading`` and ``half_angle``
-    bound the sector. Radii and angles are metres and radians.
+    ``kind`` is one of :data:`FOOTPRINT_KINDS`: ``circle`` (towers, nadir
+    sensors) or ``cone`` (gimballed and forward-looking sensors), in which
+    case ``heading`` and ``half_angle`` bound the sector. Radii and angles are
+    metres and radians.
     """
 
     kind: str
@@ -231,15 +297,18 @@ class SensorFootprint:
     heading: float
     half_angle: float
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "x", "y", "radius", "heading", "half_angle")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "footprint") -> SensorFootprint:
         data = _mapping(payload, where)
         _check_keys(data, where, SensorFootprint)
         return SensorFootprint(
-            kind=_str(data, where, "kind"),
+            kind=_one_of(_str(data, where, "kind"), FOOTPRINT_KINDS, where, "kind"),
             x=_float(data, where, "x"),
             y=_float(data, where, "y"),
             radius=_float(data, where, "radius"),
@@ -262,8 +331,11 @@ class Detection:
     confidence: float
     classification: str
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "x", "y", "confidence")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "detection") -> Detection:
@@ -295,8 +367,11 @@ class SensorReport:
     detections: tuple[Detection, ...]
     negative: bool
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "report") -> SensorReport:
@@ -332,8 +407,12 @@ class WaypointIntent:
     reason: str
     task_id: str
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t", "target_z", "speed")
+        _as_float_pair(self, "target_xy")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "intent") -> WaypointIntent:
@@ -358,8 +437,11 @@ class WorldObservation:
     poses: tuple[Pose, ...]
     reports: tuple[SensorReport, ...]
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "observation") -> WorldObservation:
@@ -383,8 +465,11 @@ class FleetIntent:
     t: float
     intents: tuple[WaypointIntent, ...]
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "intent") -> FleetIntent:
@@ -406,7 +491,14 @@ class BeliefDigest:
     ``entropy`` in nats, ``mass`` the field's total probability mass,
     ``peak_xy`` the most likely target location with ``peak_p`` its density,
     ``covered_fraction`` the share of cells swept at least once, and
-    ``grid_shape`` the field's dimensions so a viewer can scale.
+    ``grid_shape`` the field's dimensions **in cells**.
+
+    ``grid_shape`` alone does not georeference the field: mapping a cell to a
+    world coordinate also needs the grid's origin and cell size (or its world
+    bounds), and this log is the only artifact the viewer reads. Those fields
+    are not here yet — adding them is a schema change and a
+    :data:`~whiteout.log.SCHEMA_VERSION` bump, and it is a decision for the
+    belief-field ticket that will populate them, not for this type.
     """
 
     t: float
@@ -417,8 +509,13 @@ class BeliefDigest:
     covered_fraction: float
     grid_shape: tuple[int, int]
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t", "entropy", "mass", "peak_p", "covered_fraction")
+        _as_float_pair(self, "peak_xy")
+        _as_int_pair(self, "grid_shape")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "belief_digest") -> BeliefDigest:
@@ -453,8 +550,11 @@ class Contact:
     classification: str
     assigned_asset_id: str | None
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t", "x", "y", "confidence")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "contact") -> Contact:
@@ -484,8 +584,11 @@ class TargetTruth:
     speed: float
     target_class: str
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "x", "y", "z", "heading", "speed")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "target") -> TargetTruth:
@@ -514,8 +617,11 @@ class Truth:
     t: float
     targets: tuple[TargetTruth, ...]
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "truth") -> Truth:
@@ -547,11 +653,25 @@ class EpisodeRecord:
     contacts: tuple[Contact, ...]
     truth: Truth
 
+    def __post_init__(self) -> None:
+        _as_floats(self, "t")
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _to_json_dict(self)
 
     @classmethod
     def from_dict(cls, payload: object, where: str = "record") -> EpisodeRecord:
+        """Parse a record of *any* version whose shape matches this build.
+
+        **Version enforcement lives in :mod:`whiteout.log`, not here.**
+        ``schema_version`` is parsed as a plain int, so a payload carrying a
+        foreign version parses cleanly if its shape happens to match. Read
+        logs through :func:`whiteout.log.validate_line`,
+        :func:`~whiteout.log.iter_episode_log` or
+        :func:`~whiteout.log.read_episode_log`, which reject a version this
+        build cannot read and name the line. Keeping the check in exactly one
+        place is what makes removing it a test failure.
+        """
         data = _mapping(payload, where)
         _check_keys(data, where, EpisodeRecord)
         contacts = tuple(
