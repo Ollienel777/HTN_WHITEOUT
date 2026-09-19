@@ -605,6 +605,150 @@ def test_the_stub_reports_static_poses_and_an_advancing_clock() -> None:
     assert all(pose.t == second.t for pose in second.poses)
 
 
+def test_the_stub_reports_no_measurement_time_unless_it_is_asked_to() -> None:
+    """The honest default: parked poses drawn at connect know nothing of fixes."""
+    transport = KinematicTransport(seed=3)
+    transport.connect()
+    for _tick in range(3):
+        assert all(pose.measured_t is None for pose in transport.observe().poses)
+    transport.close()
+
+
+def test_a_configured_pose_age_stamps_every_pose_behind_its_tick() -> None:
+    """The staleness-correction path, exercisable offline and at speed.
+
+    Without this the first stale fix anything downstream sees arrives from a
+    link to a real vehicle, on the one run that is judged. ``t`` stays the
+    tick; the age travels in ``measured_t``.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=0.5, pose_age_seconds=2.0)
+    transport.connect()
+    for tick in range(4):
+        observation = transport.observe()
+        assert observation.t == 0.5 * tick
+        for pose in observation.poses:
+            assert pose.t == observation.t, "the tick is still the tick"
+            assert pose.measured_t == pytest.approx(observation.t - 2.0)
+    transport.close()
+
+
+def test_a_pose_age_of_zero_is_not_the_same_as_no_pose_age() -> None:
+    """``0.0`` is a claim that the fix is this tick's; ``None`` is no claim."""
+    transport = KinematicTransport(seed=3, pose_age_seconds=0.0)
+    transport.connect()
+    observation = transport.observe()
+    transport.close()
+    assert all(pose.measured_t == pose.t for pose in observation.poses)
+    assert all(pose.measured_t is not None for pose in observation.poses)
+
+
+def test_an_unusable_pose_age_is_refused_by_the_transport() -> None:
+    """A negative age is a fix from the future; a non-finite one cannot be logged.
+
+    Refused at construction, naming the argument, rather than producing
+    poses that breach the seam's conformance suite several calls later.
+    """
+    for age in (-0.5, float("nan"), float("inf")):
+        with pytest.raises(TransportError) as raised:
+            KinematicTransport(seed=3, pose_age_seconds=age)
+        assert "pose_age_seconds" in str(raised.value)
+
+
+def test_a_pose_age_that_is_not_a_number_is_refused_as_a_transport_error() -> None:
+    """Validated before the widening, so the seam's own error type comes out.
+
+    ``float()`` first would let a non-numeric escape as a bare ``ValueError``
+    past every caller that handles ``TransportError``, and would silently
+    accept ``True`` as an age of one second and ``"2.0"`` as two.
+    """
+    for age in ("soon", "2.0", True, None.__class__, [2.0]):
+        with pytest.raises(TransportError) as raised:
+            KinematicTransport(seed=3, pose_age_seconds=age)  # type: ignore[arg-type]
+        assert "pose_age_seconds" in str(raised.value)
+
+
+def test_create_transport_carries_a_pose_age_through_to_the_transport() -> None:
+    """The knob has to be reachable from the factory, or no episode can use it.
+
+    Built by hand it only ever reaches a unit test; the staleness path is
+    meant to be drivable through a real episode — a log, the scorer,
+    ``replay``, the viewer.
+    """
+    transport = create_transport("kinematic", seed=3, pose_age_seconds=2.0)
+    transport.connect()
+    observation = transport.observe()
+    transport.close()
+    assert observation.poses, "the fleet is empty, so this asserts nothing"
+    for pose in observation.poses:
+        assert pose.t == observation.t, "the tick is still the tick"
+        assert pose.measured_t == pytest.approx(observation.t - 2.0)
+
+
+def test_create_transport_without_a_pose_age_reports_no_measurement_time() -> None:
+    """The default forwards nothing, so an episode is what it always was."""
+    transport = create_transport("kinematic", seed=3)
+    transport.connect()
+    observation = transport.observe()
+    transport.close()
+    assert all(pose.measured_t is None for pose in observation.poses)
+
+
+def test_create_transport_refuses_an_unusable_pose_age_by_name() -> None:
+    transport_error = pytest.raises(TransportError)
+    with transport_error as raised:
+        create_transport("kinematic", seed=3, pose_age_seconds=-1.0)
+    assert "pose_age_seconds" in str(raised.value)
+
+
+def test_a_transport_that_does_not_take_a_pose_age_refuses_it_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not a ``TypeError`` from inside the factory table.
+
+    The next adapter may not model fix age at all. Asking it for one is a
+    caller mistake, and it is reported as the seam's own error naming the
+    transport rather than as an arity error from ``__init__``.
+    """
+
+    import whiteout.transport as transport_module
+
+    class _Ageless:
+        def __init__(self, seed: int = 0) -> None:
+            self.seed = seed
+
+    monkeypatch.setattr(
+        transport_module, "TRANSPORT_FACTORIES", {**TRANSPORT_FACTORIES, "kinematic": _Ageless}
+    )
+    with pytest.raises(TransportError) as raised:
+        transport_module.create_transport("kinematic", seed=3, pose_age_seconds=2.0)
+    assert "does not take a pose age" in str(raised.value)
+    assert "kinematic" in str(raised.value)
+
+
+def test_a_constructors_own_type_error_is_not_reported_as_a_missing_pose_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is read off the signature, not off a caught ``TypeError``.
+
+    A transport that accepts a pose age and then raises ``TypeError`` for its
+    own reasons must surface that, not a confident and wrong claim that it
+    does not take the argument.
+    """
+    import whiteout.transport as transport_module
+
+    class _Broken:
+        def __init__(self, seed: int = 0, pose_age_seconds: float | None = None) -> None:
+            raise TypeError("something else entirely")
+
+    monkeypatch.setattr(
+        transport_module, "TRANSPORT_FACTORIES", {**TRANSPORT_FACTORIES, "kinematic": _Broken}
+    )
+    with pytest.raises(TypeError) as raised:
+        transport_module.create_transport("kinematic", seed=3, pose_age_seconds=2.0)
+    assert "something else entirely" in str(raised.value)
+    assert "does not take a pose age" not in str(raised.value)
+
+
 def test_the_stub_is_a_pure_function_of_its_seed() -> None:
     def first_observation(seed: int) -> tuple[tuple[float, float], ...]:
         transport = KinematicTransport(seed=seed)

@@ -102,7 +102,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     try:
         name = selected_transport_name()
-        transport = create_transport(name, seed=seed)
+        transport = create_transport(name, seed=seed, pose_age_seconds=args.pose_age)
     except TransportError as exc:
         print(f"run: {exc}", file=sys.stderr)
         return 1
@@ -219,6 +219,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, default=None)
     run.add_argument("--ticks", type=int, default=400)
     run.add_argument("--out", default="artifacts/episode.jsonl")
+    run.add_argument(
+        "--pose-age",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "report every pose as a fix taken SECONDS before its tick "
+            "(measured_t = t - SECONDS); omitted, no measurement time is reported"
+        ),
+    )
     run.set_defaults(func=cmd_run)
 
     score = sub.add_parser("score", help="score an episode log")

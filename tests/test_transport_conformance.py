@@ -25,7 +25,7 @@ suite promises a breach arrives as. Every check owns at least one planted
 breach: a check nothing is planted against is a check nobody has shown to be
 load-bearing, and the gap is invisible while everything is green.
 
-Five of the fifteen cases plant a *refusal* rather than a wrong answer — a
+Five of the eighteen cases plant a *refusal* rather than a wrong answer — a
 second ``connect`` on a live link, a link that drops mid-episode, a ``close``
 a live link will not take, a ``command`` the link rejects, and a ``connect``
 after a ``close`` — because those are the breaches that arrive as the
@@ -38,7 +38,7 @@ from __future__ import annotations
 import ast
 import inspect
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -350,6 +350,55 @@ class _EmptyFleetTransport(KinematicTransport):
         return WorldObservation(t=observation.t, poses=(), reports=())
 
 
+class _BackstampingTransport(KinematicTransport):
+    """Stamps each pose at when its fix was taken, not at the tick it serves.
+
+    The plausible mistake, and the one the equality exists to catch: every
+    number is in the past, nothing is out of order, and a suite asserting
+    only ``pose.t <= observation.t`` would certify it. What breaks is that
+    an observation stops being one instant — and every consumer of
+    ``pose.t`` keeps reading it as the tick.
+    """
+
+    def observe(self) -> WorldObservation:
+        observation = super().observe()
+        poses = tuple(replace(pose, t=pose.t - 1.0) for pose in observation.poses)
+        return WorldObservation(t=observation.t, poses=poses, reports=observation.reports)
+
+
+def _restamp(observation: WorldObservation, measured_t: float) -> WorldObservation:
+    """The same observation, with every pose's ``measured_t`` overwritten."""
+    poses = tuple(replace(pose, measured_t=measured_t) for pose in observation.poses)
+    return WorldObservation(t=observation.t, poses=poses, reports=observation.reports)
+
+
+class _PrescientTransport(KinematicTransport):
+    """Reports a fix taken after the tick it arrived in — an age below zero.
+
+    The shape an adapter lands in by subtracting the wrong way round, or by
+    mixing the far side's clock into a tick of our own: every number is
+    finite and plausible, and a staleness correction reads it as a fix from
+    the future.
+    """
+
+    def observe(self) -> WorldObservation:
+        observation = super().observe()
+        return _restamp(observation, observation.t + 1.0)
+
+
+class _UnlockedTransport(KinematicTransport):
+    """Reports a non-finite measurement time — the vehicle with no fix.
+
+    ``-inf`` and not ``nan``: it satisfies ``measured_t <= t``, so only the
+    finiteness assertion catches it. A log carrying it cannot be written at
+    all (``whiteout/log.py``), and any age computed from it is infinite.
+    """
+
+    def observe(self) -> WorldObservation:
+        observation = super().observe()
+        return _restamp(observation, float("-inf"))
+
+
 def _footprint() -> SensorFootprint:
     """Some footprint. Nothing in the guard below depends on its shape."""
     return SensorFootprint(
@@ -419,6 +468,7 @@ class _SmugglingTransport(KinematicTransport):
 #: planted against is one nobody has shown to be load-bearing, and that gap is
 #: invisible while the suite is green.
 _SILENCE_CHECK = "check_silence_is_not_a_fault_and_every_report_is_attributable"
+_MEASURED_CHECK = "check_a_reported_measurement_time_is_finite_and_never_after_its_tick"
 
 _PLANTED_BREACHES: tuple[tuple[type, str], ...] = (
     (_NarrowTransport, "check_the_protocol_surface_is_the_whole_seam"),
@@ -430,6 +480,9 @@ _PLANTED_BREACHES: tuple[tuple[type, str], ...] = (
     (_DoublePosingTransport, _SILENCE_CHECK),
     (_MisattributingTransport, _SILENCE_CHECK),
     (_EmptyFleetTransport, _SILENCE_CHECK),
+    (_BackstampingTransport, _SILENCE_CHECK),
+    (_PrescientTransport, _MEASURED_CHECK),
+    (_UnlockedTransport, _MEASURED_CHECK),
     (_RefusingTransport, "check_command_is_accepted_for_every_tick"),
     (_LenientTransport, "check_close_mid_episode_ends_the_episode"),
     (_ReopeningTransport, "check_connect_after_close_refuses_rather_than_rewinding"),
@@ -480,6 +533,21 @@ def test_a_subclass_that_breaches_nothing_still_passes(check: Check) -> None:
         pass
 
     check(lambda: _Conforming(seed=SEED))
+
+
+@pytest.mark.parametrize("check", CONFORMANCE_CHECKS, ids=check_id)
+def test_a_transport_that_reports_a_measurement_time_still_conforms(check: Check) -> None:
+    """Reporting fix age is conforming behaviour, not a breach.
+
+    The guard above plants two incoherent measurement times; this is the
+    coherent one, driven through the transport's own configurable pose age so
+    that the whole suite — not just the check that owns the field — is run
+    against poses carrying a ``measured_t``. Without it, every check the
+    build exercises would only ever see ``None`` there, and the
+    staleness-correction path would first execute against an adapter we get
+    one run at.
+    """
+    check(lambda: KinematicTransport(seed=SEED, pose_age_seconds=2.0))
 
 
 class _StaticAssetTransport(KinematicTransport):
