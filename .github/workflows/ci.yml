@@ -1,0 +1,35 @@
+name: CI
+
+# No `paths:` or `paths-ignore:` filter, deliberately: a pull request that
+# produces no check runs can never settle.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Only for pull requests, where the group is per-PR and a superseded run is
+  # worth cancelling. On push the group is `refs/heads/main`, shared by every
+  # merge: two squash-merges close together would leave the earlier commit on
+  # main carrying a cancelled check whose gate never ran, and post-merge main
+  # is the only place a semantic conflict between two green PRs shows up.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Gate
+        run: python scripts/gate.py

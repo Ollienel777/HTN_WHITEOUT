@@ -26,12 +26,16 @@ dist/
 build/
 # `build/` above matches at any depth; the build loop's brief must stay tracked
 !docs/build/
+# Episode logs, wheels and sweep output. A report that is meant to ship gets
+# committed with `git add -f`.
+artifacts/
 coverage/
 playwright-report/
 test-results/
 .turbo/
 .vercel/
 __pycache__/
+*.egg-info/
 .venv/
 *.pyc
 .DS_Store
