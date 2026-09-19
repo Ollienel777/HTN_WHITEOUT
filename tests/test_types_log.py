@@ -62,6 +62,12 @@ def make_record(tick: int) -> EpisodeRecord:
                     heading=0.75,
                     speed=22.0,
                     energy_used=3.5 * tick,
+                    # A fix taken a quarter-second before the tick it landed
+                    # in, and one from a transport that does not report a
+                    # measurement time at all. Both arms are spelt out rather
+                    # than left to the default, so every round-trip test here
+                    # carries a populated `measured_t` and a null one.
+                    measured_t=t - 0.25,
                 ),
                 Pose(
                     asset_id="tower-1",
@@ -73,6 +79,7 @@ def make_record(tick: int) -> EpisodeRecord:
                     heading=0.0,
                     speed=0.0,
                     energy_used=0.0,
+                    measured_t=None,
                 ),
             ),
             reports=(
@@ -276,6 +283,32 @@ def test_validator_rejects_a_wrong_schema_version_naming_the_line(tmp_path: Path
     assert caught.value.line == 2
     assert "schema_version" in str(caught.value)
     assert str(SCHEMA_VERSION) in str(caught.value)
+
+
+def test_a_log_of_the_shape_before_measured_t_is_refused_by_version(tmp_path: Path) -> None:
+    """The version, not a nested missing field, is what reports an old log.
+
+    ``measured_t`` is a required record key, so a log written before it
+    existed cannot be read by this build. Without the bump that went with it,
+    both shapes would self-describe as the same version, the version check
+    would pass, and the reader would report
+    ``record.observation.poses[0]: missing field(s) measured_t`` — which
+    names a field rather than the build, and leaves a reader of an old
+    artifact guessing. The version number exists to produce exactly one
+    message, and this is it.
+    """
+    log = tmp_path / "previous_shape.jsonl"
+    payload = make_record(0).to_dict()
+    payload["schema_version"] = SCHEMA_VERSION - 1
+    for pose in payload["observation"]["poses"]:
+        del pose["measured_t"]
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    message = str(caught.value)
+    assert "schema_version" in message
+    assert str(SCHEMA_VERSION) in message
+    assert "measured_t" not in message, "reported by version, not by the missing field"
 
 
 def test_validator_rejects_a_nested_unknown_field_naming_the_path(tmp_path: Path) -> None:
@@ -750,3 +783,102 @@ def test_read_episode_log_refuses_a_log_of_only_blank_lines(tmp_path: Path) -> N
     with pytest.raises(EpisodeLogError) as caught:
         read_episode_log(log)
     assert "empty" in str(caught.value)
+
+
+# --- #80: the pose's measurement time -------------------------------------
+
+
+def test_a_pose_reports_no_measurement_time_by_default() -> None:
+    """``None``, never ``t``. A default of ``t`` would be a silent zero age.
+
+    An adapter that forgets the field would then report every fix as taken
+    at the instant of the tick it arrived in — plausible, wrong, and with no
+    symptom. ``None`` makes a consumer that wants fix age say what it does
+    without one.
+    """
+    pose = Pose(
+        asset_id="a",
+        cls="quad",
+        t=4.0,
+        lat=72.0,
+        lon=-95.0,
+        z=0.0,
+        heading=0.0,
+        speed=0.0,
+        energy_used=0.0,
+    )
+    assert pose.measured_t is None
+    assert pose.to_dict()["measured_t"] is None
+
+
+def test_a_measurement_time_round_trips_through_the_log(tmp_path: Path) -> None:
+    """Both arms, through the writer and back: a float stays a float, null stays null."""
+    log = tmp_path / "measured.jsonl"
+    records = [make_record(tick) for tick in range(3)]
+    assert write_episode_log(log, records) == 3
+    back = read_episode_log(log)
+    assert back == records
+    poses = back[1].observation.poses
+    assert poses[0].measured_t == 0.75
+    assert isinstance(poses[0].measured_t, float)
+    assert poses[1].measured_t is None
+
+
+def test_an_int_measurement_time_is_coerced_like_every_other_float() -> None:
+    """The gate compares bytes, so ``measured_t=0`` may not serialise as ``0``."""
+    integral = Pose(
+        asset_id="a",
+        cls="quad",
+        t=0,
+        lat=72,
+        lon=-95,
+        z=0,
+        heading=0,
+        speed=0,
+        energy_used=0,
+        measured_t=0,
+    )
+    assert isinstance(integral.measured_t, float)
+    assert '"measured_t": 0.0' in json.dumps(integral.to_dict(), sort_keys=True)
+
+
+def test_a_missing_measurement_time_is_a_rejected_record_not_a_silent_none(
+    tmp_path: Path,
+) -> None:
+    """``null`` is a value; an absent key is a malformed line.
+
+    The distinction is the whole point of the field: a transport saying it
+    has no measurement time must not be indistinguishable from a writer that
+    dropped one.
+    """
+    log = tmp_path / "absent.jsonl"
+    payload = make_record(0).to_dict()
+    del payload["observation"]["poses"][0]["measured_t"]
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "missing field(s) measured_t" in str(caught.value)
+    assert "record.observation.poses[0]" in str(caught.value)
+
+
+def test_a_wrongly_typed_measurement_time_is_rejected(tmp_path: Path) -> None:
+    log = tmp_path / "typed.jsonl"
+    payload = make_record(0).to_dict()
+    payload["observation"]["poses"][0]["measured_t"] = "recently"
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "expected a number" in str(caught.value)
+    assert "measured_t" in str(caught.value)
+
+
+def test_the_writer_refuses_a_non_finite_measurement_time(tmp_path: Path) -> None:
+    """A vehicle with no lock is ``None`` here, never ``NaN``."""
+    log = tmp_path / "nan.jsonl"
+    record = make_record(0)
+    poses = (dataclasses.replace(record.observation.poses[0], measured_t=math.nan),)
+    observation = dataclasses.replace(record.observation, poses=poses)
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [dataclasses.replace(record, observation=observation)])
+    assert "record.observation.poses[0].measured_t" in str(caught.value)
+    assert not log.exists()

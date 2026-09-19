@@ -32,7 +32,7 @@
   /* Kept in step with whiteout.log.SCHEMA_VERSION by a test: the viewer must
    * reject a log this build cannot read, with the same version in the message
    * the Python reader would have printed. */
-  var SCHEMA_VERSION = 2;
+  var SCHEMA_VERSION = 3;
 
   /* Relative, so it resolves the same from `whiteout serve` and from file://
    * (where the fetch is blocked, and the file picker takes over). */
@@ -319,9 +319,9 @@
   }
 
   function renderMeta() {
-    /* seed, transport, policy and terrain are episode provenance, and schema
-     * 1 does not carry them — so the slots read as unknown rather than as a
-     * value the viewer invented. */
+    /* seed, transport, policy and terrain are episode provenance, and the
+     * record shape does not carry them at any version this viewer reads — so
+     * the slots read as unknown rather than as a value the viewer invented. */
     each("[data-meta]", function (node) {
       text(node, UNKNOWN);
       node.classList.add("is-unknown");

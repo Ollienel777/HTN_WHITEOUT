@@ -226,6 +226,19 @@ def _optional_str(payload: Mapping[str, Any], where: str, name: str) -> str | No
     return _str(payload, where, name)
 
 
+def _optional_float(payload: Mapping[str, Any], where: str, name: str) -> float | None:
+    """``null`` or a number. ``null`` is a value here, never a missing key.
+
+    :func:`_check_keys` still requires the key, so an omitted field is a
+    rejected record and not a silent ``None`` — the difference between a
+    transport that says it has no measurement time and a writer that forgot
+    the field.
+    """
+    if payload[name] is None:
+        return None
+    return _float(payload, where, name)
+
+
 def _bool(payload: Mapping[str, Any], where: str, name: str) -> bool:
     value = payload[name]
     if not isinstance(value, bool):
@@ -273,6 +286,41 @@ class Pose:
     ``cls`` is the vehicle class, one of :data:`VEHICLE_CLASSES`;
     ``energy_used`` is cumulative over the episode and is what the efficiency
     axis of the scorer consumes.
+
+    **``t`` is the tick this pose belongs to, not when the fix was taken.**
+    A pose is part of a :class:`WorldObservation`, and an observation is a
+    coherent snapshot: ``pose.t == observation.t``, which the transport
+    conformance suite asserts as an equality. Every consumer already reading
+    ``pose.t`` reads it as the tick, and relaxing that would leave the field,
+    its type and its plausible value unchanged while changing its meaning. No
+    test and no reader can tell those two apart: every consumer keeps
+    compiling, keeps running, and keeps reading a number that still looks
+    right, so the change would land silently and stay landed. That is why the
+    meaning is pinned here and the second question gets its own field.
+
+    ``measured_t`` is where the other question goes. A link to a real vehicle
+    serves a fix that was taken some time before the tick it lands in, and
+    ``measured_t`` is when: it is ``<= t``, and ``t - measured_t`` is the age
+    of the fix. It may be negative, for a fix taken before the episode clock's
+    zero.
+
+    **``measured_t`` is in the same clock as ``t`` — ours, the episode's tick
+    timebase — and never the far side's.** An autopilot's or a sim's own
+    stamp (``time_boot_ms``, a ``time_usec`` epoch) is in a different
+    timebase, and putting one here unconverted is the mistake this field is
+    most likely to attract: an epoch value is large enough that
+    ``measured_t <= t`` fails on tick one and the adapter is told, but a
+    vehicle that booted seconds ago yields a small number that lands under
+    ``t``, passes every check, and reports an age that means nothing. An
+    adapter that reads a far-side stamp must measure the offset between that
+    clock and ours and subtract it before stamping; if it cannot, the honest
+    answer is ``None``.
+
+    **``None`` means "this transport does not report a measurement time"**,
+    and it is the default. A consumer that wants fix age must handle ``None``
+    explicitly, because there is no number that would be honest here: a
+    default of ``t`` would make an adapter that never sets the field report
+    every fix as zero seconds old — plausible, wrong, and invisible.
     """
 
     asset_id: str
@@ -284,9 +332,12 @@ class Pose:
     heading: float
     speed: float
     energy_used: float
+    measured_t: float | None = None
 
     def __post_init__(self) -> None:
         _as_floats(self, "t", "lat", "lon", "z", "heading", "speed", "energy_used")
+        if self.measured_t is not None:
+            _as_floats(self, "measured_t")
         _check_position(self, "pose")
 
     def to_dict(self) -> dict[str, Any]:
@@ -306,6 +357,7 @@ class Pose:
             heading=_float(data, where, "heading"),
             speed=_float(data, where, "speed"),
             energy_used=_float(data, where, "energy_used"),
+            measured_t=_optional_float(data, where, "measured_t"),
         )
 
 

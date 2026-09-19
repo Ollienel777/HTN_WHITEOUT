@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from whiteout.cli import AXES, build_parser, main
+from whiteout.log import validate_episode_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEIGHTS = REPO_ROOT / "fixtures" / "weights" / "equal.json"
@@ -34,6 +35,45 @@ def test_run_is_byte_identical_at_the_same_seed(tmp_path: Path) -> None:
     for out in (first, second):
         assert main(["run", "--seed", "7", "--ticks", "40", "--out", str(out)]) == 0
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_run_writes_a_stale_fix_into_the_log_when_asked(tmp_path: Path) -> None:
+    """The end of the path the pose age exists for.
+
+    Built by hand, a stale fix reaches only a unit test. Through ``run`` it
+    reaches an episode log, and from there the scorer, ``replay`` and the
+    viewer — which is the point: the staleness-correction path is exercised
+    somewhere other than the one judged arena run.
+    """
+    out = tmp_path / "stale.jsonl"
+    assert main(["run", "--seed", "7", "--ticks", "4", "--pose-age", "2.0", "--out", str(out)]) == 0
+    validate_episode_log(out)
+    for line in out.read_text().splitlines():
+        record = json.loads(line)
+        poses = record["observation"]["poses"]
+        assert poses, "the fleet is empty, so this asserts nothing"
+        for pose in poses:
+            assert pose["t"] == record["t"], "the tick is still the tick"
+            assert pose["measured_t"] == pytest.approx(record["t"] - 2.0)
+
+
+def test_run_without_a_pose_age_reports_no_measurement_time(tmp_path: Path) -> None:
+    """The default changes no episode: every pose still says it does not know."""
+    out = tmp_path / "plain.jsonl"
+    assert main(["run", "--seed", "7", "--ticks", "4", "--out", str(out)]) == 0
+    for line in out.read_text().splitlines():
+        for pose in json.loads(line)["observation"]["poses"]:
+            assert pose["measured_t"] is None
+
+
+def test_run_diagnoses_an_unusable_pose_age(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A caller's mistake, reported as a diagnostic rather than a traceback."""
+    out = tmp_path / "never.jsonl"
+    assert main(["run", "--seed", "7", "--ticks", "4", "--pose-age", "-1", "--out", str(out)]) == 1
+    assert "pose_age_seconds" in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_run_differs_across_seeds(tmp_path: Path) -> None:
