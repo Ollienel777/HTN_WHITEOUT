@@ -75,9 +75,9 @@ symmetric at all. **Over-diffusing** flattens the field and degrades the
 policy toward a coverage search: that is #27, the designed fallback, so the
 failure is graceful, gradual, visible, and undone by the next detection.
 **Under-diffusing** leaves belief confidently tight around the **wrong
-water** — the fleet stops looking anywhere else, and ``SPEC.md`` §4 is
-explicit that nothing detects this. One direction costs sharpness; the other
-loses the vessel.
+water** — the fleet concentrates there and stops searching the water the
+vessel is actually in. One direction costs sharpness; the other loses the
+vessel.
 
 **Still wanted:** the speed re-measured over a long baseline once the sim is
 up, which is one argument to the constructor. That number would be a **floor
