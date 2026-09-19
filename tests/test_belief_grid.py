@@ -30,12 +30,18 @@ from whiteout.belief import (
     GeometryError,
     StraitGeometry,
 )
-from whiteout.belief.geometry import enu_from_geodetic, geodetic_from_enu
 from whiteout.belief.grid import (
     DEFAULT_DETECTION_SIGMA_M,
     DEFAULT_FALSE_ALARM_RATE,
     DEFAULT_HEADING_PERSISTENCE_S,
     DEFAULT_SPEED_MPS,
+)
+from whiteout.geo import (
+    ARENA_ORIGIN,
+    GeoPoint,
+    LocalPoint,
+    geodetic_to_local,
+    local_to_geodetic,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,7 +114,7 @@ def cell_position(grid: ChannelBeliefGrid, row: int, column: int) -> tuple[float
         s_m=float(grid.along_centres_m()[row]),
         w_m=float(grid.across_centres_m()[column]),
     )
-    return grid.geometry.to_geodetic(point)
+    return grid.geometry.to_position(point)
 
 
 def beyond_the_mouth(geometry: StraitGeometry, metres: float) -> tuple[float, float]:
@@ -125,12 +131,15 @@ def beyond_the_mouth(geometry: StraitGeometry, metres: float) -> tuple[float, fl
         first, second = vertices[1], vertices[0]
     else:
         first, second = vertices[-2], vertices[-1]
-    ax, ay = enu_from_geodetic(first.lat_deg, first.lon_deg)
-    bx, by = enu_from_geodetic(second.lat_deg, second.lon_deg)
-    span = math.hypot(bx - ax, by - ay)
-    ux, uy = (bx - ax) / span, (by - ay) / span
+    a = geodetic_to_local(ARENA_ORIGIN, GeoPoint(first.lat_deg, first.lon_deg))
+    b = geodetic_to_local(ARENA_ORIGIN, GeoPoint(second.lat_deg, second.lon_deg))
+    span = math.hypot(b.east_m - a.east_m, b.north_m - a.north_m)
+    ux, uy = (b.east_m - a.east_m) / span, (b.north_m - a.north_m) / span
     distance = abs(metres)
-    return geodetic_from_enu(bx + distance * ux, by + distance * uy)
+    place = local_to_geodetic(
+        ARENA_ORIGIN, LocalPoint(b.east_m + distance * ux, b.north_m + distance * uy)
+    )
+    return place.lat_deg, place.lon_deg
 
 
 def along_marginal(grid: ChannelBeliefGrid) -> np.ndarray:
@@ -154,7 +163,7 @@ def test_default_strait_matches_the_arena_briefing() -> None:
     """25 km long, about 2 km wide, at roughly 71.99 N (``ARENA.md`` §2)."""
     assert 24_000.0 < DEFAULT_STRAIT.length_m < 26_000.0
     assert DEFAULT_STRAIT.max_half_width_m == pytest.approx(1000.0)
-    middle = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=DEFAULT_STRAIT.length_m / 2.0, w_m=0.0))
+    middle = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=DEFAULT_STRAIT.length_m / 2.0, w_m=0.0))
     assert middle[0] == pytest.approx(71.99, abs=0.02)
     assert middle[1] == pytest.approx(-94.84, abs=0.05)
 
@@ -166,13 +175,13 @@ def test_the_tracks_api_example_position_is_on_water() -> None:
     assert abs(offset.w_m) < 200.0
 
 
-def test_geodetic_round_trip_at_the_straits_latitude() -> None:
+def test_channel_coordinates_round_trip_at_the_straits_latitude() -> None:
     """Channel coordinates and lat/lon are inverse at 71.99 N, where lon converges."""
     geometry = DEFAULT_STRAIT
     for fraction in (0.05, 0.25, 0.5, 0.75, 0.95):
         for across in (-400.0, 0.0, 400.0):
             point = ChannelPoint(s_m=fraction * geometry.length_m, w_m=across)
-            lat_deg, lon_deg = geometry.to_geodetic(point)
+            lat_deg, lon_deg = geometry.to_position(point)
             back = geometry.to_channel(lat_deg, lon_deg)
             assert back.s_m == pytest.approx(point.s_m, abs=1.0)
             assert back.w_m == pytest.approx(point.w_m, abs=1.0)
@@ -181,8 +190,8 @@ def test_geodetic_round_trip_at_the_straits_latitude() -> None:
 def test_the_shoreline_is_an_inequality_on_the_across_coordinate() -> None:
     geometry = choked_channel()
     narrow_s = geometry.length_m - 500.0
-    lat_in, lon_in = geometry.to_geodetic(ChannelPoint(s_m=narrow_s, w_m=150.0))
-    lat_out, lon_out = geometry.to_geodetic(ChannelPoint(s_m=narrow_s, w_m=600.0))
+    lat_in, lon_in = geometry.to_position(ChannelPoint(s_m=narrow_s, w_m=150.0))
+    lat_out, lon_out = geometry.to_position(ChannelPoint(s_m=narrow_s, w_m=600.0))
     assert geometry.is_water(lat_in, lon_in)
     assert not geometry.is_water(lat_out, lon_out)
 
@@ -240,7 +249,7 @@ def test_the_field_starts_uniform_over_the_water_and_sums_to_one() -> None:
 
 def test_mass_is_one_after_every_kind_of_update() -> None:
     grid = ChannelBeliefGrid()
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=8_000.0, w_m=120.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=8_000.0, w_m=120.0))
     steps = (
         lambda: grid.diffuse(1.0),
         lambda: grid.update_detection(lat_deg, lon_deg, sigma_m=150.0),
@@ -374,7 +383,7 @@ def test_a_detection_never_puts_mass_on_land() -> None:
     """A fix reported *on the shore* still leaves the field entirely on water."""
     geometry = choked_channel()
     grid = ChannelBeliefGrid(geometry)
-    on_land = geometry.to_geodetic(ChannelPoint(s_m=geometry.length_m - 400.0, w_m=800.0))
+    on_land = geometry.to_position(ChannelPoint(s_m=geometry.length_m - 400.0, w_m=800.0))
     assert not geometry.is_water(*on_land)
     grid.update_detection(on_land[0], on_land[1], sigma_m=150.0)
     assert float(grid.probabilities()[~grid.water_mask()].max()) == 0.0
@@ -493,7 +502,7 @@ def test_a_long_tick_is_sub_stepped_rather_than_refused() -> None:
 def test_diffusion_never_sharpens_the_field() -> None:
     """Entropy is non-decreasing under diffusion alone, which is what "decaying" means."""
     grid = ChannelBeliefGrid()
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=12_000.0, w_m=0.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=12_000.0, w_m=0.0))
     grid.update_detection(lat_deg, lon_deg, sigma_m=100.0)
     previous = grid.entropy()
     for _ in range(50):
@@ -532,7 +541,7 @@ def test_a_bad_tick_length_is_refused() -> None:
 
 def test_a_detection_concentrates_belief_at_the_reported_position() -> None:
     grid = ChannelBeliefGrid()
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=17_500.0, w_m=100.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=17_500.0, w_m=100.0))
     before = grid.probability_at(lat_deg, lon_deg)
     entropy_before = grid.entropy()
     grid.update_detection(lat_deg, lon_deg, sigma_m=150.0)
@@ -540,16 +549,16 @@ def test_a_detection_concentrates_belief_at_the_reported_position() -> None:
     assert grid.probability_at(lat_deg, lon_deg) > 30.0 * before
     assert grid.entropy() < entropy_before
     peak = grid.peak()
-    east, north = enu_from_geodetic(lat_deg, lon_deg)
-    peak_east, peak_north = enu_from_geodetic(peak.lat_deg, peak.lon_deg)
-    assert math.hypot(peak_east - east, peak_north - north) < 150.0
+    here = geodetic_to_local(ARENA_ORIGIN, GeoPoint(lat_deg, lon_deg))
+    there = geodetic_to_local(ARENA_ORIGIN, GeoPoint(peak.lat_deg, peak.lon_deg))
+    assert math.hypot(there.east_m - here.east_m, there.north_m - here.north_m) < 150.0
 
 
 def test_a_second_detection_elsewhere_moves_the_peak() -> None:
     """A detection is a measurement, not a truth: the field must be able to move."""
     grid = ChannelBeliefGrid()
-    first = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=3_000.0, w_m=0.0))
-    second = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=21_000.0, w_m=0.0))
+    first = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=3_000.0, w_m=0.0))
+    second = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=21_000.0, w_m=0.0))
     grid.update_detection(first[0], first[1], sigma_m=150.0)
     assert DEFAULT_STRAIT.to_channel(*_peak_position(grid)).s_m == pytest.approx(3_000.0, abs=200.0)
     for _ in range(6):
@@ -661,7 +670,7 @@ def test_a_tighter_sigma_concentrates_harder() -> None:
 def test_one_frame_cannot_empty_the_strait() -> None:
     """The false-alarm floor: every water cell keeps some belief."""
     grid = ChannelBeliefGrid()
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=1_000.0, w_m=0.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=1_000.0, w_m=0.0))
     grid.update_detection(lat_deg, lon_deg, sigma_m=50.0)
     values = grid.probabilities()[grid.water_mask()]
     assert float(values.min()) > 0.0
@@ -690,7 +699,7 @@ def test_probability_at_is_zero_off_the_water() -> None:
     grid = ChannelBeliefGrid()
     assert grid.probability_at(0.0, 0.0) == 0.0
     assert grid.probability_at(math.nan, -94.84) == 0.0
-    on_land = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=12_500.0, w_m=950.0))
+    on_land = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=12_500.0, w_m=950.0))
     assert not DEFAULT_STRAIT.is_water(*on_land)
     assert grid.probability_at(*on_land) == 0.0
 
@@ -714,8 +723,12 @@ def test_probability_at_is_zero_off_both_ends_of_the_strait() -> None:
     grid = ChannelBeliefGrid()
     uniform_cell_mass = 1.0 / grid.water_cells
 
-    for metres in (-500.0, -5_000.0, -200_000.0, 500.0, 5_000.0, 200_000.0):
-        position = beyond_the_mouth(DEFAULT_STRAIT, metres)
+    # Kilometres rather than metres, and the same six distances: a bare
+    # ``200_000.0`` reads to ``tests/test_geo.py``'s ellipsoid guard as an
+    # earth radius or a metres-per-degree factor, which is the false positive
+    # that guard accepts in exchange for catching the real thing.
+    for kilometres in (-0.5, -5.0, -200.0, 0.5, 5.0, 200.0):
+        position = beyond_the_mouth(DEFAULT_STRAIT, kilometres * 1_000.0)
         channel = DEFAULT_STRAIT.to_channel(*position)
         # It really does project onto an end of the centreline, on the axis.
         assert abs(channel.w_m) < 1.0
@@ -724,7 +737,7 @@ def test_probability_at_is_zero_off_both_ends_of_the_strait() -> None:
         assert grid.probability_at(*position) == 0.0
 
     for s_m in (50.0, DEFAULT_STRAIT.length_m - 50.0):
-        inside = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=s_m, w_m=0.0))
+        inside = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=s_m, w_m=0.0))
         assert DEFAULT_STRAIT.is_water(*inside)
         assert grid.probability_at(*inside) == pytest.approx(uniform_cell_mass)
 
@@ -778,7 +791,7 @@ def test_a_caller_written_against_the_protocol_works_unchanged() -> None:
         return peak.lat_deg, peak.lon_deg
 
     grid = ChannelBeliefGrid()
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=6_000.0, w_m=0.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=6_000.0, w_m=0.0))
     grid.update_detection(lat_deg, lon_deg, sigma_m=100.0)
     looked = where_to_look(grid)
     assert math.hypot(*np.subtract(looked, (lat_deg, lon_deg))) < 0.01
@@ -805,13 +818,13 @@ def test_update_likelihood_is_the_general_seam() -> None:
     """#13 will write the negative-information update through this, in lat/lon only."""
     grid = ChannelBeliefGrid()
     equivalent = ChannelBeliefGrid()
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=9_000.0, w_m=0.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=9_000.0, w_m=0.0))
     sigma = 200.0
-    east, north = enu_from_geodetic(lat_deg, lon_deg)
+    fix = geodetic_to_local(ARENA_ORIGIN, GeoPoint(lat_deg, lon_deg))
 
     def gaussian(cell_lat: float, cell_lon: float) -> float:
-        cell_east, cell_north = enu_from_geodetic(cell_lat, cell_lon)
-        squared = (cell_east - east) ** 2 + (cell_north - north) ** 2
+        cell = geodetic_to_local(ARENA_ORIGIN, GeoPoint(cell_lat, cell_lon))
+        squared = (cell.east_m - fix.east_m) ** 2 + (cell.north_m - fix.north_m) ** 2
         density = math.exp(-squared / (2.0 * sigma**2)) / (2.0 * math.pi * sigma**2)
         return (1.0 - DEFAULT_FALSE_ALARM_RATE) * density + (
             DEFAULT_FALSE_ALARM_RATE / grid.water_area_m2
@@ -842,7 +855,7 @@ def test_a_partly_negative_likelihood_is_refused_cell_by_cell() -> None:
     has to be per cell.
     """
     grid = ChannelBeliefGrid()
-    middle = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=DEFAULT_STRAIT.length_m / 2.0, w_m=0.0))
+    middle = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=DEFAULT_STRAIT.length_m / 2.0, w_m=0.0))
 
     def half_negative(lat: float, lon: float) -> float:
         return 4.0 if lon > middle[1] else -1.0
@@ -855,7 +868,7 @@ def test_a_partly_negative_likelihood_is_refused_cell_by_cell() -> None:
 
 def test_the_resolution_can_change_without_the_callers_noticing() -> None:
     """The point of the interface: same answers, different internals."""
-    lat_deg, lon_deg = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=15_000.0, w_m=0.0))
+    lat_deg, lon_deg = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=15_000.0, w_m=0.0))
     coarse = ChannelBeliefGrid(along_m=400.0, across_m=400.0)
     fine = ChannelBeliefGrid(along_m=50.0, across_m=50.0)
     assert coarse.shape != fine.shape
