@@ -17,6 +17,7 @@ built yet" are different bugs with different fixes.
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable, Mapping
 
@@ -87,6 +88,7 @@ def create_transport(
     name: str | None = None,
     *,
     seed: int = 0,
+    pose_age_seconds: float | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Transport:
     """Build the selected transport.
@@ -94,6 +96,16 @@ def create_transport(
     ``name`` overrides the environment; ``None`` reads it through
     :func:`selected_transport_name`. ``seed`` is the episode seed, which the
     fake uses to lay its fleet out deterministically.
+
+    ``pose_age_seconds`` asks the transport to report a fix age — every pose
+    stamped ``measured_t = t - age``. ``None``, the default, is forwarded to
+    nothing, so a transport that does not take the argument is unaffected and
+    the episode is byte-for-byte what it was. It is threaded through here
+    rather than left to direct construction because the whole point of the
+    knob is that the staleness path can be driven from a real episode — a
+    log, the scorer, ``replay``, the viewer — and not only from a unit test
+    that builds a transport by hand. A transport that does not accept an age
+    refuses it by name rather than by ``TypeError``.
 
     Dispatches through :data:`TRANSPORT_FACTORIES`, so the object returned
     is always the one the name asks for. Returning a fixed class here would
@@ -118,4 +130,15 @@ def create_transport(
             f"valid values are {_valid_values()}, of which this build implements "
             f"{', '.join(IMPLEMENTED_TRANSPORTS)}"
         )
-    return TRANSPORT_FACTORIES[name](seed=seed)
+    factory = TRANSPORT_FACTORIES[name]
+    if pose_age_seconds is None:
+        return factory(seed=seed)
+    # Asked of the signature, not of a caught `TypeError`: a constructor that
+    # raises `TypeError` for its own reasons would otherwise be reported as a
+    # transport that does not take a pose age, which is a wrong diagnosis of
+    # the kind this whole contract exists to avoid.
+    try:
+        inspect.signature(factory).bind(seed=seed, pose_age_seconds=pose_age_seconds)
+    except TypeError as exc:
+        raise TransportError(f"the {name!r} transport does not take a pose age") from exc
+    return factory(seed=seed, pose_age_seconds=pose_age_seconds)
