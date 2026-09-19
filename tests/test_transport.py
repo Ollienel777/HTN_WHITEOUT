@@ -106,11 +106,22 @@ def _package_parts(source: Path) -> list[str]:
 
 
 def _imported_modules(source: Path, tree: ast.AST) -> list[str]:
-    """Every module the source imports, with relative imports resolved.
+    """Every dotted name the source imports, with relative imports resolved.
+
+    For ``import X`` that is ``X``. For ``from X import Y`` it is both ``X``
+    and ``X.Y``, because ``Y`` may itself be a module: ``from whiteout
+    import log`` imports ``whiteout.log``, and recording only ``whiteout``
+    would match nothing in :data:`FORBIDDEN_IMPORTS`. The name a module is
+    bound to locally is irrelevant — ``from whiteout import log as _m``
+    records ``whiteout.log`` all the same.
 
     ``from ..belief import prior_for`` parses to ``module='belief',
     level=2``, which matches nothing in :data:`FORBIDDEN_IMPORTS` until it
     is resolved against the importing module's own package.
+
+    What it does not resolve: a star import (``from whiteout import *``)
+    records only ``whiteout``, since the names it binds are not in the
+    source. Ruff's ``F403`` is a gate step and rejects those outright.
     """
     modules: list[str] = []
     for node in ast.walk(tree):
@@ -118,13 +129,16 @@ def _imported_modules(source: Path, tree: ast.AST) -> list[str]:
             modules.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0:
-                if node.module is not None:
-                    modules.append(node.module)
-                continue
-            package = _package_parts(source)
-            keep = len(package) - (node.level - 1)
-            base = package[: max(keep, 0)]
-            modules.append(".".join([*base, node.module] if node.module else base))
+                if node.module is None:
+                    continue
+                base_name = node.module
+            else:
+                package = _package_parts(source)
+                keep = len(package) - (node.level - 1)
+                base = package[: max(keep, 0)]
+                base_name = ".".join([*base, node.module] if node.module else base)
+            modules.append(base_name)
+            modules.extend(f"{base_name}.{alias.name}" for alias in node.names if alias.name != "*")
     return modules
 
 
@@ -341,6 +355,35 @@ def test_the_no_leak_guard_bans_the_episode_log_writer(
     )
     assert failures, "an import of whiteout.log went through the guard"
     assert any("whiteout.log" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    ("where", "planted", "expected"),
+    [
+        ("kinematic.py", "\n\nfrom whiteout import log\n\n\n_writer = log\n", "whiteout.log"),
+        (
+            "kinematic.py",
+            "\n\nfrom whiteout import sim as _world\n\n\n_w = _world\n",
+            "whiteout.sim",
+        ),
+        ("kinematic.py", "\n\nfrom .. import tune\n\n\n_t = tune\n", "whiteout.tune"),
+    ],
+    ids=["from-package-import-module", "aliased", "relative"],
+)
+def test_the_no_leak_guard_catches_a_module_imported_from_its_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str, planted: str, expected: str
+) -> None:
+    """``from whiteout import log`` imports ``whiteout.log``, not ``whiteout``.
+
+    The most ordinary spelling in Python, and the one that defeats
+    :data:`FORBIDDEN_IMPORTS` if only the left-hand module is recorded.
+    ``sim``, ``log``, ``cli`` and ``tune`` have no identifier in
+    :data:`FORBIDDEN_WORDS`, so the import rule is the only thing standing
+    between them and an adapter.
+    """
+    failures = _guard_failures(tmp_path, monkeypatch, {where: planted})
+    assert failures, f"an import of {expected} went through the guard"
+    assert any(expected in failure for failure in failures)
 
 
 def test_the_no_leak_guard_passes_a_plausible_clean_adapter(
