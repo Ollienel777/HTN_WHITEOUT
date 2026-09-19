@@ -164,9 +164,20 @@ class DetectorParams:
         that is. The shadow rejector, and the assumption the detector rests on
         most heavily; :func:`_response` explains why significance alone is not
         enough.
+    :param min_depth_counts: the same floor as ``min_depth_sigma``, but in
+        **8-bit counts** and so unable to be met by a small denominator. Every
+        other gate here is a ratio to the per-row noise, which makes all of
+        them vulnerable in the same way to that noise being measured too low —
+        and on JPEG imagery it is (:func:`_row_background`). This one asks
+        instead how much darker the hull actually is, which is the quantity
+        fog compresses, so it holds the bargain the module makes: a degraded
+        frame yields ``None``. The default sits below the hull's contrast
+        through thin fog and above what a floe's shadow on open water reaches.
     :param min_sigma: floor under the per-row robust scale, 8-bit counts. A
         row that is genuinely flat would otherwise divide by nearly zero and
-        turn sensor quantisation into a detection.
+        turn sensor quantisation into a detection. It is a floor and not an
+        estimate, so a row that hits it is a row whose statistics are *not*
+        measured — which is why ``min_depth_counts`` exists to backstop it.
     :param min_peak_sigma: the response a candidate must reach to be
         considered at all.
     :param confident_sigma: the response at which contrast stops adding
@@ -195,6 +206,7 @@ class DetectorParams:
     max_centre_ice: float = 0.15
     max_surround_ice: float = 0.10
     min_depth_sigma: float = 3.6
+    min_depth_counts: float = 4.0
     min_sigma: float = 0.75
     min_peak_sigma: float = 11.0
     confident_sigma: float = 26.0
@@ -210,6 +222,10 @@ class DetectorParams:
             raise VisionError(f"surround_gain must be at least 2, got {self.surround_gain!r}")
         if self.min_sigma <= 0.0:
             raise VisionError(f"min_sigma must be positive, got {self.min_sigma!r}")
+        if self.min_depth_counts < 0.0:
+            raise VisionError(
+                f"min_depth_counts must be non-negative, got {self.min_depth_counts!r}"
+            )
         for name, fraction in (
             ("max_centre_ice", self.max_centre_ice),
             ("max_surround_ice", self.max_surround_ice),
@@ -372,6 +388,20 @@ def _row_background(image: _Float, min_sigma: float) -> tuple[_Float, _Float, _F
     what "how many sigmas deep" should be measured in — and it is why fog
     turns detections off: haze compresses the hull's depth in counts while
     leaving the noise where it was.
+
+    **This assumes the noise is white, and on arena imagery it is not.** The
+    arena publishes JPEG, which is a low-pass filter: quantising the
+    high-frequency coefficients of every 8x8 block flattens adjacent-pixel
+    differences while leaving a hull-sized blob — and a floe's shadow —
+    untouched. Put :mod:`whiteout.vision.scene`'s frames through baseline luma
+    quantisation (``scripts/jpeg_quantisation.py``) and this estimate falls to
+    a third of the noise actually present at quality 75, and onto the
+    :attr:`DetectorParams.min_sigma` floor at quality 60. Every statistic this
+    module quotes in sigmas is a ratio to this number, so it is the one place
+    where being wrong opens every gate at once, which is why
+    :attr:`DetectorParams.min_depth_counts` exists alongside the sigma floor
+    and is not measured in sigmas at all. Issue #90 has the measurement and
+    the candidate fixes; none of them can be chosen without real frames.
     """
     low, high = np.percentile(image, (WATER_QUANTILE, WATER_SPREAD_QUANTILE), axis=1)
     residual = image - low[:, None]
@@ -477,14 +507,8 @@ def _response(
     surround_n = _box_sum(water_integral, outer, pad, shape)
     surround_n -= centre_n
 
-    centre_area = float((2 * radius + 1) ** 2)
-    surround_area = float((2 * outer + 1) ** 2) - centre_area
-    enough = (
-        centre_n >= max(float(params.min_centre_px), (1.0 - params.max_centre_ice) * centre_area)
-    ) & (
-        surround_n
-        >= max(float(params.min_surround_px), (1.0 - params.max_surround_ice) * surround_area)
-    )
+    need_centre, need_surround = _admissibility(radius, outer, params)
+    enough = (centre_n >= need_centre) & (surround_n >= need_surround)
     safe_centre = np.maximum(centre_n, 1.0)
     safe_surround = np.maximum(surround_n, 1.0)
     centre_sum /= safe_centre
@@ -511,6 +535,24 @@ def _box_at(padded: _Float, radius: int, pad: int, row: int, column: int) -> flo
     )
 
 
+def _admissibility(radius: int, outer: int, params: DetectorParams) -> tuple[float, float]:
+    """How many water pixels a centre box and its surround must hold.
+
+    Both the scorer (:func:`_response`) and the centroid's scale
+    (:func:`_deepest_scale`) ask this, so that the box a detection's
+    ``px``/``py`` come from is always a box the scorer would have accepted.
+    They disagreed once: the scale asked only for a single water pixel, so a
+    radius the scorer refused as mostly ice could still win the centroid and
+    drag the reported pixel across a floe edge.
+    """
+    centre_area = float((2 * radius + 1) ** 2)
+    surround_area = float((2 * outer + 1) ** 2) - centre_area
+    return (
+        max(float(params.min_centre_px), (1.0 - params.max_centre_ice) * centre_area),
+        max(float(params.min_surround_px), (1.0 - params.max_surround_ice) * surround_area),
+    )
+
+
 def _deepest_scale(
     weighted_integral: _Float,
     water_integral: _Float,
@@ -519,15 +561,19 @@ def _deepest_scale(
     shape: tuple[int, int],
     row: int,
     column: int,
-) -> int:
-    """Which centre box the winning pixel is deepest in.
+) -> int | None:
+    """Which centre box the winning pixel is deepest in, or ``None``.
+
+    ``None`` when no scale passes :func:`_admissibility` at this pixel. The
+    caller drops the detection rather than reporting a centroid taken from a
+    box the scorer would have refused.
 
     Asked once, at one pixel, rather than tracked across the frame: keeping a
     per-pixel winning scale costs a whole-frame write per scale and is read in
     exactly one place, the centroid's window. Four table lookups per scale
     here replace that.
     """
-    best_radius = params.scales[0]
+    best_radius: int | None = None
     best_depth = -np.inf
     for radius in params.scales:
         outer = params.surround_gain * radius + 2
@@ -535,7 +581,8 @@ def _deepest_scale(
         centre_n = _box_at(water_integral, radius, pad, row, column)
         surround_sum = _box_at(weighted_integral, outer, pad, row, column) - centre_sum
         surround_n = _box_at(water_integral, outer, pad, row, column) - centre_n
-        if centre_n < 1.0 or surround_n < 1.0:
+        need_centre, need_surround = _admissibility(radius, outer, params)
+        if centre_n < need_centre or surround_n < need_surround:
             continue
         depth = centre_sum / centre_n - surround_sum / surround_n
         if depth > best_depth:
@@ -655,6 +702,14 @@ def detect_vessel(
     # suffer — so the two would come out alike and the floor would separate
     # nothing.
     searchable &= deepest >= params.min_depth_sigma
+    # And the same floor in counts. ``deepest`` is in sigmas, and ``sigma`` is
+    # the per-row scale those sigmas were measured in, so the product is the
+    # hull's depth in 8-bit counts. The sigma floor above cannot tell a deep
+    # hull from a shallow one on a row whose noise was measured too low, and
+    # on JPEG frames that is most rows; this floor is the one gate in the
+    # chain that a collapsing denominator cannot open. ``-inf`` times a
+    # positive scale is still ``-inf``, so pixels that formed no box stay out.
+    searchable &= deepest * sigma >= params.min_depth_counts
     best[~searchable] = -np.inf
 
     flat = int(np.argmax(best))
@@ -680,8 +735,13 @@ def detect_vessel(
     if confidence < params.min_confidence:
         return None
 
-    radius = _deepest_scale(weighted_integral, water_integral, params, pad, shape, row, column)
-    px, py, area = _centroid(darkness, ice, row, column, radius)
+    scale = _deepest_scale(weighted_integral, water_integral, params, pad, shape, row, column)
+    if scale is None:
+        # No scale the scorer would accept survives at this pixel, so there is no
+        # box to take a centroid from. Reporting one anyway is how a lock beside
+        # a floe becomes a confident wrong lat/lon.
+        return None
+    px, py, area = _centroid(darkness, ice, row, column, scale)
 
     detection = VesselDetection(
         asset_id=asset_id,
@@ -694,7 +754,7 @@ def detect_vessel(
         depth_sigma=float(deepest[row, column]),
         runner_up_sigma=runner_up,
         area_px=area,
-        scale_px=radius,
+        scale_px=scale,
         camera=camera,
         pose=pose,
         ground_alt_m=float(ground_alt_m),

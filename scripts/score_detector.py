@@ -49,6 +49,7 @@ if str(REPO_ROOT) not in sys.path:
     # (scripts/gate.py has the long version of this story).
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.jpeg_quantisation import quantise  # noqa: E402
 from whiteout.vision.camera import CAMERAS  # noqa: E402
 from whiteout.vision.detect import DEFAULT_PARAMS, DetectorParams, detect_vessel  # noqa: E402
 from whiteout.vision.imagery import (  # noqa: E402
@@ -353,6 +354,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="render a corpus into this directory and exit",
     )
+    parser.add_argument(
+        "--jpeg",
+        type=int,
+        default=None,
+        metavar="QUALITY",
+        help=(
+            "put every frame through baseline JPEG luma quantisation at this quality "
+            "(1-100) before scoring it. The arena publishes JPEG and the generator does "
+            "not, so a number measured without this is a number about uncompressed "
+            "frames; see scripts/jpeg_quantisation.py and issue #90"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="print the numbers as JSON too")
     args = parser.parse_args(argv)
 
@@ -384,12 +397,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         directory = args.frames if args.frames is not None else REPO_ROOT / DEFAULT_FIXTURE_DIR
         source = f"fixture directory {directory}"
         frames = list(FixtureFrames(Path(directory)).frames())
+    if args.jpeg is not None:
+        frames = [replace(frame, luma=quantise(frame.luma, args.jpeg)) for frame in frames]
+        source += f", through JPEG luma quantisation at quality {args.jpeg}"
     print(f"scored against: {source}")
     print(
         "THIS IS NOT A MEASUREMENT AGAINST ARENA IMAGERY unless the directory above holds\n"
         "frames recorded from the arena. No such frames exist in this repository; recording\n"
         "them is issue #63 and a human action."
     )
+    if args.jpeg is not None:
+        print(
+            "--jpeg is a STAND-IN for the arena's encoder, not a model of it: the transform\n"
+            "that flattens pixel-to-pixel variation, with no chroma and no entropy coding.\n"
+            "It shows that a number measured uncompressed does not survive compression. It\n"
+            "does not say what the arena's own numbers are."
+        )
     print("=" * 72)
 
     tally = score(frames, params)

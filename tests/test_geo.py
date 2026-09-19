@@ -289,12 +289,22 @@ _TRIGONOMETRY = frozenset(
 #: width and a height -- so there is no frame here for a second converter to
 #: be. It is not exempted from the two guards above, which walk it and pass:
 #: it spells no ellipsoid constant and defines no conversion.
+#:
+#: #84 adds ``scripts/jpeg_quantisation.py``, whose cosine is the DCT basis --
+#: a fixed 8x8 matrix of ``cos((2k+1) j pi / 16)``, with no angle in it that
+#: came from anywhere and no coordinate of any kind. It is measurement
+#: apparatus and lives in ``scripts/`` for that reason: nothing under
+#: ``whiteout/`` imports it, so unlike ``scene.py`` above it cannot become
+#: something the product depends on. That distinction is the one worth keeping
+#: as this list grows -- an entry for a tool is cheap, an entry for a module
+#: the product ships is a standing invitation.
 _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
     {
         "whiteout/vision/camera.py",
         "whiteout/vision/projection.py",
         "whiteout/vision/scene.py",
         "tests/test_vision_projection.py",
+        "scripts/jpeg_quantisation.py",
     }
 )
 

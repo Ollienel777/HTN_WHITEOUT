@@ -290,6 +290,65 @@ def test_heavy_fog_is_silence_and_not_a_guess() -> None:
             assert found is None, f"{asset[0]} answered {found!r} through {HEAVY_FOG.fog} fog"
 
 
+#: Water with nothing happening on it: no floes, no glints, no swell, no fog
+#: and — the point — **no sensor noise**. The per-row scale has nothing left to
+#: measure, so it sits on ``min_sigma`` and every statistic quoted in sigmas is
+#: measured against a floor rather than against the frame.
+NO_NOISE = SceneParams(
+    floes=0,
+    glints=0,
+    water_swell=0.0,
+    fog=0.0,
+    noise_sigma=0.0,
+    blur_px=0,
+    vessel_length_px=(14.0, 16.0),
+)
+
+
+def test_a_collapsed_noise_scale_cannot_manufacture_depth() -> None:
+    """A shallow hull on noiseless water clears the sigma floor, and is refused anyway.
+
+    Every other gate in this detector is a ratio to the per-row noise, so all
+    of them are opened together by that noise being measured too small — and
+    it is measured too small on any imagery that has been through a low-pass
+    filter, which is to say on JPEG, which is what the arena publishes.
+    Rendered here as the limiting case: with no noise at all the scale falls
+    to ``min_sigma``, and a hull **four counts** deep reads as 4.4 sigmas and
+    sails past ``min_depth_sigma``'s 3.6.
+
+    ``min_depth_counts`` is the one gate a collapsing denominator cannot open,
+    because it asks the question in the units the hull is actually dark in.
+    That is also the quantity fog compresses, which is what makes the module's
+    bargain — degrade to ``None``, never to a confident wrong answer — hold on
+    imagery the estimator was not calibrated against.
+    """
+    scene = replace(NO_NOISE, vessel_contrast=4.0)
+    ungated = replace(DEFAULT_PARAMS, min_depth_counts=0.0)
+    found, _ = detect_on(scene, 5, vessel_px=(320.0, 260.0), params=ungated)
+    assert found is not None, "the premise is that the sigma floor alone lets this through"
+    assert found.depth_sigma > DEFAULT_PARAMS.min_depth_sigma, found.depth_sigma
+
+    refused, _ = detect_on(scene, 5, vessel_px=(320.0, 260.0))
+    assert refused is None, f"four counts of contrast answered {refused!r}"
+
+
+def test_the_counts_floor_does_not_cost_a_hull_that_is_really_there() -> None:
+    """The floor has to sit under a real hull, or it is just a blindfold.
+
+    Same noiseless frame, contrast walked up: the gate refuses what is below
+    it and passes what is above, rather than refusing everything once it is
+    switched on.
+    """
+    outcomes = {
+        contrast: detect_on(
+            replace(NO_NOISE, vessel_contrast=contrast), 5, vessel_px=(320.0, 260.0)
+        )[0]
+        is not None
+        for contrast in (3.0, 4.0, 6.0, 8.0)
+    }
+    assert outcomes == {3.0: False, 4.0: False, 6.0: True, 8.0: True}, outcomes
+
+
 def test_confidence_rises_with_contrast() -> None:
     """Confidence has to mean something, or gating on it is theatre."""
     confidences: list[float] = []

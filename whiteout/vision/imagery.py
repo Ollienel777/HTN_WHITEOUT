@@ -175,6 +175,16 @@ def read_pgm(path: str | os.PathLike[str]) -> NDArray[np.uint8]:
     255, comments allowed between tokens. A 16-bit PGM is refused rather than
     silently truncated, because a truncated frame would score as a detector
     result rather than as a file problem.
+
+    The raster is required to fill the rest of the file **exactly**, and that
+    is the strictest thing here on purpose. The format puts a single
+    whitespace byte between the header and the samples, so the samples start
+    at a position this reader has to count to; a writer that ends its header
+    ``255\n\n`` puts every sample one byte late. Reading ``width * height``
+    bytes from the wrong offset succeeds — the count is right, the file is
+    long enough — and returns the frame shifted by a pixel with its last row
+    wrapped, which is a plausible image and scores as one. An exact fit is the
+    only check that separates that from a correct file.
     """
     data = Path(path).read_bytes()
     tokens: list[bytes] = []
@@ -192,6 +202,8 @@ def read_pgm(path: str | os.PathLike[str]) -> NDArray[np.uint8]:
         if start == index:
             raise VisionError(f"{path}: truncated PGM header")
         tokens.append(data[start:index])
+    if index >= len(data) or not data[index : index + 1].isspace():
+        raise VisionError(f"{path}: PGM header is not followed by whitespace and a raster")
     index += 1  # exactly one whitespace byte separates the header from the raster
     magic, width_token, height_token, maximum_token = tokens
     if magic != b"P5":
@@ -203,11 +215,13 @@ def read_pgm(path: str | os.PathLike[str]) -> NDArray[np.uint8]:
     if maximum != 255:
         raise VisionError(f"{path}: only 8-bit PGM is supported, maximum value is {maximum}")
     expected = width * height
-    raster = data[index : index + expected]
+    raster = data[index:]
     if len(raster) != expected:
         raise VisionError(
-            f"{path}: PGM is truncated — the header promises {expected} samples "
-            f"({width}x{height}) and the file holds {len(raster)}"
+            f"{path}: the header promises {expected} samples ({width}x{height}) and "
+            f"{len(raster)} bytes follow it. Too few is a truncated file; too many is "
+            f"padding after the header, which would shift every sample and read as a "
+            f"picture rather than as a fault"
         )
     return np.frombuffer(raster, dtype=np.uint8).reshape(height, width).copy()
 
@@ -359,6 +373,8 @@ class MjpegFrames:
         itself.
     :param fps: replay rate for a recording; ignored for a live stream, which
         is stamped from the clock.
+    :param max_consecutive_bad: how many undecodable frames in a row this
+        stream tolerates before it gives up; see :meth:`frames`.
 
     A URL routes through :func:`~whiteout.vision.frames.live_frames` and so
     opens a socket. The gate never constructs this.
@@ -370,6 +386,7 @@ class MjpegFrames:
     pose: CameraPose | None = None
     ground_alt_m: float = 0.0
     fps: float = DEFAULT_FPS
+    max_consecutive_bad: int = 30
 
     def _raw(self) -> Iterator[Frame]:
         if self.source.startswith(("http://", "https://")):
@@ -377,14 +394,45 @@ class MjpegFrames:
         return recorded_frames(self.source, self.asset_id, fps=self.fps)
 
     def frames(self) -> Iterator[LumaFrame]:
+        """Yield decoded frames, stepping over the ones that will not decode.
+
+        **A bad frame must not end the stream.** These are yielded from a
+        generator, so raising here does not merely report the frame — it
+        closes the iterator for good, and the caller sees an iterator that
+        *ended*, which is what a stream reaching its last frame also looks
+        like. One truncated JPEG in a live MJPEG feed would retire that camera
+        for the rest of the episode and four sensors would quietly become
+        three, on a run that is judged once and has no retry.
+
+        So a frame that will not decode, or that decodes to the wrong size, is
+        skipped and the stream goes on. What is *not* survivable is every
+        frame failing: no decoder installed, the wrong camera configured
+        against this port, or a source that is not MJPEG at all. Those fail on
+        frame after frame, so ``max_consecutive_bad`` in a row raises — with
+        the last failure chained, because that message is the one that says
+        which of the three it was. A run of good frames resets the count; the
+        threshold is for a stream that is broken, not one that is lossy.
+        """
+        bad = 0
         for frame in self._raw():
-            luma = decode_jpeg_luma(frame.jpeg)
-            if luma.shape != (self.camera.height, self.camera.width):
-                raise VisionError(
-                    f"{self.asset_id} frame {frame.seq} decoded to "
-                    f"{luma.shape[1]}x{luma.shape[0]}, but {self.camera.name!r} publishes "
-                    f"{self.camera.width}x{self.camera.height}"
-                )
+            try:
+                luma = decode_jpeg_luma(frame.jpeg)
+                if luma.shape != (self.camera.height, self.camera.width):
+                    raise VisionError(
+                        f"{self.asset_id} frame {frame.seq} decoded to "
+                        f"{luma.shape[1]}x{luma.shape[0]}, but {self.camera.name!r} publishes "
+                        f"{self.camera.width}x{self.camera.height}"
+                    )
+            except VisionError as error:
+                bad += 1
+                if bad >= self.max_consecutive_bad:
+                    raise VisionError(
+                        f"{self.asset_id}: {bad} consecutive frames of {self.source!r} could "
+                        f"not be read as {self.camera.name!r} imagery, so this is the stream "
+                        f"and not a dropped frame: {error}"
+                    ) from error
+                continue
+            bad = 0
             yield LumaFrame(
                 asset_id=self.asset_id,
                 camera=self.camera,
@@ -404,8 +452,10 @@ def frame_source_from_env(
 
     :param environment: defaults to :data:`os.environ`; injected so a test can
         pin it without touching the process.
-    :param root: what :data:`DEFAULT_FIXTURE_DIR` is relative to. Defaults to
-        the working directory.
+    :param root: what a relative fixture directory is taken against —
+        :data:`DEFAULT_FIXTURE_DIR` and a relative ``WHITEOUT_VISION_FIXTURES``
+        alike. An absolute value in the environment is used as it stands.
+        Defaults to the working directory.
     :raises VisionError: on an unknown selector, or on ``mjpeg`` with no
         source set — loudly, rather than silently falling back to the fake,
         which would report a measurement against synthetic frames as a
@@ -415,7 +465,14 @@ def frame_source_from_env(
     choice = env.get(FRAMES_ENV, "fixture").strip().lower()
     base = Path.cwd() if root is None else root
     if choice in ("", "fixture"):
-        return FixtureFrames(Path(env.get(FIXTURE_ENV) or base / DEFAULT_FIXTURE_DIR))
+        # A relative override resolves against ``root`` like the default does.
+        # Reading it as relative to the *process* directory instead made the
+        # injected root a half-measure: a test could pin where the default
+        # points and not where the environment's own value points, and the two
+        # are the same knob.
+        override = env.get(FIXTURE_ENV)
+        directory = base / DEFAULT_FIXTURE_DIR if not override else base / override
+        return FixtureFrames(directory)
     if choice == "mjpeg":
         source = env.get(MJPEG_ENV)
         if not source:

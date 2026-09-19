@@ -79,11 +79,22 @@ def test_a_pgm_header_may_carry_comments(tmp_path: Path) -> None:
         (b"P5\n2 2\n65535\n\x00\x01\x00\x02\x00\x03\x00\x04", "only 8-bit"),
         (b"P5\n4 4\n255\n\x01\x02", "truncated"),
         (b"P5\n2 2", "truncated PGM header"),
+        (b"P5\n2 2\n255\n\n\x01\x02\x03\x04", "shift every sample"),
+        (b"P5\n2 2\n255\n\x01\x02\x03\x04\n", "shift every sample"),
     ],
 )
 def test_a_pgm_this_reader_does_not_speak_is_refused(
     tmp_path: Path, body: bytes, message: str
 ) -> None:
+    """The last two are the dangerous ones, and they are why the fit is exact.
+
+    A header padded to ``255\n\n`` leaves the samples one byte late. Reading
+    ``width * height`` bytes from the counted offset still finds that many
+    bytes, so the old check passed and handed back a frame shifted by a pixel
+    with its last row wrapped — a picture, not an error, and it would have
+    been scored as a detector result. Only requiring the raster to fill the
+    rest of the file exactly tells the two apart.
+    """
     path = tmp_path / "bad.pgm"
     path.write_bytes(body)
     with pytest.raises(VisionError, match=message):
@@ -268,17 +279,81 @@ def test_a_recording_becomes_frames_of_pixels(
         assert frame.label is None, "a live camera cannot know what is in its own frame"
 
 
-def test_a_decode_of_the_wrong_size_is_refused(
+def test_a_whole_stream_of_the_wrong_size_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Every frame failing is the configuration, and configuration has to be loud."""
     recording = tmp_path / "tower-1.mjpeg"
-    recording.write_bytes(multipart(1))
+    recording.write_bytes(multipart(4))
     monkeypatch.setattr(
         imagery, "decode_jpeg_luma", lambda _jpeg: np.zeros((240, 320), dtype=np.uint8)
     )
-    source = MjpegFrames(str(recording), "tower-1", TOWER_CAMERA)
-    with pytest.raises(VisionError, match="publishes"):
+    source = MjpegFrames(str(recording), "tower-1", TOWER_CAMERA, max_consecutive_bad=3)
+    with pytest.raises(VisionError, match="consecutive frames") as raised:
         list(source.frames())
+    assert "publishes" in str(raised.value.__cause__), "the chained cause names the mismatch"
+
+
+def test_one_unreadable_frame_does_not_end_the_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad frame is skipped, and the frames behind it still arrive.
+
+    This is the whole reason :meth:`MjpegFrames.frames` catches rather than
+    raises. Raising from inside a generator closes it, and a closed iterator
+    is indistinguishable from a stream that ended — so one corrupt JPEG would
+    retire that camera for the rest of an episode that is judged once.
+    """
+    recording = tmp_path / "tower-1.mjpeg"
+    recording.write_bytes(multipart(5))
+    good = np.full((TOWER_CAMERA.height, TOWER_CAMERA.width), 7, dtype=np.uint8)
+    calls = iter(
+        [
+            good,
+            VisionError("truncated JPEG"),
+            np.zeros((240, 320), dtype=np.uint8),
+            good,
+            good,
+        ]
+    )
+
+    def decode(_jpeg: bytes) -> np.ndarray:
+        outcome = next(calls)
+        if isinstance(outcome, VisionError):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(imagery, "decode_jpeg_luma", decode)
+    source = MjpegFrames(str(recording), "tower-1", TOWER_CAMERA, fps=10.0)
+    frames = list(source.frames())
+    assert [frame.seq for frame in frames] == [0, 3, 4], "the two bad frames are the gap"
+    for frame in frames:
+        assert np.array_equal(frame.luma, good)
+
+
+def test_the_bad_frame_count_resets_on_a_good_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lossy stream is not a broken one, however many frames it drops in total.
+
+    Without the reset the tolerance would be a budget for the whole episode,
+    and a feed that drops one frame in ten would hit it and take the camera
+    down — which is the failure this tolerance exists to prevent.
+    """
+    recording = tmp_path / "tower-1.mjpeg"
+    recording.write_bytes(multipart(9))
+    good = np.full((TOWER_CAMERA.height, TOWER_CAMERA.width), 7, dtype=np.uint8)
+    state = {"seen": 0}
+
+    def decode(_jpeg: bytes) -> np.ndarray:
+        state["seen"] += 1
+        if state["seen"] % 3 == 0:
+            raise VisionError("truncated JPEG")
+        return good
+
+    monkeypatch.setattr(imagery, "decode_jpeg_luma", decode)
+    source = MjpegFrames(str(recording), "tower-1", TOWER_CAMERA, max_consecutive_bad=2)
+    assert [frame.seq for frame in source.frames()] == [0, 1, 3, 4, 6, 7]
 
 
 def test_decode_jpeg_luma_says_what_is_missing() -> None:
