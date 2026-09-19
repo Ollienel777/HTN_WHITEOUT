@@ -12,16 +12,38 @@ number, not by a performance.
 
 ## 1. The product
 
-**One-liner.** A coordination layer for a heterogeneous ArduPilot/MAVLink fleet
-— fixed-wing, quadcopters, rovers and fixed sensor towers — that detects,
-classifies and tracks a moving target across Arctic terrain, and that was
-**tuned against a reimplementation of the sponsor's own scoring function**
-rather than argued into existence.
+# Dogwatch
 
-**The user.** The sponsor's scoring harness. It is the only user that matters
-and it does not have opinions; it has four numbers: **coverage, collaboration,
-efficiency, tracking accuracy**. Everything in this spec exists to move those
-four numbers, or to let us measure that we moved them.
+**One-liner.** Four machines keep watch over a two-kilometre strait, and pass
+the watch between them until the dark ship is found and held.
+
+**The name.** A *dogwatch* is a deliberately shortened watch at sea, and it
+exists for one reason: so the rotation shifts and the same hands do not always
+draw the same duty. It is **handover, named** — by sailors, centuries before
+this problem. That is the shape of this project. Two towers see nothing until
+they are pointed; a fixed-wing is fast with a narrow eye; a quadcopter is slow
+with a wide one. The intelligence is not in any one of them. It is in the
+passing.
+
+That matters beyond taste: Dominion Dynamics judge **collaboration**, and
+defined it at the workshop as *how the robots team up with each other*. The
+name states the thesis the run has to demonstrate.
+
+**The user.** Two, and they want different things.
+
+- **The sponsor's scoring harness**, which has no opinions and **seven**
+  criteria: search efficiency, coverage, detection speed, tracking duration,
+  accuracy, autonomy and collaboration. No weights are published.
+- **A judge in a five-minute presentation**, who weighs how we thought about
+  the problem, how we decided to implement it, and whether the fleet acts by
+  itself. Two of the seven criteria — **autonomy** and **collaboration** — are
+  read off behaviour and explanation, not off a scoreboard.
+
+**Superseded.** This section previously claimed one user ("the scoring
+harness… it has four numbers") and a product "tuned against a reimplementation
+of the sponsor's own scoring function". Both are wrong, and the sections below
+have not all been re-planned yet. `hackathon/ARENA.md` is ground truth for
+this track and wins wherever it and this file disagree.
 
 **The story.** We do not write flight control. ArduPilot already flies the
 vehicles. We write the layer above GUIDED-mode waypoints: where each asset
