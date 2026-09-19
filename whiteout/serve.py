@@ -124,8 +124,8 @@ def open_viewer_server(port: int, root: Path | None = None) -> ThreadingHTTPServ
     index = tree / VIEWER_INDEX
     if not index.is_file():
         raise ServeError(
-            f"no viewer at {index}; `serve` hands out the source tree, so run it "
-            f"from a checkout rather than from an installed wheel"
+            f"no viewer at {index.as_posix()}; `serve` hands out the source "
+            f"tree, so run it from a checkout rather than from an installed wheel"
         )
     handler = partial(_ViewerHandler, directory=str(tree))
     try:
