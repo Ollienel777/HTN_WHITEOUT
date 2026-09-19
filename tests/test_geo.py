@@ -160,18 +160,26 @@ _TRIGONOMETRY = frozenset(
     {"sin", "cos", "tan", "asin", "acos", "atan", "atan2", "radians", "degrees"}
 )
 
-#: Repository-relative paths allowed to call trigonometry anyway. Nothing
-#: outside the two exempt files needs it today, so this is empty. Add a path
+#: Repository-relative paths allowed to call trigonometry anyway. Add a path
 #: here with a reason rather than shrinking the set above: the entry is the
 #: reviewable record that somebody looked at the module and agreed its
 #: trigonometry is not a second frame.
 #:
-#: #72 will be the first: ``whiteout/vision/camera.py`` and
-#: ``whiteout/vision/projection.py`` turn a field of view and an attitude
-#: into a ray, which is trigonometry on angles that are not latitudes, and
-#: ``tests/test_vision_projection.py`` works an arctangent by hand. Their
-#: geodesy is still covered, by the two guards above.
-_TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset()
+#: #72 is the whole list. ``whiteout/vision/camera.py`` turns a field of view
+#: into a focal length and ``whiteout/vision/projection.py`` turns an
+#: attitude into a ray -- trigonometry on angles that are not latitudes, on a
+#: camera rather than an ellipsoid -- and ``tests/test_vision_projection.py``
+#: works an arctangent by hand to pin the frame edges. None of the three
+#: converts a frame any more: ``projection.py`` imports ``enu_to_geodetic``
+#: and the ellipsoid from ``whiteout.geo``, so their geodesy is still covered
+#: by the two guards above, which have no allowlist and walk these files.
+_TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
+    {
+        "whiteout/vision/camera.py",
+        "whiteout/vision/projection.py",
+        "tests/test_vision_projection.py",
+    }
+)
 
 
 def _defined_names(tree: ast.AST) -> set[str]:

@@ -271,7 +271,16 @@ def enu_to_geodetic(lat_deg: float, lon_deg: float, east_m: float, north_m: floa
     The positional form, taken by the camera projection, which has the
     camera's own lat/lon to hand and no ``GeoPoint`` for it. See
     :func:`local_to_geodetic` for the same step over the module's own types.
+
+    The displacements are checked here rather than left to :class:`GeoPoint`.
+    A dropped MAVLink field arrives as a NaN, and a NaN ``east_m`` left to
+    fall through reaches the range check as ``longitude nan is not a
+    longitude`` — which names the output, not the input that was bad, and
+    sends the reader to a ``lon_deg`` that was fine.
     """
+    for name, value in (("east_m", east_m), ("north_m", north_m)):
+        if not math.isfinite(value):
+            raise GeoError(f"{name} must be finite, got {value!r}")
     meridional, east = radii_of_curvature(lat_deg)
     return GeoPoint(
         lat_deg + math.degrees(north_m / meridional),
