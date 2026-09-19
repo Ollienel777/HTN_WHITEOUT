@@ -173,10 +173,21 @@ _TRIGONOMETRY = frozenset(
 #: converts a frame any more: ``projection.py`` imports ``enu_to_geodetic``
 #: and the ellipsoid from ``whiteout.geo``, so their geodesy is still covered
 #: by the two guards above, which have no allowlist and walk these files.
+#:
+#: #66 adds ``whiteout/vision/scene.py``, the synthetic-imagery generator.
+#: Its trigonometry is entirely inside the image: ``_ellipse`` rotates a
+#: painted shape about a pixel centre, and ``_scatter_floes`` turns one sun
+#: azimuth per frame into the pixel offset every floe's shadow is cast along.
+#: The module imports no position type, names no distance in metres and takes
+#: no latitude -- its only import from the package is ``CameraModel``, for a
+#: width and a height -- so there is no frame here for a second converter to
+#: be. It is not exempted from the two guards above, which walk it and pass:
+#: it spells no ellipsoid constant and defines no conversion.
 _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
     {
         "whiteout/vision/camera.py",
         "whiteout/vision/projection.py",
+        "whiteout/vision/scene.py",
         "tests/test_vision_projection.py",
     }
 )

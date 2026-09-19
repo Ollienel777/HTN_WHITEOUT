@@ -20,7 +20,7 @@ and the mapping is spelled out because a reviewer should not have to guess it:
     is never searched, and nothing is ever emitted that will not project.
 
 The last of those is the reason for
-:func:`test_every_detection_projects_to_a_finite_lat_lon`: a detection that
+:func:`test_every_detection_projects_to_a_finite_ground_point`: a detection that
 cannot become a lat/lon is a detection the tracks API would score us down for,
 so the type cannot be allowed to exist.
 """
@@ -379,7 +379,7 @@ def test_a_range_bound_tighter_than_the_channel_is_respected() -> None:
     assert detect_on(PLAIN_OPEN, 113, vessel_px=(300.0, 250.0), params=tight)[0] is None
 
 
-def test_every_detection_projects_to_a_finite_lat_lon() -> None:
+def test_every_detection_projects_to_a_finite_ground_point() -> None:
     """``to_ground`` cannot raise on a detection this module emitted."""
     checked = 0
     for asset in FLEET:
