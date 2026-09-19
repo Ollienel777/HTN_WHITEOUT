@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(gh-real:*)",
+      "Bash(node:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(python3:*)",
+      "Bash(pytest:*)",
+      "Bash(uv:*)",
+      "Bash(docker:*)",
+      "Bash(bash:*)",
+      "Bash(jq:*)",
+      "Bash(make:*)",
+      "mcp__github__*"
+    ]
+  }
+}
