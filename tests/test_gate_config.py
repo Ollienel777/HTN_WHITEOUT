@@ -333,6 +333,62 @@ def test_gate_rejects_a_frozen_copy_of_the_source_inside_this_worktree() -> None
         assert not gate._is_inside(frozen, REPO_ROOT), f"{frozen} accepted as this worktree"
 
 
+def test_gate_rejects_another_worktree_under_this_repo_root() -> None:
+    """Issue #53: in the main checkout, every loop worktree is *inside* REPO_ROOT.
+
+    The ambient editable install points at one of them, so plain containment
+    takes another worktree's live source as this one -- the failure this
+    guard exists to catch, reached from inside it.
+    """
+    gate = _load_gate()
+    foreign = REPO_ROOT / ".claude" / "worktrees" / "agent-other" / "whiteout" / "__init__.py"
+    assert not gate._is_inside(foreign, REPO_ROOT), f"{foreign} accepted as this worktree"
+
+
+def test_gate_probes_an_adopted_venv_that_inherits_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #53: an adopted `.venv/` need not be `--system-site-packages`.
+
+    A plain `python -m venv .venv` carrying `setuptools>=70.1` takes the
+    editable install, so the rebuild never fires; the ambient probe then
+    vouches for an interpreter that cannot see ruff, mypy or pytest, and
+    `install` PASSes into `No module named ruff` for ever. The diagnosis has
+    to name `.venv/`.
+    """
+    gate = _load_gate()
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text("include-system-site-packages = false\n", encoding="utf-8")
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+
+    probed: list[str] = []
+
+    def probe(python: str) -> tuple[list[str], None]:
+        probed.append(python)
+        return ([] if len(probed) == 1 else ["ruff", "mypy", "pytest"], None)
+
+    def select() -> None:
+        gate.PY = str(gate._venv_python(venv))
+        return None
+
+    monkeypatch.setattr(gate, "_missing_distributions", probe)
+    monkeypatch.setattr(gate, "_select_interpreter", select)
+
+    failure = gate.step_install()
+
+    assert failure is not None, "passed install into an interpreter missing the toolchain"
+    assert "ruff" in failure
+    assert venv.name in failure
+
+    # A `.venv/` this code created inherits the ambient environment, so it
+    # must not cost a second subprocess.
+    (venv / "pyvenv.cfg").write_text("include-system-site-packages = true\n", encoding="utf-8")
+    probed.clear()
+    assert gate.step_install() is None
+    assert len(probed) == 1
+
+
 def test_gate_reports_a_missing_toolchain_before_choosing_an_interpreter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

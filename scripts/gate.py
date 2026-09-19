@@ -144,17 +144,31 @@ def _resolved_whiteout(python: str) -> Path | None:
 
 
 def _copy_trees() -> tuple[Path, ...]:
-    """Subtrees that hold *copies* of the source rather than the source.
+    """Subtrees under ``REPO_ROOT`` that are *not* this tree's source.
 
     ``.venv/Lib/site-packages/whiteout/`` (a non-editable install -- the wheel
     ``step_build`` just produced, or a `.venv` predating this guard) and
     ``build/lib/whiteout/`` are both under ``REPO_ROOT`` and would satisfy
     plain containment, yet both are frozen snapshots: a gate answered by one
-    of them is a gate exercising code that is no longer in the tree. This is
-    the one containment predicate the whole guard rests on, so it excludes
-    them rather than relying on nothing ever reaching them.
+    of them is a gate exercising code that is no longer in the tree.
+
+    ``.claude/worktrees/`` is the other direction of the same mistake, and
+    the live one: in the *main checkout* ``REPO_ROOT`` contains every loop
+    worktree of this repository, and the ambient editable install spends its
+    time pointing at one of them. Plain containment would take another
+    worktree's working source as this one and log it as this one -- issue
+    #53's exact failure, inside the guard that closes it. Inert when the gate
+    runs in a worktree, which holds no worktrees of its own.
+
+    This is the one containment predicate the whole guard rests on, so it
+    excludes them rather than relying on nothing ever reaching them.
     """
-    return (VENV_DIR, REPO_ROOT / "build", REPO_ROOT / "dist")
+    return (
+        VENV_DIR,
+        REPO_ROOT / "build",
+        REPO_ROOT / "dist",
+        REPO_ROOT / ".claude" / "worktrees",
+    )
 
 
 def _is_inside(path: Path, root: Path) -> bool:
@@ -170,6 +184,29 @@ def _is_inside(path: Path, root: Path) -> bool:
             continue
         return False
     return True
+
+
+def _inherits_ambient(venv_dir: Path) -> bool:
+    """Whether ``venv_dir`` can see the distributions the ambient probe found.
+
+    An environment *this code creates* is ``--system-site-packages`` and does,
+    so one probe covers both interpreters. One it *adopts* -- any directory
+    with a ``python`` in it -- need not: a plain ``python -m venv .venv``
+    carrying ``setuptools>=70.1`` takes the editable install successfully, so
+    the rebuild in ``_bootstrap_worktree_env`` never fires, and the gate
+    passes ``install`` into an interpreter that cannot see ruff, mypy or
+    pytest. Reading ``pyvenv.cfg`` answers that without a subprocess, so the
+    second probe is paid only by the environment that needs it.
+    """
+    try:
+        text = (venv_dir / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "include-system-site-packages":
+            return value.strip().lower() == "true"
+    return False
 
 
 def _build_worktree_env() -> str | None:
@@ -339,12 +376,29 @@ def step_install() -> str | None:
     if missing:
         return f'not installed: {", ".join(missing)} -- run: pip install -e ".[dev]"'
 
-    # Probing the ambient interpreter covers the fallback one too, and costs
-    # no extra subprocess: `.venv/` is `--system-site-packages`, so every
-    # distribution found here is visible there. The one entry that is not
-    # inherited is `whiteout` itself, and `_select_interpreter` checks that
-    # directly -- by where it imports from, which is the stronger question.
-    return _select_interpreter()
+    failure = _select_interpreter()
+    if failure is not None:
+        return failure
+
+    # Probing the ambient interpreter covers a `.venv/` this code created,
+    # which is `--system-site-packages`: every distribution found above is
+    # visible there, and the one entry that is not inherited -- `whiteout`
+    # itself -- `_select_interpreter` has just checked directly, by where it
+    # imports from. An *adopted* `.venv/` gets the second probe, because it
+    # inherits nothing and can otherwise pass this step into an interpreter
+    # missing most of the toolchain.
+    if PY != str(_venv_python(VENV_DIR)) or _inherits_ambient(VENV_DIR):
+        return None
+    missing, failure = _missing_distributions(PY)
+    if failure is not None:
+        return failure
+    if missing:
+        return (
+            f"not installed in {VENV_DIR.name}/: {', '.join(missing)} -- "
+            f"{VENV_DIR.name}/ was adopted, not created here, and does not inherit the "
+            f"ambient environment. Delete {VENV_DIR} and rerun to rebuild it."
+        )
+    return None
 
 
 def step_lint() -> str | None:
