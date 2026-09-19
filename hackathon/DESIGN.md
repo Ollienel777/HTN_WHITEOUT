@@ -81,7 +81,11 @@ uses a raw hex value or a one-off pixel size.**
   --cls-quad:  #a78bfa;   /* quadcopter  — violet */
   --cls-rover: #4ade80;   /* rover       — green, ground */
   --cls-tower: #93a3b6;   /* tower       — neutral, immobile */
-  --truth:     #f87171;   /* ground truth target — only ever this colour */
+  --truth:     #f87171;   /* ground truth target — the only red drawn on the
+                             field. Same hex as --danger deliberately: red
+                             means "the thing you must not miss" everywhere.
+                             Off the field (score deltas, errors) that is
+                             --danger; on the field it is only ever this. */
 
   /* terrain */
   --terrain-lo: #0a0f16;
@@ -245,7 +249,9 @@ switched on.
   Belief opacity up. The erosion is the only thing moving. Cut chords enter.
   The `TRACKED` badge appears in the field's top-left, `--t-48` mono,
   `--ok`, with the clock — big enough to read from the back of the room, and
-  it is the only time type that size appears on the map.
+  it is the only time type that size appears on the map. (`--t-48` is also the
+  topbar dials and the clock; the topbar is not the map. D34 builds this
+  badge.)
 - **Beat 4** — camera holds, rail's CONTACTS section expands, handoff arcs draw
   between assets on the field in the two class colours.
 - **Beat 5** — the field is replaced by the **tuning report**: a scatter of
@@ -286,7 +292,9 @@ Beyond the generic list in the `ui-craft` skill:
 
 - **No radar-sweep animation, no scan lines, no reticles, no all-caps green
   monospace field.** Military cosplay reads as a student project.
-- **No red anywhere except ground truth.** See the colour rules.
+- **No red on the field except ground truth.** The truth marker is the only
+  red drawn inside `FieldCanvas`. Off the field, red is `--danger` and means
+  only "worse" — a falling score chevron is the one other place it appears.
 - **No belief-ramp colours outside the belief field.**
 - **No tooltip that follows the cursor continuously.** It appears on hover after
   120ms, anchored to the cell, and it does not animate.

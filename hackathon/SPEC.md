@@ -100,7 +100,7 @@ How each clause is met visibly:
 | clause | met by | visible in |
 |---|---|---|
 | heterogeneous fleet — fixed-wing, quad, rover, tower | Four vehicle classes with distinct kinematic envelopes and distinct sensor models, each with a distinct role in the policy | Beats 1, 4 |
-| running ArduPilot and MAVLink | `sitl` transport: `sim_vehicle.py --count N --auto-sysid --mcast`, `pymavlink`, GUIDED mode, `SET_POSITION_TARGET_GLOBAL_INT` | Beat 6 |
+| running ArduPilot and MAVLink | **Primary:** `sitl` transport against real ArduPilot — `sim_vehicle.py --count N --auto-sysid --mcast` inside the Docker image D46 builds, `pymavlink`, GUIDED mode, `SET_POSITION_TARGET_GLOBAL_INT`. **Fallback if D46 fails:** the MAVLink half only — `pymavlink`-encoded `SET_POSITION_TARGET_GLOBAL_INT` / `GLOBAL_POSITION_INT` over a socket, proved by the D6 conformance suite against a `pymavlink` loopback, with the README stating plainly that the ArduPilot half was not exercised. There is no honest fallback that exercises ArduPilot itself without ArduPilot. | Beat 6 |
 | detect, classify, track | Contact lifecycle machine with an explicit classify step | Beat 4 |
 | shared intelligence / distributed thinking | One shared belief state, auction allocation across classes, explicit cueing and handoff | Beats 3, 4 |
 | coverage, collaboration, efficiency, tracking accuracy | Our reimplementation of all four with weights as parameters; the coordinator optimises them directly | Beats 2, 5, 7 |
@@ -109,7 +109,9 @@ How each clause is met visibly:
 ### Solana: Best Badge Hack — **not in this repo**
 
 `DECISION.md` runs it as an explicitly decoupled side entry per
-`hackathon/ideation/BADGE-HACK-BRIEF.md`. It shares no code and no time with
+`hackathon/ideation/BADGE-HACK-BRIEF.md` (local-only — `hackathon/ideation/`
+is gitignored, so this path resolves on the build machine and nowhere else).
+It shares no code and no time with
 this build. **No ticket in this backlog serves it.**
 
 ### Nothing else
@@ -199,10 +201,22 @@ Three places, in order of risk:
 
 ### External services
 
-**There are none.** No network egress on any path; no API keys anywhere; no
-account, no card. The only external dependency is **ArduPilot SITL**, which is
-a locally installed binary, and it sits behind the `Transport` interface like
-everything else. The `kinematic` transport is its fake, is what CI runs, is
+**There are none at runtime.** No network egress on any code path in
+`whiteout/`; no API keys anywhere; no account, no card. The only external
+dependency is **ArduPilot SITL**, and it sits behind the `Transport` interface
+like everything else.
+
+**SITL is not installed on the build machine, and it is not natively supported
+on Windows 11.** It is acquired by **D46**, a loop action, as a **Docker
+image** — Docker 29.4.1 is installed and working on this machine, and the image
+needs no account, no key and no purchase. Two sources, in order: build
+ArduPilot's own `docker/Dockerfile` from a clone of `ArduPilot/ardupilot`
+(submodules included), or `https://github.com/radarku/sitl-swarm`, which our
+own research recorded as a Docker-based multi-vehicle bring-up shortcut.
+**Time cost: one hour, timeboxed**, most of it the clone and the waf build
+inside the image. The image pull/clone is a one-time setup step outside the
+product; it is not a runtime path and the "no network egress" rule above is
+unaffected. The `kinematic` transport is its fake, is what CI runs, is
 what the tuner runs, and is what the demo runs. See §7.
 
 One data input: a **public Arctic DEM tile**, fetched before the event
@@ -287,7 +301,7 @@ It runs, in order, failing fast:
 | format | `ruff format --check whiteout tests scripts` |
 | typecheck | `mypy whiteout` |
 | test | `pytest -q` |
-| build | `python -m build --wheel` (proves the package is installable, and it is what the submission links) |
+| build | `python -m build --wheel --no-isolation` (proves the package is installable, and it is what the submission links). **`--no-isolation` is required**: the default fetches the build backend from PyPI on every invocation, which breaks §4's no-egress rule and spends venue wifi on every gate run. |
 | smoke | `python -m whiteout.cli run --transport kinematic --seed 7 --ticks 400 --out artifacts/smoke.jsonl` then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print four finite scores |
 | determinism | second smoke run at the same seed; logs must be byte-identical |
 
@@ -354,7 +368,7 @@ target; its absence is normal and never blocks the gate, the demo or a ticket.
 |---|---|
 | **M0 Skeleton** | Package scaffold, `pyproject.toml`, ruff/mypy/pytest configured with `.claude/**` excluded, **the CI workflow**, `scripts/gate.py`, the `types.py` record set, the episode-log schema and its validator, the `Transport` Protocol with a trivial kinematic stub, `.env.example`, and a smoke test that runs 400 ticks and scores them. The first M0 ticket also **deletes `hackathon/backlog-draft.md`**. |
 | **M1 Demo path** | Every beat of §2 works end to end on the `kinematic` transport: sim, scorer, belief with negative information, flow cuts, contact lifecycle, hysteresis, auction allocation, the frontier fallback, and the viewer. Beat 6 is satisfied by a recorded SITL log if SITL is not yet up. |
-| **M2 Wow** | (a) The `sitl` transport drives ≥4 ArduPilot vehicles for real on a machine where SITL is installed, and the run is recorded as a committed episode log that the viewer replays everywhere else. (b) A completed overnight sweep produces a tuned parameter set that **beats the frontier baseline on the committed weights**, with the ablation table to show which differentiator earned what. |
+| **M2 Wow** | (a) The `sitl` transport drives ≥4 ArduPilot vehicles for real **inside the Docker image D46 builds**, and the run is recorded as a committed episode log that the viewer replays everywhere else. If D46 reports SITL unobtainable inside its timebox, M2(a) exits as "not obtainable", recorded with the reason, and the §3 fallback applies. (b) A **completed overnight sweep with a decided operating point and an ablation table**, whichever policy wins. M2(b) does **not** require the tuned set to beat the frontier baseline — if frontier wins, that is the result, and §10's top risk row says we ship frontier. |
 | **M3 Prizes** | Every clause of the §3 table is visibly met. The `arena` adapter exists as a documented stub with a runbook, and the sponsor's weights can be entered and applied in under two minutes. |
 | **M4 Polish** | The viewer passes the `ui-craft` rubric at 1440×900, with real episode data, and every state handled (no log, log loading, log malformed, episode running, episode finished, no contacts, many contacts). |
 | **M5 Submission** | Per `docs/build/SUBMIT.md`: repo, README with the architecture diagram and the four-axis argument, badge IDs, WHITEOUT selected on Devpost before the 18:00Z lock, demo video. |
@@ -393,6 +407,34 @@ Drop in this order. Everything above the line survives to the end.
 Never cut: the transport seam, the episode log, the scorer, determinism, the
 frontier-coverage fallback, negative information.
 
+### If M1 is late
+
+The eight items above protect M2–M5. M1 is 25 of the 46 tickets and the entire
+demo path, so it needs its own degrade order. Drop in this order, and stop as
+soon as the schedule is recovered:
+
+1. **D24, the split-screen view** (also item 8 above). Two sequential replays
+   tell the same story.
+2. **Beat 7 collapses to a file.** `WeightsField` becomes "edit
+   `fixtures/weights/*.json` and re-score" — the two-minute re-weight claim in
+   M3 is met by the CLI rather than the UI.
+3. **D13, the flow-network cuts, becomes overlay-only.** This is already
+   §10's mitigation and its four-hour timebox is the first budget to refuse:
+   if M1 is late when D13 comes up, the timebox is not spent at all and
+   `belief/flow.py` ships as a render-only layer the policy ignores. Beat 3
+   keeps the erosion; it loses the cut chords.
+4. **D36's handoff arcs go static.** The `ContactRibbon` still shows the
+   lifecycle, so beat 4's collaboration evidence survives; only the drawn arc
+   is lost.
+5. **Beat 4 narrows to the ribbon**, and D26's classification depth collapses
+   to a confidence threshold (item 6 above, pulled forward).
+
+Of the four differentiators, **negative information (D12) and the contact
+lifecycle (D17) are never degraded** — the first is on the never-cut line
+above, the second is the only visible evidence on a scored axis. The flow-cut
+view degrades first, and re-tasking hysteresis degrades to a fixed constant
+rather than a tuned parameter before either of those is touched.
+
 ---
 
 ## 10. Risks and spikes
@@ -403,14 +445,16 @@ frontier-coverage fallback, negative information.
 | **The negative-information likelihood is subtly wrong.** It looks plausible for hours. It is also the cheapest accuracy win, so it is load-bearing. | **high** | A property test: over many seeds, belief entropy must fall monotonically under non-detections, and the posterior must never assign <0 or >1. Plus a closed-form single-sensor case checked by hand. | D11, D12 |
 | **The sponsor's interface is not MAVLink.** `dominiondynamics.online` does not resolve; the Devpost block is the only public text in existence; a search-engine summary calling it "an arena simulation SDK" appears in no sponsor text and is **not treated as sourced**. | **high** | The seam. Only the adapter is lost. Booth visit at hour one of the sponsor bay. | D6, D32 |
 | **Eleven SITL instances plus a renderer do not fit on one laptop.** Our own analysis put the cut at six, and six was untested. | medium | The kinematic sim exists so this never blocks anything. SITL is validation; the *recorded log* is the deliverable. Spike: time four instances early, before committing to six. | **Spike S1**, D21 |
-| **The overnight sweep does not finish, or finds nothing.** | medium | The sweep is checkpointed and resumable; partial results are a valid report. The sim's speed target (≥100× real time on the kinematic transport) is a **tested assertion in the gate**, not an aspiration, so we learn at hour 6 rather than hour 26. | D9, D23 |
+| **SITL cannot be obtained at all.** It is not installed, and Windows 11 has no native ArduPilot SITL. | medium | **D46** acquires it as a Docker image (Docker 29.4.1 is installed and working) in a one-hour timebox, as a loop action needing no account, key or purchase. On overrun D46 closes as "unobtainable", no M1 ticket is blocked, and the §3 MAVLink-only fallback for the ArduPilot clause applies, stated as such in the README. | **D46** |
+| **The overnight sweep does not finish, or finds nothing.** | medium | The sweep is checkpointed and resumable; partial results are a valid report. The sim's speed target (≥100× real time on the kinematic transport) is a **measured number, reported in D9 and re-measured by the tuner**, not an aspiration — so we learn at hour 6 rather than hour 26. It is **not** a wall-clock assertion inside the gate: the gate runs on shared CI runners and from parallel worktrees (§6), where a fixed throughput threshold is a coin flip and a red gate on an unrelated PR is a PR that cannot settle. The assertion lives behind `-m slow`, excluded from the gate per §6. | D9, D23 |
 | **Teaching to the test reads as gaming.** | low | It is not, and the README says so plainly: the four axes are the sponsor's own published criteria, the weights are parameters, and the ablation table shows which mechanism earned which points. Optimising a published objective is engineering. | D33 |
 | **The flow-network cut view is over-engineered.** It is the most interesting idea and therefore the most likely to eat a day. | medium | Timeboxed. `networkx` min-cut on a coarse graph, posting stations as the cut edges' midpoints. If it is not producing sane cuts in four hours, it becomes an overlay-only feature and the policy ignores it. | D13 |
 | **We accidentally read ground truth in the coordinator.** | medium | A test asserts the coordinator module never imports the truth field, plus a runtime guard in the transport. | D5 |
 
 **Spikes**, timeboxed, run before the work they de-risk:
 
-- **S1 (1h, before D21):** start four `sim_vehicle.py` instances with
+- **S1 (1h, after D46, before D21):** inside D46's Docker image, start four
+  `sim_vehicle.py` instances with
   `--count 4 --auto-sysid --mcast`, connect `pymavlink`, confirm GUIDED-mode
   `SET_POSITION_TARGET_GLOBAL_INT` moves a vehicle. Record CPU. Answer: how
   many instances fit.
@@ -440,6 +484,10 @@ Also noted, not a build question: **sponsor selection locks
 WHITEOUT regardless — it is the whole project.
 
 **Decisions reserved to the human** (the loop files `needs-decision` rather than
-choosing): adding any second sponsor prize, changing the stack after M0,
+choosing): **whether the Solana Best Badge Hack entry (§3, $2,500) is still
+being run alongside and by whom, or is dropped** — `DECISION.md` targets it and
+this backlog serves it with no ticket, so it is currently neither scheduled nor
+dropped, and it still costs a submission and a slot in the same 09:45–11:45
+window; adding any second sponsor prize, changing the stack after M0,
 abandoning the scorer-first ordering, and anything that spends money, needs a
 sign-up, or is irreversible and public.
