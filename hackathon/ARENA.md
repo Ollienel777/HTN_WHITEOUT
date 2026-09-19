@@ -176,8 +176,46 @@ somewhere.
 
 - the terrain generator, vehicle kinematics, sensor model, target movers and
   episode loop (`whiteout/sim/`, tickets #7, #8, #10, #11, #25, #24)
-- the `sitl` transport and its Docker acquisition (#45, #46, #47, #48) — the
-  sim *is* ArduPilot SITL, already containerised
+**Correction to this file's first draft.** It listed the `sitl` transport and
+its Docker acquisition (#45, #46, #47, #48) as dead work, "because the sim
+*is* ArduPilot SITL, already containerised". **That is backwards.** Their
+assets are stock ArduPilot Copter, Plane and AntennaTracker driven by MAVLink,
+which makes **a local vanilla SITL of those three vehicle types a nearly exact
+development stand-in for their arena.** Those tickets are not dead — they
+change role from deliverable to **dev harness**, and they are the most
+valuable thing to build while waiting for the sim, because everything above
+the transport can then be written and tested against real MAVLink before the
+arena arrives.
+
+## 7b. What can be built before the sim arrives
+
+Ordered by how much each unblocks. None of it needs their sim.
+
+1. **Local ArduPilot SITL for copter, plane and antennatracker.** Their
+   vehicles are stock and the commands in §3 transfer unchanged. This unblocks
+   everything below and turns waiting into work.
+2. **The tracks API client, plus a stub server** mimicking the documented
+   responses (`created:true` on insert, `created:false` on a name match). The
+   format in §5 is fully specified, and this is the only artifact the judges
+   read.
+3. **Camera-to-world projection.** Fully determined by the published FOVs in
+   §4 and the vehicle pose from MAVLink: pixel → bearing → intersect the water
+   plane → lat/lon. Testable with synthetic frames and known poses; needs no
+   imagery.
+4. **The vision detector's scaffolding** — frame source, detect, emit a pixel.
+   The *model* needs their imagery; the pipeline, the interfaces and the
+   projection do not.
+5. **Belief over the strait, and tower placement.** The geometry is known —
+   25 × 2 km at roughly 71.99 N, −94.84 W, with a water-confined target. Tower
+   placement is pure geometry over a known channel and is the one sanctioned
+   `.env` lever.
+6. **The cueing chain** — tower trips, plane sweeps, quad confirms, track
+   maintenance posts — testable end to end against a fake transport.
+7. **The five-minute presentation**, which is judged and which nothing blocks.
+
+**What genuinely waits for the sim:** what the vessel looks like at range among
+ice floes, the real endpoint wiring, whether their vehicles deviate from stock
+ArduPilot, and timing under load.
 - a four-axis scorer (#26) as specified
 
 **The strategic bet is damaged and needs re-deciding.** `DECISION.md` bets on
