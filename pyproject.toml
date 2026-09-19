@@ -11,6 +11,9 @@ dependencies = [
     "numpy",
     "scipy",
     "networkx",
+    # The arena speaks MAVLink over UDP, one endpoint per asset
+    # (hackathon/ARENA.md section 3). Pure Python, no build step.
+    "pymavlink",
 ]
 
 [project.optional-dependencies]
@@ -64,3 +67,10 @@ norecursedirs = [".claude", ".git", ".venv", "artifacts", "build", "dist", "viz"
 markers = [
     "slow: wall-clock or long-running; deselected by the gate, run by the tuner",
 ]
+
+[[tool.mypy.overrides]]
+# pymavlink ships no stubs and no py.typed marker. It is the arena's wire
+# protocol and there is no alternative to it, so the adapter holds its
+# messages as `Any` and the seam's own types are what stay checked.
+module = ["pymavlink.*"]
+ignore_missing_imports = true
