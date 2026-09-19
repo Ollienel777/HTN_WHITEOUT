@@ -157,11 +157,26 @@ def _check_keys(payload: Mapping[str, Any], where: str, cls: Any) -> None:
         raise RecordError(f"{where}: unknown field(s) {', '.join(unknown)}")
 
 
+def _to_float(value: int | float, where: str) -> float:
+    """Widen to ``float``, naming the field if the value has no double.
+
+    A JSON integer literal is unbounded, so ``float(value)`` raises
+    ``OverflowError`` — an ``ArithmeticError``, which is not a
+    :class:`RecordError` and would escape the log validator's handler and
+    leave the caller a traceback with no line number. It is the integer
+    spelling of the ``1e999`` overflow the reader already rejects by path.
+    """
+    try:
+        return float(value)
+    except OverflowError as exc:
+        raise RecordError(f"{where}: {value.__class__.__name__} is too large for a float") from exc
+
+
 def _float(payload: Mapping[str, Any], where: str, name: str) -> float:
     value = payload[name]
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise RecordError(f"{where}.{name}: expected a number, got {type(value).__name__}")
-    return float(value)
+    return _to_float(value, f"{where}.{name}")
 
 
 def _int(payload: Mapping[str, Any], where: str, name: str) -> int:
@@ -209,7 +224,7 @@ def _pair(payload: Mapping[str, Any], where: str, name: str) -> tuple[float, flo
             raise RecordError(
                 f"{where}.{name}[{index}]: expected a number, got {type(item).__name__}"
             )
-        out.append(float(item))
+        out.append(_to_float(item, f"{where}.{name}[{index}]"))
     return (out[0], out[1])
 
 

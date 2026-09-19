@@ -126,9 +126,9 @@ def write_episode_log(path: Path | str, records: Iterable[EpisodeRecord]) -> int
     be finite (the offender is named by its dotted field path), a record's
     clocks must agree, ``t`` must not run backwards between records, and — a
     rule about the log rather than about any record in it — ``records`` must
-    yield at least one, because :func:`validate_episode_log` rejects an empty
-    log and there is no file this writer could produce for zero records that
-    the reader would accept. A log this build cannot read back can never be
+    yield at least one, because :func:`iter_episode_log` rejects an empty log
+    and so there is no file this writer could produce for zero records that
+    any reader would accept. A log this build cannot read back can never be
     produced by it.
 
     Round-tripping parses every record twice on write, which costs about
@@ -257,6 +257,13 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
     a whitespace-only line is not blank and is rejected as malformed. ``t``
     must not run backwards between lines.
 
+    A log with no records is rejected, at the end of the iteration rather
+    than up front, because a file of nothing but blank lines is as empty as a
+    0-byte one. The rule lives here so that every reader inherits it: an
+    episode truncated to zero by a killed run or a full disk must not read
+    clean through :func:`read_episode_log` and score as an episode with no
+    ticks.
+
     The file is read and closed before the first record is yielded, so a
     caller that peeks at one tick and stops does not hold the handle open —
     on Windows that handle blocks the next run from rewriting the log.
@@ -265,6 +272,7 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
     with source.open("r", encoding="utf-8") as handle:
         lines = handle.readlines()
     previous: float | None = None
+    yielded = 0
     for number, line in enumerate(lines, start=1):
         if line.strip("\r\n") == "":
             continue
@@ -275,7 +283,10 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
                 f"t {record.t!r} is before the previous line's {previous!r}",
             )
         previous = record.t
+        yielded += 1
         yield record
+    if yielded == 0:
+        raise EpisodeLogError(1, "the episode log is empty")
 
 
 def read_episode_log(path: Path | str) -> list[EpisodeRecord]:
@@ -287,11 +298,11 @@ def validate_episode_log(path: Path | str) -> int:
     """Validate the log at ``path`` and return its record count.
 
     Raises :class:`EpisodeLogError` naming the failing line, or for an empty
-    log, which is never a valid episode.
+    log, which is never a valid episode — that rule lives in
+    :func:`iter_episode_log`, so this function and :func:`read_episode_log`
+    enforce the same one.
     """
     count = 0
     for _record in iter_episode_log(path):
         count += 1
-    if count == 0:
-        raise EpisodeLogError(1, "the episode log is empty")
     return count

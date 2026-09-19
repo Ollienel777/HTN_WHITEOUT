@@ -12,6 +12,7 @@ import math
 import os
 from dataclasses import fields
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -671,3 +672,72 @@ def test_validator_rejects_an_overflowing_number_literal(tmp_path: Path) -> None
         validate_episode_log(log)
     assert caught.value.line == 1
     assert "record.belief_digest.entropy" in str(caught.value)
+
+
+# --- R5-1: the integer spelling of that same overflow -----------------------
+
+
+def _oversized(field_path: list[str | int]) -> str:
+    """A good line with ``field_path`` set to a 401-digit integer literal."""
+    payload: Any = make_record(0).to_dict()
+    cursor: Any = payload
+    for step in field_path[:-1]:
+        cursor = cursor[step]
+    cursor[field_path[-1]] = "@HUGE@"
+    return json.dumps(payload, sort_keys=True).replace('"@HUGE@"', "9" * 401)
+
+
+def test_validator_rejects_an_oversized_integer_literal(tmp_path: Path) -> None:
+    """An unbounded JSON int has no double, and ``float()`` raises.
+
+    ``OverflowError`` is an ``ArithmeticError``, not a ``RecordError``, so
+    without this it escapes ``validate_line`` uncaught and the reader breaks
+    its promise that every rejection names the 1-based line.
+    """
+    log = tmp_path / "huge_int.jsonl"
+    poisoned = _oversized(["belief_digest", "entropy"])
+    assert isinstance(json.loads(poisoned)["belief_digest"]["entropy"], int)
+    _write_lines(log, [_good_line(0), poisoned])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert caught.value.line == 2
+    assert "record.belief_digest.entropy" in str(caught.value)
+
+
+def test_validator_rejects_an_oversized_integer_inside_a_pair(tmp_path: Path) -> None:
+    """``_pair`` coerces each item the same way, so it has the same hole."""
+    log = tmp_path / "huge_pair.jsonl"
+    poisoned = _oversized(["intent", "intents", 0, "target_xy", 0])
+    _write_lines(log, [poisoned])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert caught.value.line == 1
+    assert "record.intent.intents[0].target_xy[0]" in str(caught.value)
+
+
+# --- R5-2: the reader enforces the emptiness rule the writer cites ----------
+
+
+def test_read_episode_log_refuses_a_zero_byte_log(tmp_path: Path) -> None:
+    """The writer's refusal is justified by the reader's; both must hold.
+
+    An episode truncated to zero by a killed run must not read back clean as
+    an episode with no ticks.
+    """
+    log = tmp_path / "zero.jsonl"
+    log.write_text("", encoding="utf-8")
+    with pytest.raises(EpisodeLogError) as caught:
+        read_episode_log(log)
+    assert caught.value.line == 1
+    assert "empty" in str(caught.value)
+    with pytest.raises(EpisodeLogError):
+        list(iter_episode_log(log))
+
+
+def test_read_episode_log_refuses_a_log_of_only_blank_lines(tmp_path: Path) -> None:
+    """Blank lines are skipped, so a file of them holds no records either."""
+    log = tmp_path / "blank.jsonl"
+    log.write_text("\n\n\n", encoding="utf-8", newline="\n")
+    with pytest.raises(EpisodeLogError) as caught:
+        read_episode_log(log)
+    assert "empty" in str(caught.value)
