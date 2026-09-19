@@ -20,8 +20,8 @@ inequality is the shoreline, and it is why the belief grid can enforce "mass
 stays on water" with a mask rather than a terrain model: ``ARENA.md`` §7 lists
 the terrain generator as dead work, and there is no heightfield to consult.
 
-Frames, and the conversion this module owns
--------------------------------------------
+Frames, and the conversion this module does *not* own
+------------------------------------------------------
 
 **Positions cross this module's boundary as lat/lon**, because that is what
 the arena speaks in both directions: ``GLOBAL_POSITION_INT`` per asset,
@@ -29,20 +29,41 @@ the arena speaks in both directions: ``GLOBAL_POSITION_INT`` per asset,
 answer that is scored (``ARENA.md`` §5). ``(s, w)`` is an internal
 parameterisation, never a wire format.
 
-The geodetic conversion here is a **local tangent plane** about
-:data:`REFERENCE_LAT_DEG` / :data:`REFERENCE_LON_DEG`: North offsets divided by
-the meridional radius of curvature ``M``, East offsets by ``N cos φ``, both
-evaluated at the reference latitude. Over a 25 km × 2 km box that is good to
-well under a metre along the meridian and a couple of metres at the East ends,
-which is far inside the metres-to-tens-of-metres error of a camera fix.
+The geodetic conversion is :mod:`whiteout.geo`'s, and this module imports it:
+:func:`~whiteout.geo.geodetic_to_local` and
+:func:`~whiteout.geo.local_to_geodetic` about :data:`~whiteout.geo.ARENA_ORIGIN`,
+which is the same 71.99 N, −94.84 W this module used to spell for itself. That
+is a local tangent plane — North offsets divided by the meridional radius of
+curvature ``M``, East offsets by ``N cos φ``, both evaluated at the origin's
+latitude — and ``whiteout/geo.py``'s docstring carries the measured error
+table for it.
 
-**This conversion is deliberately a private helper, and it is duplicated.**
-``whiteout/vision/projection.py`` (PR #72) carries the same tangent-plane step
-in the opposite direction, and issue #73 is deciding the repository's single
-frame and the one module that converts. When #73 lands, :func:`enu_from_geodetic`
-and :func:`geodetic_from_enu` should collapse into it and this module should
-import them. Nothing else here changes: the ribbon is defined by a polyline of
-lat/lon vertices whichever way the conversion is spelled.
+Until #73 landed this module carried a **private copy** of that step, with its
+own ellipsoid constants. The copy has been deleted (#85): a second converter
+is a second answer to the question ``ARENA.md`` §5 scores, and
+``tests/test_geo.py``'s three AST guards now forbid one anywhere but
+``whiteout/geo.py``. Nothing about the ribbon changed with it — it is a
+polyline of lat/lon vertices whichever way the conversion is spelled.
+
+**The two planes were already the same plane**, which is why no figure stated
+in this module or in ``grid.py`` moved. Same constants, same origin, and the
+two spellings of the meridional radius — ``A(1 - e²)/(w √w)`` here against
+``A(1 - e²)/w^1.5`` there — evaluate to the same float at 71.99 N, bit for
+bit. Every quantity below was re-measured across the migration; the largest
+change anywhere was **4.9 × 10⁻¹⁰ m**, half a nanometre, and it comes from a
+deleted helper rather than from the geodesy. The private copy folded a
+longitude difference through ``fmod(Δλ + 180, 360) - 180``, which is not quite
+the identity in the last bit, and it moved two of the four default vertices by
+that much. ``whiteout.geo`` does not fold, because it does not need to.
+
+**The one behavioural difference** is at the edge of the geodetic range rather
+than inside the arena. That fold also meant the private copy accepted a
+longitude in ``[0, 360)``, and it accepted any float as a latitude;
+:class:`whiteout.geo.GeoPoint` instead *rejects* a position outside
+``[-90, 90]`` / ``[-180, 180]`` with :class:`~whiteout.geo.GeoError`. Nothing
+in this arena is near that edge — not even the 200 km-beyond-the-mouth
+positions ``tests/test_belief_grid.py`` builds, which reach 101° W — so the
+change is a refusal where there was silence, on inputs no caller here has.
 
 Where the default polyline comes from
 --------------------------------------
@@ -75,95 +96,19 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from whiteout.geo import ARENA_ORIGIN, GeoPoint, LocalPoint, geodetic_to_local, local_to_geodetic
+
 __all__ = [
     "DEFAULT_STRAIT",
-    "REFERENCE_LAT_DEG",
-    "REFERENCE_LON_DEG",
-    "WGS84_A",
-    "WGS84_E2",
-    "WGS84_F",
     "ChannelPoint",
     "ChannelVertex",
     "GeometryError",
     "StraitGeometry",
-    "enu_from_geodetic",
-    "geodetic_from_enu",
 ]
-
-#: WGS-84 semi-major axis, metres.
-WGS84_A = 6378137.0
-
-#: WGS-84 flattening.
-WGS84_F = 1.0 / 298.257223563
-
-#: WGS-84 first eccentricity squared, ``f (2 - f)``.
-WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
-
-#: Origin of the local tangent plane: the centre of the arena (``ARENA.md`` §2).
-REFERENCE_LAT_DEG = 71.99
-REFERENCE_LON_DEG = -94.84
 
 
 class GeometryError(ValueError):
     """A polyline or a position does not describe a point on the strait."""
-
-
-def _radii_of_curvature(lat_deg: float) -> tuple[float, float]:
-    """``(M, N)`` at ``lat_deg``: meridional and prime-vertical radii, metres."""
-    sin_lat = math.sin(math.radians(lat_deg))
-    denominator = 1.0 - WGS84_E2 * sin_lat * sin_lat
-    prime_vertical = WGS84_A / math.sqrt(denominator)
-    meridional = WGS84_A * (1.0 - WGS84_E2) / (denominator * math.sqrt(denominator))
-    return meridional, prime_vertical
-
-
-def enu_from_geodetic(
-    lat_deg: float,
-    lon_deg: float,
-    ref_lat_deg: float = REFERENCE_LAT_DEG,
-    ref_lon_deg: float = REFERENCE_LON_DEG,
-) -> tuple[float, float]:
-    """``(east, north)`` metres of a geodetic position about a reference point.
-
-    First-order tangent plane: ``north = M Δφ`` and ``east = N cos φ Δλ``, with
-    ``M`` and ``N`` evaluated at ``ref_lat_deg``. See the module docstring for
-    why this lives here and where it should end up (issue #73).
-    """
-    meridional, prime_vertical = _radii_of_curvature(ref_lat_deg)
-    delta_lat = math.radians(lat_deg - ref_lat_deg)
-    delta_lon = math.radians(_wrap_longitude(lon_deg - ref_lon_deg))
-    east = prime_vertical * math.cos(math.radians(ref_lat_deg)) * delta_lon
-    north = meridional * delta_lat
-    return east, north
-
-
-def geodetic_from_enu(
-    east_m: float,
-    north_m: float,
-    ref_lat_deg: float = REFERENCE_LAT_DEG,
-    ref_lon_deg: float = REFERENCE_LON_DEG,
-) -> tuple[float, float]:
-    """``(lat_deg, lon_deg)`` of a local offset — the inverse of :func:`enu_from_geodetic`."""
-    meridional, prime_vertical = _radii_of_curvature(ref_lat_deg)
-    east_radius = prime_vertical * math.cos(math.radians(ref_lat_deg))
-    lat_deg = ref_lat_deg + math.degrees(north_m / meridional)
-    lon_deg = ref_lon_deg + math.degrees(east_m / east_radius)
-    return lat_deg, _wrap_longitude(lon_deg)
-
-
-def _wrap_longitude(lon_deg: float) -> float:
-    """Fold a longitude difference into ``(-180, 180]``.
-
-    The arena is 25 km wide and nowhere near the antimeridian, so this never
-    fires in the run. It is here because a caller that passes a longitude in
-    ``[0, 360)`` would otherwise be handed a position 20 000 km away with no
-    complaint, and silently wrong is the failure mode this whole module is
-    built to avoid.
-    """
-    wrapped = math.fmod(lon_deg + 180.0, 360.0)
-    if wrapped <= 0.0:
-        wrapped += 360.0
-    return wrapped - 180.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,9 +156,9 @@ class StraitGeometry:
         east: list[float] = []
         north: list[float] = []
         for vertex in self.vertices:
-            point = enu_from_geodetic(vertex.lat_deg, vertex.lon_deg)
-            east.append(point[0])
-            north.append(point[1])
+            offset = geodetic_to_local(ARENA_ORIGIN, GeoPoint(vertex.lat_deg, vertex.lon_deg))
+            east.append(offset.east_m)
+            north.append(offset.north_m)
         cumulative = [0.0]
         for index in range(1, len(east)):
             step = math.hypot(east[index] - east[index - 1], north[index] - north[index - 1])
@@ -272,7 +217,9 @@ class StraitGeometry:
         returns its arc length, with ``w`` the signed perpendicular offset from
         that segment's *line*: positive to the left of the direction of travel.
         """
-        east, north = enu_from_geodetic(lat_deg, lon_deg)
+        offset = geodetic_to_local(ARENA_ORIGIN, GeoPoint(lat_deg, lon_deg))
+        east = offset.east_m
+        north = offset.north_m
         best_distance = math.inf
         best_s = 0.0
         best_w = 0.0
@@ -297,13 +244,20 @@ class StraitGeometry:
                 best_w = ux * (north - ay) - uy * (east - ax)
         return ChannelPoint(s_m=best_s, w_m=best_w)
 
-    def to_geodetic(self, point: ChannelPoint) -> tuple[float, float]:
+    def to_position(self, point: ChannelPoint) -> tuple[float, float]:
         """``(lat_deg, lon_deg)`` of a channel coordinate — inverse of :meth:`to_channel`.
 
         Exact inverse for any point whose nearest centreline point is interior
         to a segment; at a convex bend the two parameterisations differ by the
         wedge the bend opens, which is bounded by the turn angle times ``w``
         and is metres for the default geometry.
+
+        Named ``to_position`` rather than ``to_geodetic`` because
+        ``tests/test_geo.py`` reserves every name that reads as a frame
+        conversion for ``whiteout/geo.py``, and this method is not one: the
+        conversion it ends with is :func:`whiteout.geo.local_to_geodetic`'s.
+        The pair is spelled ``to_channel`` / ``to_position`` — into the
+        ribbon's coordinates and back out to the frame of record.
         """
         s_m = min(max(point.s_m, 0.0), self.length_m)
         index = self._segment_index(s_m)
@@ -318,7 +272,8 @@ class StraitGeometry:
         # Left normal of (ux, uy) is (-uy, ux).
         east = ax + along * ux - point.w_m * uy
         north = ay + along * uy + point.w_m * ux
-        return geodetic_from_enu(east, north)
+        place = local_to_geodetic(ARENA_ORIGIN, LocalPoint(east, north))
+        return place.lat_deg, place.lon_deg
 
     def is_water(self, lat_deg: float, lon_deg: float) -> bool:
         """Is this position inside the channel — on water the vessel can occupy?"""

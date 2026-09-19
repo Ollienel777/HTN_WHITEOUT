@@ -154,12 +154,8 @@ import numpy as np
 import numpy.typing as npt
 
 from whiteout.belief.field import BeliefError, BeliefPeak, Likelihood
-from whiteout.belief.geometry import (
-    DEFAULT_STRAIT,
-    ChannelPoint,
-    StraitGeometry,
-    enu_from_geodetic,
-)
+from whiteout.belief.geometry import DEFAULT_STRAIT, ChannelPoint, StraitGeometry
+from whiteout.geo import ARENA_ORIGIN, GeoPoint, geodetic_to_local
 
 __all__ = [
     "DEFAULT_ACROSS_M",
@@ -283,12 +279,12 @@ class ChannelBeliefGrid:
             point = ChannelPoint(
                 s_m=float(self._s_centres[row]), w_m=float(self._w_centres[column])
             )
-            lat_deg, lon_deg = geometry.to_geodetic(point)
-            east, north = enu_from_geodetic(lat_deg, lon_deg)
+            lat_deg, lon_deg = geometry.to_position(point)
+            offset = geodetic_to_local(ARENA_ORIGIN, GeoPoint(lat_deg, lon_deg))
             latitudes.append(lat_deg)
             longitudes.append(lon_deg)
-            easts.append(east)
-            norths.append(north)
+            easts.append(offset.east_m)
+            norths.append(offset.north_m)
         self._lat: _FloatArray = np.array(latitudes, dtype=np.float64)
         self._lon: _FloatArray = np.array(longitudes, dtype=np.float64)
         self._east: _FloatArray = np.array(easts, dtype=np.float64)
@@ -476,8 +472,8 @@ class ChannelBeliefGrid:
             raise BeliefError(f"false_alarm_rate must be in [0, 1), got {false_alarm_rate!r}")
         if not (math.isfinite(float(lat_deg)) and math.isfinite(float(lon_deg))):
             raise BeliefError(f"detection position must be finite, got {lat_deg!r}, {lon_deg!r}")
-        east, north = enu_from_geodetic(float(lat_deg), float(lon_deg))
-        squared = (self._east - east) ** 2 + (self._north - north) ** 2
+        offset = geodetic_to_local(ARENA_ORIGIN, GeoPoint(float(lat_deg), float(lon_deg)))
+        squared = (self._east - offset.east_m) ** 2 + (self._north - offset.north_m) ** 2
         gaussian = np.exp(-squared / (2.0 * sigma * sigma)) / (2.0 * math.pi * sigma * sigma)
         weights = (1.0 - rate) * gaussian + rate / self.water_area_m2
         self._multiply(weights)
