@@ -97,6 +97,121 @@ def test_gate_build_step_is_not_isolated() -> None:
     assert '"--wheel", "--no-isolation"' in source
 
 
+def test_gate_resolves_whiteout_from_outside_the_repo() -> None:
+    """Issue #53. Asked from the repo root, the answer is always "here".
+
+    ``python -c`` prepends the working directory to ``sys.path``, so a probe
+    run at the repo root cannot see which tree the environment's editable
+    install points at -- which is the whole failure being guarded against.
+    """
+    source = GATE.read_text(encoding="utf-8")
+    body = source.split("def _resolved_whiteout(")[1].split("\ndef ")[0]
+    assert "TemporaryDirectory" in body
+    assert "cwd=Path(outside_the_repo)" in body
+
+
+def test_gate_fails_when_whiteout_resolves_outside_this_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #53: a foreign source tree is a named failure, never a pass."""
+    gate = _load_gate()
+    foreign = Path(REPO_ROOT.anchor) / "elsewhere" / "other-worktree" / "whiteout" / "__init__.py"
+
+    monkeypatch.setattr(gate, "_resolved_whiteout", lambda _python: foreign)
+    monkeypatch.setattr(gate, "_bootstrap_worktree_env", lambda: None)
+
+    failure = gate._select_interpreter()
+    assert failure is not None
+    assert "wrong source tree" in failure
+    assert str(foreign) in failure
+
+    # And the whole step fails, rather than falling through to the probe.
+    assert gate.step_install() == failure
+
+
+def test_gate_accepts_this_worktrees_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #53: the guard must not fire on the tree the gate lives in."""
+    gate = _load_gate()
+    here = REPO_ROOT / "whiteout" / "__init__.py"
+    monkeypatch.setattr(gate, "_resolved_whiteout", lambda _python: here)
+    monkeypatch.setattr(
+        gate,
+        "_bootstrap_worktree_env",
+        lambda: pytest.fail("bootstrapped a venv for a correctly resolving environment"),
+    )
+    assert gate._select_interpreter() is None
+
+
+def test_gate_falls_back_to_a_worktree_local_venv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #53: two worktrees run concurrently because each gets its own env."""
+    gate = _load_gate()
+    assert gate.VENV_DIR == REPO_ROOT / ".venv"
+
+    venv = tmp_path / "absent"
+    foreign = Path(REPO_ROOT.anchor) / "elsewhere" / "other-worktree" / "whiteout" / "__init__.py"
+    here = REPO_ROOT / "whiteout" / "__init__.py"
+    answers = iter([foreign, here])
+    bootstrapped: list[bool] = []
+
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+    monkeypatch.setattr(gate, "_resolved_whiteout", lambda _python: next(answers))
+    monkeypatch.setattr(gate, "_bootstrap_worktree_env", lambda: bootstrapped.append(True))
+
+    assert gate._select_interpreter() is None
+    assert bootstrapped == [True]
+    assert gate.PY == str(gate._venv_python(venv))
+
+
+def test_gate_reuses_an_existing_worktree_venv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #53: the fallback env is built once, not on every gate run.
+
+    A pip invocation per run is several seconds that every future PR would
+    pay, so a `.venv/` that already resolves here is used as it stands.
+    """
+    gate = _load_gate()
+    venv = tmp_path / "venv"
+    python = gate._venv_python(venv)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+
+    foreign = Path(REPO_ROOT.anchor) / "elsewhere" / "other-worktree" / "whiteout" / "__init__.py"
+    here = REPO_ROOT / "whiteout" / "__init__.py"
+    answers = iter([foreign, here])
+
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+    monkeypatch.setattr(gate, "_resolved_whiteout", lambda _python: next(answers))
+    monkeypatch.setattr(
+        gate,
+        "_bootstrap_worktree_env",
+        lambda: pytest.fail("reinstalled into a venv that already resolved to this worktree"),
+    )
+
+    assert gate._select_interpreter() is None
+    assert gate.PY == str(python)
+
+
+def test_gate_venv_cannot_pollute_the_other_steps() -> None:
+    """Issue #53: `.venv` is already ignored and excluded everywhere."""
+    assert ".venv" in PYPROJECT["tool"]["ruff"]["exclude"]
+    assert ".venv" in PYPROJECT["tool"]["pytest"]["ini_options"]["norecursedirs"]
+    assert re.search(PYPROJECT["tool"]["mypy"]["exclude"], ".venv/lib/whiteout/x.py") is not None
+    assert ".venv/" in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").split()
+
+
+def test_gate_venv_install_stays_offline() -> None:
+    """SPEC.md §4: no egress. The fallback install must not fetch a backend."""
+    source = GATE.read_text(encoding="utf-8")
+    assert '"--no-build-isolation"' in source
+    assert '"--no-deps"' in source
+    assert '"--system-site-packages"' in source
+    # ensurepip's bundled setuptools is older than the build step's floor.
+    assert '"--without-pip"' in source
+
+
 def test_workflow_runs_the_gate_script() -> None:
     body = WORKFLOW.read_text(encoding="utf-8")
     assert "python scripts/gate.py" in body
