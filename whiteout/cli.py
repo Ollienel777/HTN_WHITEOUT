@@ -82,6 +82,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         raw = os.environ.get("WHITEOUT_SEED")
         print(f"run: WHITEOUT_SEED={raw} is not an integer", file=sys.stderr)
         return 1
+    if seed < 0:
+        # `np.random.default_rng` rejects a negative seed with an eight-frame
+        # numpy traceback. Diagnosed here, alongside the non-integer case, for
+        # the same reason: a bad seed is the caller's mistake, not a crash.
+        # Normalising it (`abs`) would silently merge two distinct episodes.
+        print(f"run: seed {seed} is negative; episode seeds are non-negative", file=sys.stderr)
+        return 1
     try:
         name = selected_transport_name()
         transport = create_transport(name, seed=seed)
@@ -89,25 +96,33 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"run: {exc}", file=sys.stderr)
         return 1
     records: list[EpisodeRecord] = []
-    transport.connect()
+    # `connect` is inside both the `try/except` and the `try/finally`: a
+    # transport that refuses to start — `SPEC.md` §7 makes that sitl's normal
+    # path — must produce the diagnostic `base.TransportError` promises, and a
+    # connect that fails partway must still be `close()`d.
     try:
-        for _tick in range(args.ticks):
-            observation = transport.observe()
-            intent = FleetIntent(t=observation.t, intents=())
-            transport.command(intent)
-            records.append(
-                EpisodeRecord(
-                    schema_version=SCHEMA_VERSION,
-                    t=observation.t,
-                    observation=observation,
-                    intent=intent,
-                    belief_digest=_placeholder_digest(observation.t),
-                    contacts=(),
-                    truth=Truth(t=observation.t, targets=()),
+        try:
+            transport.connect()
+            for _tick in range(args.ticks):
+                observation = transport.observe()
+                intent = FleetIntent(t=observation.t, intents=())
+                transport.command(intent)
+                records.append(
+                    EpisodeRecord(
+                        schema_version=SCHEMA_VERSION,
+                        t=observation.t,
+                        observation=observation,
+                        intent=intent,
+                        belief_digest=_placeholder_digest(observation.t),
+                        contacts=(),
+                        truth=Truth(t=observation.t, targets=()),
+                    )
                 )
-            )
-    finally:
-        transport.close()
+        finally:
+            transport.close()
+    except TransportError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
     out = Path(args.out)
     try:
         written = write_episode_log(out, records)

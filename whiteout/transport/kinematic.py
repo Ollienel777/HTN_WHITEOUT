@@ -55,9 +55,16 @@ class KinematicTransport:
     """
 
     def __init__(self, seed: int = 0, tick_seconds: float = DEFAULT_TICK_SECONDS) -> None:
+        if seed < 0:
+            # The backstop behind the CLI's own check: `np.random.default_rng`
+            # rejects a negative seed with an eight-frame numpy traceback, and
+            # #25's episode loop will construct transports without going
+            # through argparse. The seam's own error type, either way.
+            raise TransportError(f"kinematic transport: seed {seed} is negative")
         self._seed = seed
         self._tick_seconds = float(tick_seconds)
         self._connected = False
+        self._closed = False
         self._t = 0.0
         self._poses: tuple[Pose, ...] = ()
         self._last_intent: FleetIntent | None = None
@@ -77,9 +84,21 @@ class KinematicTransport:
         return self._last_intent
 
     def connect(self) -> None:
-        """Place the fleet and start the clock. Idempotent."""
+        """Place the fleet and start the clock.
+
+        Idempotent while connected. Refuses after :meth:`close`, because the
+        seam does not support reconnect (see
+        :class:`~whiteout.transport.base.Transport`) and a silent reconnect
+        here would rewind ``t`` to 0.0 and cost the whole episode at write
+        time instead of reporting the fault here.
+        """
         if self._connected:
             return
+        if self._closed:
+            raise TransportError(
+                "kinematic transport: connect() after close(); a transport is "
+                "single-use, so build a new one for the next episode"
+            )
         generator = np.random.default_rng(self._seed)
         poses: list[Pose] = []
         for asset_id, cls, altitude in FLEET:
@@ -129,7 +148,14 @@ class KinematicTransport:
         self._last_intent = intent
 
     def close(self) -> None:
-        """Bring the link down. Idempotent, and safe to call unconnected."""
+        """Bring the link down. Idempotent, and safe to call unconnected.
+
+        Closing a link that was never up leaves the transport usable — that
+        is the ``close()``-in-``finally`` case, where ``connect()`` may not
+        have run. Closing a live one is final.
+        """
+        if self._connected:
+            self._closed = True
         self._connected = False
 
     def _require_connected(self, call: str) -> None:

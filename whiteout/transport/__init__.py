@@ -18,7 +18,7 @@ built yet" are different bugs with different fixes.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from whiteout.transport.base import TRANSPORT_METHODS, Transport, TransportError
 from whiteout.transport.kinematic import KinematicTransport
@@ -26,6 +26,7 @@ from whiteout.transport.kinematic import KinematicTransport
 __all__ = [
     "DEFAULT_TRANSPORT",
     "IMPLEMENTED_TRANSPORTS",
+    "TRANSPORT_FACTORIES",
     "TRANSPORT_METHODS",
     "TRANSPORT_NAMES",
     "TRANSPORT_ENV_VAR",
@@ -45,8 +46,20 @@ TRANSPORT_NAMES: tuple[str, ...] = ("kinematic", "sitl", "arena")
 #: The value an unset or empty :data:`TRANSPORT_ENV_VAR` means.
 DEFAULT_TRANSPORT = "kinematic"
 
-#: The subset of :data:`TRANSPORT_NAMES` this build can actually construct.
-IMPLEMENTED_TRANSPORTS: tuple[str, ...] = ("kinematic",)
+#: Every transport this build can construct, by name. This mapping is the
+#: single place a new adapter is registered: :data:`IMPLEMENTED_TRANSPORTS`
+#: is derived from it and :func:`create_transport` dispatches through it, so
+#: there is no second line to forget. Adding a name here without a class to
+#: go with it is impossible; adding a class that is never returned is too.
+TRANSPORT_FACTORIES: Mapping[str, Callable[..., Transport]] = {
+    "kinematic": KinematicTransport,
+}
+
+#: The subset of :data:`TRANSPORT_NAMES` this build can actually construct,
+#: in the spec's order. Derived, never hand-written — see above.
+IMPLEMENTED_TRANSPORTS: tuple[str, ...] = tuple(
+    name for name in TRANSPORT_NAMES if name in TRANSPORT_FACTORIES
+)
 
 
 def _valid_values() -> str:
@@ -82,9 +95,16 @@ def create_transport(
     :func:`selected_transport_name`. ``seed`` is the episode seed, which the
     fake uses to lay its fleet out deterministically.
 
+    Dispatches through :data:`TRANSPORT_FACTORIES`, so the object returned
+    is always the one the name asks for. Returning a fixed class here would
+    be the failure this module exists to prevent: the next adapter's ticket
+    registers its name, forgets the return, and ``WHITEOUT_TRANSPORT=sitl``
+    quietly runs the fake.
+
     Raises :class:`~whiteout.transport.base.TransportError` for a value that
     is not a transport, and for one that is a transport this build does not
-    implement yet.
+    implement yet. A transport may also raise it from its constructor, for
+    a seed or a configuration it cannot use.
     """
     if name is None:
         name = selected_transport_name(env)
@@ -98,4 +118,4 @@ def create_transport(
             f"valid values are {_valid_values()}, of which this build implements "
             f"{', '.join(IMPLEMENTED_TRANSPORTS)}"
         )
-    return KinematicTransport(seed=seed)
+    return TRANSPORT_FACTORIES[name](seed=seed)
