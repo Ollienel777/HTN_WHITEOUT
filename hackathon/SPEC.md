@@ -76,8 +76,11 @@ converged architecture structurally does not do: a map that gets *more*
 informative from seeing nothing, and assets posted at cuts rather than
 rastering area.
 
-**Every P1 ticket maps to a beat.** A ticket that maps to no beat and to no
-scored axis is P3 and probably should not exist.
+**Every P1 ticket maps to a beat or to a scored axis**, except three that are
+P1 for a deadline or a prize clause instead: D43 (the arena runbook, due
+before the 14:30Z workshop), D32 (the `arena` adapter) and D33 (the submission
+README). A ticket that maps to no beat, no scored axis and no prize clause is
+P3 and probably should not exist.
 
 ---
 
@@ -307,7 +310,7 @@ It runs, in order, failing fast:
 | typecheck | `mypy whiteout` |
 | test | `pytest -q -m "not slow"` — **the `-m "not slow"` is required**: bare `pytest -q` collects `slow`-marked tests, and the one such test is a wall-clock throughput assertion (D9) that is a coin flip on shared runners and in parallel worktrees. `slow` tests run in the tuner (D23), never in the gate. |
 | build | `python -m build --wheel --no-isolation` (proves the package is installable, and it is what the submission links). **`--no-isolation` is required**: the default fetches the build backend from PyPI on every invocation, which breaks §4's no-egress rule and spends venue wifi on every gate run. |
-| smoke | `python -m whiteout.cli run --transport kinematic --seed 7 --ticks 400 --out artifacts/smoke.jsonl` then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print four finite scores |
+| smoke | `python -m whiteout.cli run --seed 7 --ticks 400 --out artifacts/smoke.jsonl` (no transport flag exists; `WHITEOUT_TRANSPORT` unset selects `kinematic`, per §7 and D3) then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print four finite scores |
 | determinism | second smoke run at the same seed; logs must be byte-identical |
 
 The gate must:
@@ -376,7 +379,7 @@ target; its absence is normal and never blocks the gate, the demo or a ticket.
 | milestone | exit criterion |
 |---|---|
 | **M0 Skeleton** | Package scaffold, `pyproject.toml`, ruff/mypy/pytest configured with `.claude/**` excluded, **the CI workflow**, `scripts/gate.py`, the `types.py` record set, the episode-log schema and its validator, the `Transport` Protocol with a trivial kinematic stub, `.env.example`, and a smoke test that runs 400 ticks and scores them. The first M0 ticket also **deletes `hackathon/backlog-draft.md`**. |
-| **M1 Demo path** | Every beat of §2 works end to end on the `kinematic` transport: sim, scorer, belief with negative information, flow cuts, contact lifecycle, hysteresis, auction allocation, the frontier fallback, and the viewer. **Beats 5 and 6 are out of M1's scope.** Beat 5's evidence is the sweep (D23) and the tuning report page (D37), both M2, and its §2 fallback needs D23 too, so beat 5 exits under M2(b) below. Beat 6's evidence is D28's recording, which is M2 and depends transitively on D46, so M1 cannot exit on it either way. M1 exits with beats 5 and 6 standing on whichever §2 fallback is live at the time. |
+| **M1 Demo path** | Every beat of §2 works end to end on the `kinematic` transport: sim, scorer, belief with negative information, flow cuts, contact lifecycle, hysteresis, auction allocation, the frontier fallback, and the viewer. **Beats 5, 6 and 7 are out of M1's scope.** Beat 5's evidence is the sweep (D23) and the tuning report page (D37), both M2, and its §2 fallback needs D23 too, so beat 5 exits under M2(b) below. Beat 6's evidence is D28's recording, which is M2 and depends transitively on D46, so M1 cannot exit on it either way. Beat 7's builder is D38, which is M3, and the operating point it moves lives on D37's report, which is M2; its §2 fallback needs the cached sweep (D23) too, so beat 7 exits under M3 below, where §9 item 4 already sites its CLI fallback. M1 exits with beats 5, 6 and 7 standing on whichever §2 fallback is live at the time. |
 | **M2 Wow** | (a) The `sitl` transport drives ≥4 ArduPilot vehicles for real **inside the Docker image D46 builds**, and the run is recorded as a committed episode log that the viewer replays everywhere else. If D46 reports SITL unobtainable inside its timebox, M2(a) exits as "not obtainable", recorded with the reason, and the §3 fallback applies. (b) A **completed overnight sweep with a decided operating point and an ablation table**, whichever policy wins. M2(b) does **not** require the tuned set to beat the frontier baseline — if frontier wins, that is the result, and §10's top risk row says we ship frontier. |
 | **M3 Prizes** | Every clause of the §3 table is visibly met. The `arena` adapter exists as a documented stub with a runbook, and the sponsor's weights can be entered and applied in under two minutes. |
 | **M4 Polish** | The viewer passes the `ui-craft` rubric at 1440×900, with real episode data, and every state handled (no log, log loading, log malformed, episode running, episode finished, no contacts, many contacts). |

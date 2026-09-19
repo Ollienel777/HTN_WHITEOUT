@@ -274,7 +274,8 @@ cannot settle. It is asserted once here and re-measured by the tuner (D23).
 
 ## Why
 The overnight parameter search is the entire strategic bet and it is impossible
-without this. Asserting it in the gate means we learn at hour 6, not hour 26.
+without this. Measuring it here, as a `-m slow` test outside the gate that the
+tuner re-measures, means we learn at hour 6, not hour 26.
 
 ## Acceptance
 - [ ] `python -m whiteout.cli run --seed 7 --ticks 400` writes a valid log
@@ -861,8 +862,11 @@ validation that the coordinator is not simulator-shaped.
 ## Notes
 Run **D46** then **D44 (S1)** first — SITL is not installed on this machine and
 is not natively supported on Windows (D46 obtains it in Docker), and the CPU
-ceiling is real with six instances our untested cut. `SPEC.md` §10. Depends on
-D6, D19, **D46**.
+ceiling is real with six instances our untested cut. If D46 reported SITL
+unobtainable, this ticket is closed as such, the `§3` MAVLink-only fallback
+applies, and beat 6 is demoed as the `pymavlink` loopback D46 stands and
+records on overrun, per `SPEC.md` §2 — the prize clause is then met by the
+MAVLink half alone. `SPEC.md` §10. Depends on D6, D19, **D46**.
 
 ---
 
