@@ -23,6 +23,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from whiteout.geo import ARENA_ORIGIN
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
 from whiteout.transport import TransportError, create_transport, selected_transport_name
@@ -66,12 +67,18 @@ def _placeholder_digest(t: float) -> BeliefDigest:
     Every field is finite and zero-valued over a 1×1 grid, so the record
     validates and the viewer has something to parse. The belief ticket
     replaces this; nothing may read these numbers as meaning anything.
+
+    The peak is :data:`~whiteout.geo.ARENA_ORIGIN` rather than ``(0, 0)``: the
+    frame of record is lat/lon (``SPEC.md`` §5), where ``(0, 0)`` is a real
+    place in the Gulf of Guinea and reads as a plausible datum rather than as
+    the placeholder it is.
     """
     return BeliefDigest(
         t=t,
         entropy=0.0,
         mass=0.0,
-        peak_xy=(0.0, 0.0),
+        peak_lat=ARENA_ORIGIN.lat_deg,
+        peak_lon=ARENA_ORIGIN.lon_deg,
         peak_p=0.0,
         covered_fraction=0.0,
         grid_shape=(1, 1),

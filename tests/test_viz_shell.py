@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from whiteout.geo import ARENA_ORIGIN, WGS84_A, WGS84_F
 from whiteout.log import SCHEMA_VERSION, validate_episode_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -233,3 +234,44 @@ def test_the_viewer_points_at_the_bundled_episode_that_exists() -> None:
     assert declared is not None
     resolved = (VIZ / declared.group(1)).resolve()
     assert resolved == BUNDLED_EPISODE.resolve()
+
+
+# ── the drawing frame (issue #73) ─────────────────────────────────────
+
+
+def test_the_viewer_reads_positions_in_the_one_frame_of_record() -> None:
+    """``SPEC.md`` §5: the log is lat/lon, so the viewer reads lat/lon.
+
+    The page is the one consumer that *wants* metres, which makes it the one
+    most likely to quietly become a second frame of record.
+    """
+    js = _without_comments(_read("viewer.js"))
+    assert "pose.lat" in js and "pose.lon" in js
+    assert "pose.x" not in js and "pose.y" not in js
+
+
+def test_the_viewers_local_frame_is_named_as_a_drawing_frame() -> None:
+    js = _read("viewer.js")
+    assert "\u2500\u2500 the drawing frame" in js, "the section is not named"
+    frame = js.split("\u2500\u2500 the drawing frame")[1].split("var WGS84_A")[0]
+    assert "never written" in frame
+    assert "never posted" in frame
+    assert "frame of record" in frame
+
+
+def test_the_viewers_projection_is_pinned_to_whiteout_geo() -> None:
+    """The page has no Python, so its copy of the arithmetic is pinned here.
+
+    A viewer that drew with a different ellipsoid or a different origin would
+    disagree with the posted lat/lon by metres at first and by kilometres
+    once someone read a position off the canvas.
+    """
+    js = _read("viewer.js")
+    semi_major = re.search(r"var WGS84_A = ([\d.]+);", js)
+    flattening = re.search(r"var WGS84_F = 1 / ([\d.]+);", js)
+    origin = re.search(r"var ARENA_ORIGIN = \{ lat: (-?[\d.]+), lon: (-?[\d.]+) \};", js)
+    assert semi_major is not None and flattening is not None and origin is not None
+    assert float(semi_major.group(1)) == WGS84_A
+    assert 1.0 / float(flattening.group(1)) == WGS84_F
+    assert float(origin.group(1)) == ARENA_ORIGIN.lat_deg
+    assert float(origin.group(2)) == ARENA_ORIGIN.lon_deg

@@ -56,8 +56,8 @@ def make_record(tick: int) -> EpisodeRecord:
                     asset_id="wing-1",
                     cls="fixedwing",
                     t=t,
-                    x=10.0 + tick,
-                    y=-4.5,
+                    lat=71.9900 + 0.0001 * tick,
+                    lon=-94.8400,
                     z=120.0,
                     heading=0.75,
                     speed=22.0,
@@ -67,8 +67,8 @@ def make_record(tick: int) -> EpisodeRecord:
                     asset_id="tower-1",
                     cls="tower",
                     t=t,
-                    x=0.0,
-                    y=0.0,
+                    lat=71.9950,
+                    lon=-94.8700,
                     z=15.0,
                     heading=0.0,
                     speed=0.0,
@@ -81,8 +81,8 @@ def make_record(tick: int) -> EpisodeRecord:
                     t=t,
                     footprint=SensorFootprint(
                         kind="cone",
-                        x=10.0 + tick,
-                        y=-4.5,
+                        lat=71.9900 + 0.0001 * tick,
+                        lon=-94.8400,
                         radius=300.0,
                         heading=0.75,
                         half_angle=0.4,
@@ -90,8 +90,8 @@ def make_record(tick: int) -> EpisodeRecord:
                     detections=(
                         Detection(
                             detection_id=f"d-{tick}-0",
-                            x=101.0,
-                            y=55.5,
+                            lat=71.9965,
+                            lon=-94.8448,
                             confidence=0.62,
                             classification="vehicle",
                         ),
@@ -103,8 +103,8 @@ def make_record(tick: int) -> EpisodeRecord:
                     t=t,
                     footprint=SensorFootprint(
                         kind="circle",
-                        x=0.0,
-                        y=0.0,
+                        lat=71.9950,
+                        lon=-94.8700,
                         radius=800.0,
                         heading=0.0,
                         half_angle=3.141592653589793,
@@ -120,7 +120,8 @@ def make_record(tick: int) -> EpisodeRecord:
                 WaypointIntent(
                     asset_id="wing-1",
                     t=t,
-                    target_xy=(250.0, -125.5),
+                    target_lat=72.0010,
+                    target_lon=-94.8000,
                     target_z=140.0,
                     speed=24.0,
                     reason="sweep",
@@ -132,7 +133,8 @@ def make_record(tick: int) -> EpisodeRecord:
             t=t,
             entropy=7.25,
             mass=1.0,
-            peak_xy=(99.5, 50.25),
+            peak_lat=71.9975,
+            peak_lon=-94.8450,
             peak_p=0.031,
             covered_fraction=0.42,
             grid_shape=(256, 256),
@@ -142,8 +144,8 @@ def make_record(tick: int) -> EpisodeRecord:
                 contact_id="c-1",
                 t=t,
                 state="confirming",
-                x=100.0,
-                y=55.0,
+                lat=71.9964,
+                lon=-94.8447,
                 confidence=0.62,
                 classification="vehicle",
                 assigned_asset_id="wing-1",
@@ -152,8 +154,8 @@ def make_record(tick: int) -> EpisodeRecord:
                 contact_id="c-2",
                 t=t,
                 state="lost",
-                x=-400.0,
-                y=90.0,
+                lat=71.9820,
+                lon=-94.9000,
                 confidence=0.05,
                 classification="unknown",
                 assigned_asset_id=None,
@@ -164,8 +166,8 @@ def make_record(tick: int) -> EpisodeRecord:
             targets=(
                 TargetTruth(
                     target_id="target-0",
-                    x=102.0,
-                    y=54.0,
+                    lat=71.9966,
+                    lon=-94.8449,
                     z=3.0,
                     heading=1.1,
                     speed=4.0,
@@ -195,7 +197,7 @@ def test_round_trip_preserves_tuple_types(tmp_path: Path) -> None:
     assert isinstance(back.contacts, tuple)
     assert isinstance(back.observation.poses, tuple)
     assert isinstance(back.observation.reports[0].detections, tuple)
-    assert isinstance(back.intent.intents[0].target_xy, tuple)
+    assert isinstance(back.belief_digest.grid_shape, tuple)
     assert isinstance(back.truth.targets, tuple)
 
 
@@ -498,13 +500,15 @@ def test_writer_refuses_a_record_whose_clocks_disagree(tmp_path: Path) -> None:
 
 def test_an_int_in_a_float_field_serialises_as_a_float() -> None:
     """The gate compares bytes; an int where a float is declared breaks that."""
-    integral = Pose(asset_id="a", cls="quad", t=0, x=0, y=0, z=0, heading=0, speed=0, energy_used=0)
+    integral = Pose(
+        asset_id="a", cls="quad", t=0, lat=72, lon=-95, z=0, heading=0, speed=0, energy_used=0
+    )
     floating = Pose(
         asset_id="a",
         cls="quad",
         t=0.0,
-        x=0.0,
-        y=0.0,
+        lat=72.0,
+        lon=-95.0,
         z=0.0,
         heading=0.0,
         speed=0.0,
@@ -514,7 +518,7 @@ def test_an_int_in_a_float_field_serialises_as_a_float() -> None:
     assert json.dumps(integral.to_dict(), sort_keys=True) == json.dumps(
         floating.to_dict(), sort_keys=True
     )
-    assert isinstance(integral.x, float)
+    assert isinstance(integral.lat, float)
 
 
 def test_to_dict_is_the_json_shape() -> None:
@@ -522,7 +526,7 @@ def test_to_dict_is_the_json_shape() -> None:
     payload = make_record(0).to_dict()
     assert payload == json.loads(json.dumps(payload))
     assert isinstance(payload["contacts"], list)
-    assert isinstance(payload["belief_digest"]["peak_xy"], list)
+    assert isinstance(payload["belief_digest"]["grid_shape"], list)
 
 
 # --- R1-8: the reader does not hold the file open ---------------------------
@@ -704,15 +708,20 @@ def test_validator_rejects_an_oversized_integer_literal(tmp_path: Path) -> None:
     assert "record.belief_digest.entropy" in str(caught.value)
 
 
-def test_validator_rejects_an_oversized_integer_inside_a_pair(tmp_path: Path) -> None:
-    """``_pair`` coerces each item the same way, so it has the same hole."""
-    log = tmp_path / "huge_pair.jsonl"
-    poisoned = _oversized(["intent", "intents", 0, "target_xy", 0])
+def test_validator_rejects_an_oversized_integer_inside_a_nested_array(tmp_path: Path) -> None:
+    """Every float is coerced the same way, so every one of them has the hole.
+
+    A detection's ``lat`` is the deepest float in the record and the one the
+    arena scores, so it is the one worth naming: the path in the message has
+    to survive two array indices to be worth anything to a reader.
+    """
+    log = tmp_path / "huge_nested.jsonl"
+    poisoned = _oversized(["observation", "reports", 0, "detections", 0, "lat"])
     _write_lines(log, [poisoned])
     with pytest.raises(EpisodeLogError) as caught:
         validate_episode_log(log)
     assert caught.value.line == 1
-    assert "record.intent.intents[0].target_xy[0]" in str(caught.value)
+    assert "record.observation.reports[0].detections[0].lat" in str(caught.value)
 
 
 # --- R5-2: the reader enforces the emptiness rule the writer cites ----------

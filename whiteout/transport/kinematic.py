@@ -12,6 +12,12 @@ detection models are ``whiteout/sim/``'s, and arrive with their own tickets;
 what exists here is the far side of the seam, so that everything above it can
 be written against a real ``Transport`` from now on.
 
+Positions are the lat/lon of ``SPEC.md`` §5's one frame of record. The stub
+scatters the fleet a few hundred metres about
+:data:`~whiteout.geo.ARENA_ORIGIN` and converts that offset through
+:mod:`whiteout.geo`, which is the tree's only converter: the adapter holds no
+frame arithmetic of its own.
+
 The stub is a pure function of its seed. Start positions are drawn once, at
 :meth:`KinematicTransport.connect`, from a :class:`numpy.random.Generator`
 derived from the episode seed — an explicit generator, never module-level
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from whiteout.geo import ARENA_ORIGIN, LocalPoint, local_to_geodetic
 from whiteout.transport.base import TransportError
 from whiteout.types import FleetIntent, Pose, WorldObservation
 
@@ -42,7 +49,11 @@ FLEET: tuple[tuple[str, str, float], ...] = (
     ("tower-1", "tower", 15.0),
 )
 
-#: Half-width, in metres, of the box start positions are drawn from.
+#: Half-width, in metres, of the box start positions are drawn from. The box
+#: is East–North about :data:`~whiteout.geo.ARENA_ORIGIN` and is converted to
+#: the lat/lon the records carry by :mod:`whiteout.geo`, which is the only
+#: module in the tree that converts. Metres are the readable unit for "a few
+#: hundred apart"; they never reach a record.
 _START_SPREAD = 500.0
 
 
@@ -102,15 +113,16 @@ class KinematicTransport:
         generator = np.random.default_rng(self._seed)
         poses: list[Pose] = []
         for asset_id, cls, altitude in FLEET:
-            x, y = generator.uniform(-_START_SPREAD, _START_SPREAD, size=2)
+            east, north = generator.uniform(-_START_SPREAD, _START_SPREAD, size=2)
+            start = local_to_geodetic(ARENA_ORIGIN, LocalPoint(float(east), float(north)))
             heading = generator.uniform(0.0, 2.0 * np.pi)
             poses.append(
                 Pose(
                     asset_id=asset_id,
                     cls=cls,
                     t=0.0,
-                    x=float(x),
-                    y=float(y),
+                    lat=start.lat_deg,
+                    lon=start.lon_deg,
                     z=altitude,
                     heading=float(heading),
                     speed=0.0,
@@ -130,8 +142,8 @@ class KinematicTransport:
                 asset_id=pose.asset_id,
                 cls=pose.cls,
                 t=t,
-                x=pose.x,
-                y=pose.y,
+                lat=pose.lat,
+                lon=pose.lon,
                 z=pose.z,
                 heading=pose.heading,
                 speed=pose.speed,
