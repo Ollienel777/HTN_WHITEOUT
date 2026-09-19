@@ -60,14 +60,26 @@ class BeliefPeak:
 
     **:meth:`BeliefField.entropy` is not the way around that**, and an earlier
     version of this docstring said it was. Discrete Shannon entropy carries a
-    ``log N`` term, so it moves with resolution at least as much: the same
-    posterior on the default strait measures 0.774 nats at 400 m cells, 3.836
-    at 100 m and 5.221 at 50 m. Both numbers on this protocol are
-    resolution-dependent, there is no resolution-independent comparator here
-    yet, and a policy that hard-codes a threshold against either is coupled to
-    the field's internals through the back door. Normalising entropy by
-    ``log(water_cells)``, or reporting a credible interval in metres, would be
-    one; #13 and #14 should ask for it rather than assume it.
+    ``log N`` term, so it moves with resolution at least as much. Measured on
+    ``DEFAULT_STRAIT`` — one detection at ``sigma_m`` = 150 m, placed on the
+    **water cell centre nearest mid-strait** at each resolution, starting from
+    the uniform prior — it reads **0.660 nats at 400 m cells, 3.836 at 100 m
+    and 5.223 at 50 m**.
+
+    The position has to be stated because at 400 m the figure is not stable
+    under it: the same detection swept over all 255 water-cell centres reads
+    anywhere in **0.430 to 0.699 nats**, since a 150 m error inside a 400 m
+    cell barely distinguishes one cell from its neighbours and the update is
+    then a function of where in the cell the fix landed. Read the 400 m row as
+    that range. ``tests/test_belief_grid.py`` re-measures all of it and checks
+    this paragraph still says it.
+
+    Both numbers on this protocol are resolution-dependent, there is no
+    resolution-independent comparator here yet, and a policy that hard-codes a
+    threshold against either is coupled to the field's internals through the
+    back door. Normalising entropy by ``log(water_cells)``, or reporting a
+    credible interval in metres, would be one; #13 and #14 should ask for it
+    rather than assume it.
     """
 
     lat_deg: float

@@ -23,6 +23,7 @@ from whiteout.belief import (
     DEFAULT_STRAIT,
     BeliefError,
     BeliefField,
+    BeliefPeak,
     ChannelBeliefGrid,
     ChannelPoint,
     ChannelVertex,
@@ -31,6 +32,7 @@ from whiteout.belief import (
 )
 from whiteout.belief.geometry import enu_from_geodetic, geodetic_from_enu
 from whiteout.belief.grid import (
+    DEFAULT_DETECTION_SIGMA_M,
     DEFAULT_FALSE_ALARM_RATE,
     DEFAULT_HEADING_PERSISTENCE_S,
     DEFAULT_SPEED_MPS,
@@ -305,14 +307,18 @@ def test_diffusion_does_not_cross_an_along_channel_shoreline() -> None:
     assert float(grid.probabilities()[land].max()) == 0.0
     assert grid.mass() == pytest.approx(1.0, abs=MASS_TOLERANCE)
 
-    # The control: the same grid with the narrows widened away, so the cell
-    # that was land is water. If diffusion would not have crossed anyway, the
-    # assertion above proves nothing -- so assert that it would have.
+    # The control: the same grid with the narrows widened away, so the cells
+    # that were land are water. If diffusion would not have crossed anyway,
+    # the assertion above proves nothing -- so assert that it would have, and
+    # assert it over exactly the cells the mask forbids, which is the
+    # complement of the `max() == 0.0` above rather than a neighbour of it.
+    # (A single adjacent cell is the wrong quantity to bar: its share *falls*
+    # as the spread grows past a cell, so the bar would move with the speed.)
     control = ChannelBeliefGrid(choked_channel(narrow_half_width_m=1000.0))
     assert control.shape == grid.shape
     seed(control, row, column)
     control.diffuse(60.0)
-    assert float(control.probabilities()[row + 1, column]) > 0.05
+    assert float(control.probabilities()[land].sum()) > 0.2
 
 
 def test_diffusion_does_not_cross_the_lateral_shoreline() -> None:
@@ -329,10 +335,12 @@ def test_diffusion_does_not_cross_the_lateral_shoreline() -> None:
     assert float(grid.probabilities()[~mask].max()) == 0.0
     assert grid.mass() == pytest.approx(1.0, abs=MASS_TOLERANCE)
 
+    # Same control, same quantity: the mass that would have landed in exactly
+    # the cells this shoreline forbids, not the share held by one neighbour.
     control = ChannelBeliefGrid(choked_channel(narrow_half_width_m=1000.0))
     seed(control, narrow_row, outermost)
     control.diffuse(60.0)
-    assert float(control.probabilities()[narrow_row, outermost + 1]) > 0.05
+    assert float(control.probabilities()[~mask].sum()) > 0.2
 
 
 def test_the_ends_of_the_strait_reflect_rather_than_absorb() -> None:
@@ -379,25 +387,27 @@ def test_a_detection_never_puts_mass_on_land() -> None:
 
 
 def test_the_stated_diffusion_number() -> None:
-    """σ = 21.9 m per axis per 1 s tick, from v = 4.0 m/s and tau = 30 s.
+    """σ = 43.8 m per axis per 1 s tick, from v = 8.0 m/s and tau = 30 s.
 
     The module docstring states that number; this is the arithmetic behind it,
-    so changing either constant without restating the number fails here.
+    so changing either parameter's default without restating the number fails
+    here.
     """
-    assert DEFAULT_SPEED_MPS == 4.0
+    assert DEFAULT_SPEED_MPS == 8.0
     assert DEFAULT_HEADING_PERSISTENCE_S == 30.0
     variance_per_tick = DEFAULT_SPEED_MPS**2 * DEFAULT_HEADING_PERSISTENCE_S * 1.0
-    assert math.sqrt(variance_per_tick) == pytest.approx(21.9, abs=0.05)
+    assert math.sqrt(variance_per_tick) == pytest.approx(43.8, abs=0.05)
 
 
 def test_every_diffusion_figure_the_docstring_states() -> None:
     """The acceptance criterion is "with the number stated", so check the words.
 
-    ``grid.py``'s docstring states four spreads — 21.9 m at 1 s, 170 m at a
-    minute, 537 m at ten minutes, 1.3 km at an hour. Three of them had a test
-    behind them and the one-minute figure did not; it read 69 m, which is
-    ``sqrt(480 × 60)`` = 169.7 m with the leading 1 dropped, and a reader
-    sizing a search box off it sized it 2.5× too small.
+    ``grid.py``'s docstring states four spreads — 43.8 m at 1 s, 339 m at a
+    minute, 1.07 km at ten minutes, 2.6 km at an hour. Three of them had a
+    test behind them and the one-minute figure did not; at the earlier
+    ``v`` = 4.0 it read 69 m, which is ``sqrt(480 × 60)`` = 169.7 m with the
+    leading 1 dropped, and a reader sizing a search box off it sized it 2.5×
+    too small.
 
     So this asserts the arithmetic *and* that the prose still says it. The
     second half is the part that catches the next dropped digit: the numbers
@@ -409,16 +419,16 @@ def test_every_diffusion_figure_the_docstring_states() -> None:
     def sigma(seconds: float) -> float:
         return math.sqrt(DEFAULT_SPEED_MPS**2 * DEFAULT_HEADING_PERSISTENCE_S * seconds)
 
-    assert sigma(1.0) == pytest.approx(21.9, abs=0.05)
-    assert sigma(60.0) == pytest.approx(169.7, abs=0.05)
-    assert sigma(600.0) == pytest.approx(536.7, abs=0.05)
-    assert sigma(3600.0) == pytest.approx(1314.5, abs=0.05)
+    assert sigma(1.0) == pytest.approx(43.8, abs=0.05)
+    assert sigma(60.0) == pytest.approx(339.4, abs=0.05)
+    assert sigma(600.0) == pytest.approx(1073.3, abs=0.05)
+    assert sigma(3600.0) == pytest.approx(2629.1, abs=0.05)
 
     for stated in (
-        "σ = 21.9 m per axis per 1 s tick",
-        "170 m\nafter a minute",
-        "537 m after ten minutes",
-        "1.3 km after an hour",
+        "σ = 43.8 m per axis per 1 s tick",
+        "339 m\nafter a minute",
+        "1.07 km after ten minutes",
+        "2.6 km after an hour",
     ):
         assert stated in docstring, stated
 
@@ -426,7 +436,7 @@ def test_every_diffusion_figure_the_docstring_states() -> None:
     grid = ChannelBeliefGrid(straight_channel(), along_m=100.0, across_m=200.0)
     seed(grid, grid.shape[0] // 2, grid.shape[1] // 2)
     grid.diffuse(60.0)
-    assert along_std_m(grid) == pytest.approx(169.7, rel=0.03)
+    assert along_std_m(grid) == pytest.approx(339.4, rel=0.03)
 
 
 def test_the_diffusion_reaches_its_analytic_spread_after_one_persistence_time() -> None:
@@ -434,7 +444,7 @@ def test_the_diffusion_reaches_its_analytic_spread_after_one_persistence_time() 
 
     It is a check that the implemented operator reaches the analytic variance
     ``v² tau t`` at ``t = tau``: 30 one-second ticks of the real flux-form
-    kernel land within 5 % of 120 m.
+    kernel land within 5 % of 240 m.
 
     It is **not** evidence for ``tau`` = 30 s, though the docstring used to
     claim it was. ``sigma(t) = sqrt(v² tau t)`` makes ``sigma(tau) = v tau``
@@ -856,3 +866,80 @@ def test_the_resolution_can_change_without_the_callers_noticing() -> None:
         peak = grid.peak()
         assert abs(peak.lat_deg - lat_deg) < 0.01
         assert abs(peak.lon_deg - lon_deg) < 0.02
+
+
+def mid_strait_water_cell(grid: ChannelBeliefGrid) -> tuple[int, int]:
+    """The water cell whose centre is nearest the middle of the centreline.
+
+    Public accessors only, and deterministic at every resolution: the cell
+    that minimises ``|s - length/2| + |w|`` over the mask, first in row-major
+    order on a tie. The entropy figures below are quoted at this position
+    because at 400 m cells they move with it.
+    """
+    mask = grid.water_mask()
+    along = grid.along_centres_m()
+    across = grid.across_centres_m()
+    middle = grid.geometry.length_m / 2.0
+    best: tuple[float, int, int] | None = None
+    for row in range(mask.shape[0]):
+        for column in range(mask.shape[1]):
+            if not bool(mask[row, column]):
+                continue
+            distance = abs(float(along[row]) - middle) + abs(float(across[column]))
+            if best is None or distance < best[0]:
+                best = (distance, row, column)
+    assert best is not None, "the geometry has no water cells"
+    return best[1], best[2]
+
+
+def test_every_entropy_figure_the_protocol_docstring_states() -> None:
+    """``field.py``'s entropy figures, re-measured, at the position they name.
+
+    ``BeliefPeak``'s docstring argues that entropy is no more
+    resolution-independent than peak mass, and carries three numbers to show
+    it. An earlier version of that paragraph stated 0.774 nats at 400 m cells,
+    which does not reproduce anywhere on the cell centres — it needs a
+    particular off-centre placement — and it was the one set of stated figures
+    in this module with no test behind it, in the paragraph whose job is to
+    replace a false claim.
+
+    So this measures all of them the way the paragraph says they were
+    measured, and asserts the paragraph still says what it measured. The 400 m
+    row is quoted as a range for a reason, and the sweep here is what holds
+    that range honest: at 400 m cells a 150 m fix barely resolves one cell
+    from its neighbour, so the posterior depends on sub-cell placement.
+    """
+    docstring = BeliefPeak.__doc__
+    assert docstring is not None
+
+    def entropy_after_a_mid_strait_detection(cell_m: float) -> float:
+        grid = ChannelBeliefGrid(DEFAULT_STRAIT, along_m=cell_m, across_m=cell_m)
+        row, column = mid_strait_water_cell(grid)
+        lat_deg, lon_deg = cell_position(grid, row, column)
+        grid.update_detection(lat_deg, lon_deg, sigma_m=DEFAULT_DETECTION_SIGMA_M)
+        return grid.entropy()
+
+    assert entropy_after_a_mid_strait_detection(400.0) == pytest.approx(0.660, abs=0.001)
+    assert entropy_after_a_mid_strait_detection(100.0) == pytest.approx(3.836, abs=0.001)
+    assert entropy_after_a_mid_strait_detection(50.0) == pytest.approx(5.223, abs=0.001)
+
+    # the same detection on every water-cell centre at 400 m, which is the
+    # spread the paragraph quotes instead of a single three-decimal figure.
+    mask = ChannelBeliefGrid(DEFAULT_STRAIT, along_m=400.0, across_m=400.0).water_mask()
+    swept: list[float] = []
+    for row, column in zip(*np.nonzero(mask), strict=True):
+        grid = ChannelBeliefGrid(DEFAULT_STRAIT, along_m=400.0, across_m=400.0)
+        lat_deg, lon_deg = cell_position(grid, int(row), int(column))
+        grid.update_detection(lat_deg, lon_deg, sigma_m=DEFAULT_DETECTION_SIGMA_M)
+        swept.append(grid.entropy())
+    assert len(swept) == 255
+    assert min(swept) == pytest.approx(0.430, abs=0.001)
+    assert max(swept) == pytest.approx(0.699, abs=0.001)
+
+    for stated in (
+        "0.660 nats at 400 m cells, 3.836 at 100 m",
+        "and 5.223 at 50 m",
+        "0.430 to 0.699 nats",
+        "``sigma_m`` = 150 m",
+    ):
+        assert stated in docstring, stated

@@ -51,32 +51,38 @@ The vessel spawns at random and walks at random, with no evasion (``ARENA.md``
 convenient one — there is no adversary to model — and it makes the rate the
 only thing to choose.
 
-**Speed.** :data:`DEFAULT_SPEED_MPS` is **4.0 m/s**. Two numbers bear on it,
-and neither settles it:
+**Speed is a parameter, not a constant.** The constructor takes ``speed_mps``
+and :meth:`ChannelBeliefGrid.speed_mps` reports what a field is running at;
+:data:`DEFAULT_SPEED_MPS` is only its default, **8.0 m/s** — about 15.5 kn,
+which covers essentially anything a small boat can do. It is set from the
+shape of the loss rather than from a point estimate, because **there is no
+measurement of the vessel's speed to set it from**:
 
+- ``ARENA.md`` §5's ``speed: 6.5`` is **a field inside a payload we POST**.
+  It is the example body of a ``POST /api/tracks`` update — an illustration
+  of *our own submission format*, the number we fill in when reporting a
+  track we detected. It is not a measurement of the vessel and carries no
+  information about how fast it moves.
 - **2.96 m/s on course 304.5°** — the operator's reading off the live sim,
-  reported verbally during the build. It is **not recorded anywhere in this
-  repository**, so no later reader can check it; it is cited here as what it
-  is, a single unverifiable observation of a single moment.
-- **``speed: 6.5``**, in ``ARENA.md`` §5. That is the example body of a
-  ``POST /api/tracks`` update, illustrating the submission format, and the
-  units are not stated anywhere. It is not presented as a measurement of the
-  target.
+  reported verbally during the build and **not recorded anywhere in this
+  repository**. It came from displacement over elapsed time on a
+  randomly-walking target, and a chord is never longer than the arc it
+  subtends, so a measurement of that shape is **structurally a lower bound**
+  — worse the more the vessel turns.
 
-The asymmetry argument for sitting *above* an observation is real — diffusing
-too fast costs a little sharpness, which the next detection restores, while
-diffusing too slowly leaves belief concentrated where the vessel no longer is,
-the fleet stops looking anywhere else, and nothing restores it. **But that
-argument does not hold against 6.5.** If ``ARENA.md``'s 6.5 is metres per
-second, then 4.0 is *below* the only speed in merged ground truth, the field
-under-diffuses by ``(6.5/4.0)² = 2.6×`` in variance, and this is precisely the
-unrecoverable failure that paragraph warns about. 4.0 is conservative against
-2.96 and optimistic against 6.5, and which of those is the vessel is not
-resolved here.
+So the value is chosen on the asymmetry of being wrong, which is not
+symmetric at all. **Over-diffusing** flattens the field and degrades the
+policy toward a coverage search: that is #27, the designed fallback, so the
+failure is graceful, gradual, visible, and undone by the next detection.
+**Under-diffusing** leaves belief confidently tight around the **wrong
+water** — the fleet stops looking anywhere else, and ``SPEC.md`` §4 is
+explicit that nothing detects this. One direction costs sharpness; the other
+loses the vessel.
 
-The constructor takes ``speed_mps``, so the resolution is one argument away
-once someone reads a real speed off the sim. Until then a caller that has
-reason to trust 6.5 should pass it.
+**Still wanted:** the speed re-measured over a long baseline once the sim is
+up, which is one argument to the constructor. That number would be a **floor
+too** — a straight-line measurement of a turning vessel always is — so it
+should raise this parameter, not simply replace it.
 
 **Heading persistence.** A boat is not a Brownian particle: it holds a course
 for a while. With speed ``v`` and a heading that decorrelates over a time
@@ -85,17 +91,17 @@ velocity variance is ``v² / 2`` and the per-axis diffusion coefficient is
 
 .. math::
 
-    D = \\frac{v^2 \\tau}{2} = \\frac{4.0^2 \\times 30}{2} = 240\\ \\mathrm{m^2/s}
+    D = \\frac{v^2 \\tau}{2} = \\frac{8.0^2 \\times 30}{2} = 960\\ \\mathrm{m^2/s}
 
 so the variance a tick of length ``dt`` adds to each axis is
 
 .. math::
 
     \\sigma^2 = 2 D\\, dt = v^2 \\tau\\, dt
-    = 4.0^2 \\times 30 \\times 1.0 = 480\\ \\mathrm{m^2}
+    = 8.0^2 \\times 30 \\times 1.0 = 1920\\ \\mathrm{m^2}
 
-**The number, stated: σ = 21.9 m per axis per 1 s tick.** Equivalently 170 m
-after a minute, 537 m after ten minutes, and 1.3 km after an hour — at which
+**The number, stated: σ = 43.8 m per axis per 1 s tick.** Equivalently 339 m
+after a minute, 1.07 km after ten minutes, and 2.6 km after an hour — at which
 point belief is smeared over a tenth of the strait and the field is doing what
 it should. ``tests/test_belief_grid.py`` asserts all four of those figures
 against the arithmetic *and* against this docstring's own text, so neither can
@@ -172,11 +178,13 @@ DEFAULT_ALONG_M = 100.0
 #: Cell size across the channel, metres. 20 cells over the 2 km width.
 DEFAULT_ACROSS_M = 100.0
 
-#: Vessel speed scale for the diffusion, m/s. Above the operator's verbally
-#: reported 2.96 m/s, below ``ARENA.md`` §5's unit-less ``speed: 6.5``; see
-#: the module docstring, which states plainly that this is conservative
-#: against the first and optimistic against the second.
-DEFAULT_SPEED_MPS = 4.0
+#: Default of the ``speed_mps`` **parameter**, m/s — a tunable, not a
+#: measurement. No measurement of the vessel's speed exists: ``ARENA.md`` §5's
+#: ``speed: 6.5`` is a field inside a payload *we* POST, and the one verbal
+#: observation (2.96 m/s) is a chord over elapsed time and so structurally a
+#: lower bound. 8.0 m/s, about 15.5 kn, is set from the loss asymmetry — see
+#: the module docstring. Callers with a better number pass ``speed_mps``.
+DEFAULT_SPEED_MPS = 8.0
 
 #: Heading decorrelation time, seconds. A boat holds a course; this is how
 #: long for. Together with the speed it fixes the diffusion coefficient. A
@@ -320,6 +328,21 @@ class ChannelBeliefGrid:
     def geometry(self) -> StraitGeometry:
         """The channel this field is defined over."""
         return self._geometry
+
+    @property
+    def speed_mps(self) -> float:
+        """The vessel speed scale this field diffuses at, m/s.
+
+        Readable because it is a **parameter** and not a settled constant: a
+        field built with a re-measured speed should be able to say so rather
+        than leave a reader to assume :data:`DEFAULT_SPEED_MPS`.
+        """
+        return self._speed_mps
+
+    @property
+    def heading_persistence_s(self) -> float:
+        """The heading decorrelation time this field diffuses at, seconds."""
+        return self._persistence_s
 
     def probabilities(self) -> _FloatArray:
         """A copy of the raw field, cells along by cells across. Land cells are 0."""

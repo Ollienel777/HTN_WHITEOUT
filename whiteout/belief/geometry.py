@@ -48,9 +48,12 @@ Where the default polyline comes from
 --------------------------------------
 
 :data:`DEFAULT_STRAIT` is **a parameterisation, not a survey**. Its numbers are
-exactly the facts in ``ARENA.md`` §2 and §5 — 25 km long, about 2 km wide, at
-roughly 71.99 N, −94.84 W, long axis running East–West, with a narrows in the
-middle — laid onto four vertices. It reproduces the one independent datum
+exactly the facts in ``ARENA.md`` §2 and §5 — a 25 km × 2 km extent at roughly
+71.99 N, −94.84 W, long axis running East–West, with a narrows in the middle —
+laid onto four vertices. That 2 km is the **extent**, and ARENA describes the
+channel as "flanked by rocky shores and ridges", so the half-widths here model
+the *water* inside it; see :data:`DEFAULT_STRAIT`. It reproduces the one
+independent datum
 available: the tracks-API example position ``71.9965, -94.8448`` (``ARENA.md``
 §5) falls about 90 m off this centreline, comfortably inside the water.
 
@@ -329,20 +332,27 @@ class StraitGeometry:
 #: §2's "25 km × 2 km … near Fort Ross", **not a survey** — see the module
 #: docstring.
 #:
-#: **It guesses narrow, which is the direction that cannot be recovered
-#: from.** ARENA states one width, 2 km. These half-widths taper from 1 km at
-#: each mouth to 520 m at the narrows, a mean width of 1.59 km and 1.04 km at
-#: the choke. Because ``_water`` is boolean, water this parameterisation
-#: excludes is not merely unlikely — it is unreachable: belief there is
-#: identically zero, ``probability_at`` returns 0, ``peak()`` can never report
-#: it, and a vessel at ``|w| = 600`` m near the narrows is pulled up to 480 m
-#: toward the centreline in the position submitted to ``POST /api/tracks``.
-#: Guessing wide only costs cells. Until someone clicks a real shoreline off
-#: the sim, a flat 1000 m half-width would match the one stated fact and err
-#: the safe way; that change moves the water-cell count, the water area and
-#: the ribbon-vs-raster table in ``grid.py``, and leaves the default grid with
-#: no land in it at all, so it is left for the human to call rather than taken
-#: here.
+#: **The 2 km in ARENA is the arena's extent, not the channel's water.** The
+#: same sentence that gives "Extent: 25 km × 2 km" describes "a narrow water
+#: channel with ice floes, **flanked by rocky shores and ridges**", and those
+#: flanking shores are inside that 2 km. So the published figure is a bounding
+#: box and the modelled quantity here is the water width: these half-widths
+#: taper from 1 km at each mouth to 520 m at the narrows, a mean water width
+#: of 1.59 km and 1.04 km at the choke — leaving about 410 m of rocky shore
+#: across the box, which is exactly where a boat cannot go.
+#:
+#: What it costs is a discretisation, not unreachable water. ``_water`` is
+#: boolean, so a position outside the ribbon is not merely unlikely — belief
+#: there is identically zero, ``probability_at`` returns 0 and ``peak()`` can
+#: never report it — and the outermost *water cell centre* is inboard of the
+#: shore by up to half a cell. At the narrowest row (``s`` ≈ 16 035 m,
+#: half-width 520.9 m) that outermost centre sits at ``|w|`` = 450 m, so a
+#: fix reported at ``|w|`` = 600 m is pulled 150 m toward the centreline in
+#: the position submitted to ``POST /api/tracks``, and one at the very edge of
+#: the arena's extent, ``|w|`` = 1000 m, is pulled 550 m.
+#:
+#: Clicking the real shoreline off the sim (``ARENA.md`` §3) stays the right
+#: way to replace these four vertices, and every function takes any polyline.
 #:
 #: The taper is *not* here to make the shoreline bite in the tests, whatever
 #: an earlier version of this comment said: every shoreline test builds its
