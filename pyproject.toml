@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whiteout"
+version = "0.1.0"
+description = "Coordination layer for a heterogeneous ArduPilot/MAVLink fleet over Arctic terrain"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy",
+    "scipy",
+    "networkx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "build",
+    # The gate builds with `--no-isolation` (SPEC.md section 6), so the build backend
+    # has to be present in the environment rather than fetched from PyPI.
+    "setuptools>=68",
+    "wheel",
+]
+
+[project.scripts]
+whiteout = "whiteout.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["whiteout*"]
+exclude = ["tests*", "viz*", "artifacts*", "fixtures*", "scripts*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+    ".claude",
+    ".git",
+    ".venv",
+    "artifacts",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["whiteout"]
+exclude = "(^|/)(\\.claude|\\.venv|artifacts|build|dist)/"
+
+[tool.pytest.ini_options]
+addopts = "-p no:randomly --strict-markers"
+testpaths = ["tests"]
+norecursedirs = [".claude", ".git", ".venv", "artifacts", "build", "dist", "viz"]
+markers = [
+    "slow: wall-clock or long-running; deselected by the gate, run by the tuner",
+]
