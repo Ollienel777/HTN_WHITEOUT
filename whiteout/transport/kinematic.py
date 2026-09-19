@@ -86,6 +86,15 @@ class KinematicTransport:
             # through argparse. The seam's own error type, either way.
             raise TransportError(f"kinematic transport: seed {seed} is negative")
         if pose_age_seconds is not None:
+            # Validated *before* the widening, not after: `float()` on a
+            # non-number escapes as a bare `ValueError` rather than the seam's
+            # own error type, and `float(True)` is 1.0 — an age of one second
+            # nobody asked for.
+            if isinstance(pose_age_seconds, bool) or not isinstance(pose_age_seconds, int | float):
+                raise TransportError(
+                    f"kinematic transport: pose_age_seconds "
+                    f"{pose_age_seconds!r} is not a number of seconds"
+                )
             pose_age_seconds = float(pose_age_seconds)
             if not math.isfinite(pose_age_seconds) or pose_age_seconds < 0.0:
                 # A negative age would stamp a fix taken *after* the tick it

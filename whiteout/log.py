@@ -60,7 +60,20 @@ __all__ = [
 
 #: The episode log schema version. Bump on any change to the record shape,
 #: and expect every artifact under ``artifacts/`` to be regenerated.
-SCHEMA_VERSION = 1
+#:
+#: The rule is "any change to the record shape", not "any change the round
+#: trip cannot survive". A round trip is within one build; the version exists
+#: for the case *across* builds, where a reader meets a log some other build
+#: wrote. Adding a field that :func:`_check_keys` then requires is such a
+#: change: without a bump, the old and the new shape both self-describe as
+#: the same version, the version check passes, and the failure surfaces as a
+#: missing-field error on some nested path instead of as "this log was
+#: written by a different build" — the one message the field exists to
+#: produce.
+#:
+#: 2 — ``Pose.measured_t``, a required record key (see
+#: :class:`~whiteout.types.Pose`).
+SCHEMA_VERSION = 2
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")

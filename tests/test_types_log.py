@@ -283,6 +283,32 @@ def test_validator_rejects_a_wrong_schema_version_naming_the_line(tmp_path: Path
     assert str(SCHEMA_VERSION) in str(caught.value)
 
 
+def test_a_log_of_the_shape_before_measured_t_is_refused_by_version(tmp_path: Path) -> None:
+    """The version, not a nested missing field, is what reports an old log.
+
+    ``measured_t`` is a required record key, so a log written before it
+    existed cannot be read by this build. Without the bump that went with it,
+    both shapes would self-describe as the same version, the version check
+    would pass, and the reader would report
+    ``record.observation.poses[0]: missing field(s) measured_t`` — which
+    names a field rather than the build, and leaves a reader of an old
+    artifact guessing. The version number exists to produce exactly one
+    message, and this is it.
+    """
+    log = tmp_path / "previous_shape.jsonl"
+    payload = make_record(0).to_dict()
+    payload["schema_version"] = SCHEMA_VERSION - 1
+    for pose in payload["observation"]["poses"]:
+        del pose["measured_t"]
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    message = str(caught.value)
+    assert "schema_version" in message
+    assert str(SCHEMA_VERSION) in message
+    assert "measured_t" not in message, "reported by version, not by the missing field"
+
+
 def test_validator_rejects_a_nested_unknown_field_naming_the_path(tmp_path: Path) -> None:
     log = tmp_path / "nested.jsonl"
     payload = make_record(0).to_dict()

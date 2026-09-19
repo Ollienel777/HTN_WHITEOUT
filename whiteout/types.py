@@ -279,14 +279,29 @@ class Pose:
     coherent snapshot: ``pose.t == observation.t``, which the transport
     conformance suite asserts as an equality. Every consumer already reading
     ``pose.t`` reads it as the tick, and relaxing that would leave the field,
-    its type and its plausible value unchanged while changing its meaning —
-    the error class ``SPEC.md`` §4 records as the one we cannot detect.
+    its type and its plausible value unchanged while changing its meaning. No
+    test and no reader can tell those two apart: every consumer keeps
+    compiling, keeps running, and keeps reading a number that still looks
+    right, so the change would land silently and stay landed. That is why the
+    meaning is pinned here and the second question gets its own field.
 
     ``measured_t`` is where the other question goes. A link to a real vehicle
     serves a fix that was taken some time before the tick it lands in, and
     ``measured_t`` is when: it is ``<= t``, and ``t - measured_t`` is the age
     of the fix. It may be negative, for a fix taken before the episode clock's
     zero.
+
+    **``measured_t`` is in the same clock as ``t`` — ours, the episode's tick
+    timebase — and never the far side's.** An autopilot's or a sim's own
+    stamp (``time_boot_ms``, a ``time_usec`` epoch) is in a different
+    timebase, and putting one here unconverted is the mistake this field is
+    most likely to attract: an epoch value is large enough that
+    ``measured_t <= t`` fails on tick one and the adapter is told, but a
+    vehicle that booted seconds ago yields a small number that lands under
+    ``t``, passes every check, and reports an age that means nothing. An
+    adapter that reads a far-side stamp must measure the offset between that
+    clock and ours and subtract it before stamping; if it cannot, the honest
+    answer is ``None``.
 
     **``None`` means "this transport does not report a measurement time"**,
     and it is the default. A consumer that wants fix age must handle ``None``

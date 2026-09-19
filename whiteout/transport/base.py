@@ -127,6 +127,15 @@ class Transport(Protocol):
         time in ``Pose.t`` instead would make an observation an incoherent
         snapshot and would silently change what every reader of ``pose.t``
         is looking at.
+
+        **``measured_t`` is in our tick timebase too, not the far side's.**
+        A far-side stamp is the *input* to that field, never its value: an
+        adapter must measure the offset between that clock and ours and
+        subtract it before stamping, because an unconverted
+        ``time_boot_ms`` or ``time_usec`` can land under ``t``, pass every
+        check, and report an age that means nothing. An adapter that cannot
+        establish the offset reports ``None``. See
+        :class:`~whiteout.types.Pose`.
         """
 
     def command(self, intent: FleetIntent) -> None:

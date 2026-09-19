@@ -32,7 +32,7 @@
   /* Kept in step with whiteout.log.SCHEMA_VERSION by a test: the viewer must
    * reject a log this build cannot read, with the same version in the message
    * the Python reader would have printed. */
-  var SCHEMA_VERSION = 1;
+  var SCHEMA_VERSION = 2;
 
   /* Relative, so it resolves the same from `whiteout serve` and from file://
    * (where the fetch is blocked, and the file picker takes over). */

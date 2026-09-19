@@ -249,20 +249,21 @@ def check_connect_is_idempotent_while_the_link_is_up(factory: TransportFactory) 
 def check_the_tick_clock_is_monotonic(factory: TransportFactory) -> None:
     """Every ``observe`` advances the tick clock, and never turns it back.
 
-    The assertion below is a strict increase, and neither of the rules it
-    sits next to is the reason. ``whiteout/transport/base.py`` says the clock
-    is monotonic, which admits equality; ``whiteout/log.py`` accepts a
-    repeated ``t`` and refuses only one that runs backwards. The reason is
-    what ``t`` *is*: **the tick is our decision cadence, not the world's
-    clock.** ``observe`` is defined to serve one tick and advance, so a tick
-    that stands still is a coordinator that has stopped deciding while its
-    calls keep returning — a fault with no other symptom, because the
-    episode goes on producing records.
+    The assertion below is a strict increase, and the log's ordering rule is
+    not the reason for it: ``whiteout/log.py`` accepts a repeated ``t`` and
+    refuses only one that runs backwards, so a stalled clock would pass
+    there. The reason is what ``t`` *is*: **the tick is our decision cadence,
+    not the world's clock.** ``observe`` is defined to serve one tick and
+    advance, so a tick that stands still is a coordinator that has stopped
+    deciding while its calls keep returning — a fault with no other symptom,
+    because the episode goes on producing records.
 
-    So strictness here is deliberate, and it costs an adapter nothing:
-    ``base.py`` requires the tick to come from the adapter's own monotonic
-    counter and never from the far side's clock, which may be sampled, may
-    drift, and can return the same instant twice.
+    ``whiteout/transport/base.py`` states that same strict increase on
+    :meth:`Transport.observe`, and this check is what holds a transport to
+    it. Strictness costs an adapter nothing, because ``base.py`` also
+    requires the tick to come from the adapter's own monotonic counter and
+    never from the far side's clock, which may be sampled, may drift, and
+    can return the same instant twice.
 
     A clock that goes *backwards* costs more than the tick: the log refuses a
     record whose ``t`` is less than the previous one, so a transport that
