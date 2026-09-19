@@ -143,15 +143,36 @@ def _resolved_whiteout(python: str) -> Path | None:
     return Path(origin) if origin else None
 
 
+def _copy_trees() -> tuple[Path, ...]:
+    """Subtrees that hold *copies* of the source rather than the source.
+
+    ``.venv/Lib/site-packages/whiteout/`` (a non-editable install -- the wheel
+    ``step_build`` just produced, or a `.venv` predating this guard) and
+    ``build/lib/whiteout/`` are both under ``REPO_ROOT`` and would satisfy
+    plain containment, yet both are frozen snapshots: a gate answered by one
+    of them is a gate exercising code that is no longer in the tree. This is
+    the one containment predicate the whole guard rests on, so it excludes
+    them rather than relying on nothing ever reaching them.
+    """
+    return (VENV_DIR, REPO_ROOT / "build", REPO_ROOT / "dist")
+
+
 def _is_inside(path: Path, root: Path) -> bool:
+    resolved = path.resolve()
     try:
-        path.resolve().relative_to(root)
+        resolved.relative_to(root)
     except ValueError:
+        return False
+    for copy_tree in _copy_trees():
+        try:
+            resolved.relative_to(copy_tree.resolve())
+        except ValueError:
+            continue
         return False
     return True
 
 
-def _bootstrap_worktree_env() -> str | None:
+def _build_worktree_env() -> str | None:
     """Create (once) the per-worktree `.venv/` and put this tree's source in it.
 
     ``--system-site-packages`` and ``--no-deps`` keep this cheap: the
@@ -194,6 +215,32 @@ def _bootstrap_worktree_env() -> str | None:
     return None
 
 
+def _bootstrap_worktree_env() -> str | None:
+    """Build the per-worktree environment, rebuilding an unusable one once.
+
+    An existing `.venv/` is adopted on the strength of ``python.is_file()``,
+    which is not evidence that it works. Two shapes were observed: an
+    interrupted run leaving a truncated ``python.exe`` (every later gate ends
+    ``exit code 127``, for ever), and a hand-made plain ``python -m venv
+    .venv`` whose bundled setuptools fails the ``--no-build-isolation``
+    install with ``invalid command 'bdist_wheel'``. Both wedge the worktree
+    permanently, and neither message said to delete anything. So an adopted
+    environment that will not take the install is thrown away and rebuilt
+    once, and a failure that survives that names the directory to remove.
+    """
+    adopted = _venv_python(VENV_DIR).is_file()
+    failure = _build_worktree_env()
+    if failure is None:
+        return None
+    if adopted:
+        print(f"  ! {failure}; rebuilding {VENV_DIR.name}/ from scratch", flush=True)
+        shutil.rmtree(VENV_DIR, ignore_errors=True)
+        failure = _build_worktree_env()
+        if failure is None:
+            return None
+    return f"{failure} -- delete {VENV_DIR} and rerun"
+
+
 def _select_interpreter() -> str | None:
     """Point the gate's steps at an interpreter whose `whiteout` is this tree.
 
@@ -229,18 +276,41 @@ def _select_interpreter() -> str | None:
 
     origin = _resolved_whiteout(candidate)
     if origin is None or not _is_inside(origin, REPO_ROOT):
-        bin_dir = "Scripts" if os.name == "nt" else "bin"
+        # State the observed fact and list the candidates; do not assert a
+        # cause. The editable install is only one of them -- with PYTHONPATH
+        # set to another tree no worktree "owns" anything, and rebuilding
+        # `.venv/` cannot help, because PYTHONPATH precedes its site-packages
+        # too.
         return (
-            f"wrong source tree: the gate's interpreter imports whiteout from "
+            f"wrong source tree: even through {VENV_DIR.name}/, whiteout resolves to "
             f"{origin if origin else '<nowhere>'}, outside this worktree ({REPO_ROOT}). "
-            "Another worktree owns this environment's editable install. Recover with: "
-            "python -m venv --system-site-packages .venv "
-            f'&& .venv/{bin_dir}/python -m pip install -e "." --no-deps'
+            f"Check PYTHONPATH ({os.environ.get('PYTHONPATH') or 'unset'}), then delete "
+            f"{VENV_DIR} and rerun to rebuild it."
         )
 
     PY = candidate
     print(f"  whiteout source: {origin} (via {VENV_DIR.name}/)")
     return None
+
+
+def _missing_distributions(python: str) -> tuple[list[str], str | None]:
+    """Which of ``REQUIRED_DISTRIBUTIONS`` ``python`` cannot see, and why not."""
+    script = (
+        "import importlib.metadata as md\n"
+        f"names = {REQUIRED_DISTRIBUTIONS!r}\n"
+        "missing = []\n"
+        "for name in names:\n"
+        "    try:\n"
+        "        md.distribution(name)\n"
+        "    except md.PackageNotFoundError:\n"
+        "        missing.append(name)\n"
+        "print(' '.join(missing))\n"
+    )
+    with tempfile.TemporaryDirectory() as outside_the_repo:
+        probe = _run([python, "-c", script], capture=True, cwd=Path(outside_the_repo))
+    if probe.returncode != 0:
+        return [], f"install probe exited {probe.returncode}: {probe.stderr.strip()}"
+    return probe.stdout.split(), None
 
 
 def step_install() -> str | None:
@@ -255,31 +325,26 @@ def step_install() -> str | None:
     A metadata probe run from the repo root is defeated too, by the gitignored
     ``whiteout.egg-info/`` that an editable install or a build leaves behind.
 
-    Before probing, the step settles *which* interpreter the rest of the gate
-    runs, so that no later step can be answered by another worktree's source.
+    The ambient environment is probed *first*, then the interpreter is
+    settled, so that no later step can be answered by another worktree's
+    source. The order matters for the diagnosis: selecting first can trigger
+    a fallback bootstrap, and that bootstrap needs the ambient ``pip`` and
+    ``setuptools>=70.1`` -- the very things this probe reports. Probing
+    second turned a missing-toolchain problem into ``wrong source tree``,
+    sending the reader after the wrong bug.
     """
-    failure = _select_interpreter()
+    missing, failure = _missing_distributions(PY)
     if failure is not None:
         return failure
-    script = (
-        "import importlib.metadata as md\n"
-        f"names = {REQUIRED_DISTRIBUTIONS!r}\n"
-        "missing = []\n"
-        "for name in names:\n"
-        "    try:\n"
-        "        md.distribution(name)\n"
-        "    except md.PackageNotFoundError:\n"
-        "        missing.append(name)\n"
-        "print(' '.join(missing))\n"
-    )
-    with tempfile.TemporaryDirectory() as outside_the_repo:
-        probe = _run([PY, "-c", script], capture=True, cwd=Path(outside_the_repo))
-    if probe.returncode != 0:
-        return f"install probe exited {probe.returncode}: {probe.stderr.strip()}"
-    missing = probe.stdout.split()
     if missing:
         return f'not installed: {", ".join(missing)} -- run: pip install -e ".[dev]"'
-    return None
+
+    # Probing the ambient interpreter covers the fallback one too, and costs
+    # no extra subprocess: `.venv/` is `--system-site-packages`, so every
+    # distribution found here is visible there. The one entry that is not
+    # inherited is `whiteout` itself, and `_select_interpreter` checks that
+    # directly -- by where it imports from, which is the stronger question.
+    return _select_interpreter()
 
 
 def step_lint() -> str | None:

@@ -97,17 +97,49 @@ def test_gate_build_step_is_not_isolated() -> None:
     assert '"--wheel", "--no-isolation"' in source
 
 
-def test_gate_resolves_whiteout_from_outside_the_repo() -> None:
+def _recorder(
+    gate: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: object = 0,
+    stdout: str = "",
+) -> list[tuple[list[str], Path | None]]:
+    """Replace ``gate._run`` with a recorder over (command, cwd).
+
+    ``returncode`` may be an int or a callable taking the command, so a test
+    can fail one invocation and pass another.
+    """
+    calls: list[tuple[list[str], Path | None]] = []
+
+    def fake_run(
+        command: list[str], *, capture: bool = False, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((list(command), cwd))
+        code = returncode(command) if callable(returncode) else returncode
+        return subprocess.CompletedProcess(list(command), int(code), stdout=stdout, stderr="")
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+    return calls
+
+
+def test_gate_resolves_whiteout_from_outside_the_repo(monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #53. Asked from the repo root, the answer is always "here".
 
     ``python -c`` prepends the working directory to ``sys.path``, so a probe
     run at the repo root cannot see which tree the environment's editable
     install points at -- which is the whole failure being guarded against.
+    So assert the working directory the probe actually runs in.
     """
-    source = GATE.read_text(encoding="utf-8")
-    body = source.split("def _resolved_whiteout(")[1].split("\ndef ")[0]
-    assert "TemporaryDirectory" in body
-    assert "cwd=Path(outside_the_repo)" in body
+    gate = _load_gate()
+    calls = _recorder(gate, monkeypatch)
+
+    gate._resolved_whiteout("python")
+
+    assert len(calls) == 1
+    _command, cwd = calls[0]
+    assert cwd is not None
+    assert cwd.resolve() != REPO_ROOT
+    with pytest.raises(ValueError):
+        cwd.resolve().relative_to(REPO_ROOT)
 
 
 def test_gate_fails_when_whiteout_resolves_outside_this_worktree(
@@ -125,7 +157,8 @@ def test_gate_fails_when_whiteout_resolves_outside_this_worktree(
     assert "wrong source tree" in failure
     assert str(foreign) in failure
 
-    # And the whole step fails, rather than falling through to the probe.
+    # And the whole step fails, rather than falling through to the rest.
+    monkeypatch.setattr(gate, "_missing_distributions", lambda _python: ([], None))
     assert gate.step_install() == failure
 
 
@@ -210,14 +243,117 @@ def test_gate_venv_cannot_pollute_the_other_steps() -> None:
     assert ".venv/" in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").split()
 
 
-def test_gate_venv_install_stays_offline() -> None:
-    """SPEC.md §4: no egress. The fallback install must not fetch a backend."""
-    source = GATE.read_text(encoding="utf-8")
-    assert '"--no-build-isolation"' in source
-    assert '"--no-deps"' in source
-    assert '"--system-site-packages"' in source
+def test_gate_venv_install_stays_offline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """SPEC.md §4: no egress. The fallback install must not fetch a backend.
+
+    Asserted on the commands the bootstrap actually issues, because these
+    flags are the ones the setuptools failure mode turns on -- a flag
+    surviving only in a comment would satisfy a grep of the source.
+    """
+    gate = _load_gate()
+    monkeypatch.setattr(gate, "VENV_DIR", tmp_path / "venv")
+    calls = _recorder(gate, monkeypatch)
+
+    assert gate._bootstrap_worktree_env() is None
+
+    creation = next(command for command, _ in calls if "venv" in command)
+    assert "--system-site-packages" in creation
     # ensurepip's bundled setuptools is older than the build step's floor.
-    assert '"--without-pip"' in source
+    assert "--without-pip" in creation
+    install = next(command for command, _ in calls if "pip" in command)
+    assert "--no-build-isolation" in install
+    assert "--no-deps" in install
+
+
+def test_gate_rebuilds_a_venv_it_cannot_install_into(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #53: an unusable `.venv/` must not wedge the worktree for ever.
+
+    A truncated `python.exe` or a hand-made plain `python -m venv .venv` is
+    adopted on the strength of one file existing, and then fails the install
+    identically on every later run. It is thrown away and rebuilt once.
+    """
+    gate = _load_gate()
+    venv = tmp_path / "venv"
+    python = gate._venv_python(venv)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    unusable = venv / "hand-made.marker"
+    unusable.write_text("adopted, but broken", encoding="utf-8")
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+
+    def outcome(command: list[str]) -> int:
+        if "venv" in command:  # recreate what `python -m venv` would leave.
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_bytes(b"")
+            return 0
+        return 1 if unusable.exists() else 0
+
+    calls = _recorder(gate, monkeypatch, returncode=outcome)
+
+    assert gate._bootstrap_worktree_env() is None
+    assert not unusable.exists(), "the unusable environment was reused, not rebuilt"
+    assert [command for command, _ in calls if "venv" in command], "never rebuilt"
+    assert len([command for command, _ in calls if "pip" in command]) == 2
+
+
+def test_gate_names_the_venv_when_the_rebuild_also_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #53: a failure an implementer cannot act on is the expensive one."""
+    gate = _load_gate()
+    venv = tmp_path / "venv"
+    monkeypatch.setattr(gate, "VENV_DIR", venv)
+    _recorder(gate, monkeypatch, returncode=lambda command: 0 if "venv" in command else 1)
+
+    failure = gate._bootstrap_worktree_env()
+
+    assert failure is not None
+    assert str(venv) in failure
+    assert "delete" in failure
+
+
+def test_gate_rejects_a_frozen_copy_of_the_source_inside_this_worktree() -> None:
+    """Issue #53: containment alone accepts the gate's own build outputs.
+
+    A non-editable `whiteout` in `.venv/`, or the tree `step_build` leaves in
+    `build/lib/`, is under REPO_ROOT but is a snapshot -- passing a gate on
+    one is passing on code that is no longer in the worktree.
+    """
+    gate = _load_gate()
+    assert gate._is_inside(REPO_ROOT / "whiteout" / "__init__.py", REPO_ROOT)
+    for copy_tree in (
+        gate.VENV_DIR / "Lib" / "site-packages",
+        gate.VENV_DIR / "lib" / "python3.11" / "site-packages",
+        REPO_ROOT / "build" / "lib",
+        REPO_ROOT / "dist",
+    ):
+        frozen = copy_tree / "whiteout" / "__init__.py"
+        assert not gate._is_inside(frozen, REPO_ROOT), f"{frozen} accepted as this worktree"
+
+
+def test_gate_reports_a_missing_toolchain_before_choosing_an_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #53: the fallback bootstrap needs the very tools this probe checks.
+
+    Selecting first reported a missing/too-old setuptools as `wrong source
+    tree`, which points at the wrong bug.
+    """
+    gate = _load_gate()
+    monkeypatch.setattr(gate, "_missing_distributions", lambda _python: (["setuptools"], None))
+    monkeypatch.setattr(
+        gate,
+        "_select_interpreter",
+        lambda: pytest.fail("selected an interpreter before probing the toolchain"),
+    )
+
+    failure = gate.step_install()
+
+    assert failure is not None
+    assert "setuptools" in failure
+    assert "wrong source tree" not in failure
 
 
 def test_workflow_runs_the_gate_script() -> None:
