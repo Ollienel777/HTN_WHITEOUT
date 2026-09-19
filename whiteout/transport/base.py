@@ -17,8 +17,9 @@ package with :mod:`ast` and catches what an implementer writes by accident;
 it is not a sandbox, and its own docstrings state what it does not catch.
 Concretely, the four methods below are
 the whole protocol; the only record types named here are
-:class:`~whiteout.types.WorldObservation` and
-:class:`~whiteout.types.FleetIntent`; and this package imports nothing from
+:class:`~whiteout.types.WorldObservation`, :class:`~whiteout.types.FleetIntent`
+and — in prose, about the tick clock — the former's own
+:class:`~whiteout.types.Pose`; and this package imports nothing from
 ``whiteout.belief``, ``whiteout.policy``, ``whiteout.score`` or
 ``whiteout.sim``. A transport that knew what a contact, a belief digest, a
 score or ground truth was would have to be reimplemented three times, and
@@ -66,9 +67,9 @@ class Transport(Protocol):
 
     **A transport is single-use, and reconnect is not supported.** One
     instance drives one episode: ``connect`` once, ``observe``/``command``
-    for as many ticks as the episode runs, ``close`` once. The world clock
-    :meth:`observe` returns is monotonic for the life of the instance, and
-    the only way to get a clock back at ``t=0`` is a new instance.
+    for as many ticks as the episode runs, ``close`` once. The tick clock
+    :meth:`observe` returns strictly increases for the life of the instance,
+    and the only way to get a clock back at ``t=0`` is a new instance.
 
     That is a decision, not an omission. The episode log's reader refuses a
     record whose ``t`` goes backwards (``whiteout/log.py``), so a transport
@@ -94,10 +95,38 @@ class Transport(Protocol):
     def observe(self) -> WorldObservation:
         """Return the next tick's observation — everything in.
 
-        The transport owns the world's clock: each call returns the
-        observation for one tick and advances to the next, so
-        ``WorldObservation.t`` is the transport's, not the caller's. Raises
-        :class:`TransportError` if the link is not up.
+        The transport owns the clock: each call returns the observation for
+        one tick and advances to the next, so ``WorldObservation.t`` is the
+        transport's, not the caller's. Raises :class:`TransportError` if the
+        link is not up.
+
+        **``t`` is our decision cadence, not the world's clock, and it
+        strictly increases.** Each call is defined to serve one tick and
+        advance, so two calls that return the same ``t`` are a coordinator
+        that has stopped deciding while its calls keep returning — a fault
+        that is invisible from the outside, because the episode goes on
+        producing records. That, and not the log's ordering rule, is why the
+        conformance suite asserts a strict increase: ``whiteout/log.py``
+        accepts a repeated ``t`` and refuses only one that runs backwards, so
+        a stalled clock would cost an episode's worth of ticks and never be
+        reported.
+
+        Strictness is therefore free to an adapter, and costs nothing to
+        honour: **drive the tick from our own monotonic counter, never from
+        the far side's clock.** A sim's or an autopilot's clock is sampled,
+        may drift, and two polls of it can land on the same instant, which
+        would fail the adapter on tick one over nothing that matters to us.
+        Count ticks here and stamp them; read the far side's time only where
+        it is the answer to a different question.
+
+        That other question is fix age, and it has its own field.
+        ``Pose.t`` is the tick the pose belongs to and equals this
+        observation's ``t``; a pose whose underlying fix was taken earlier
+        says so in :attr:`~whiteout.types.Pose.measured_t`, which is
+        ``None`` when the transport does not know. Carrying the fix's own
+        time in ``Pose.t`` instead would make an observation an incoherent
+        snapshot and would silently change what every reader of ``pose.t``
+        is looking at.
         """
 
     def command(self, intent: FleetIntent) -> None:

@@ -22,6 +22,8 @@ determinism step compares.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from whiteout.transport.base import TransportError
@@ -49,20 +51,55 @@ _START_SPREAD = 500.0
 class KinematicTransport:
     """A :class:`~whiteout.transport.base.Transport` over parked assets.
 
-    ``seed`` is the episode seed; ``tick_seconds`` is how much world time one
+    ``seed`` is the episode seed; ``tick_seconds`` is how much tick time one
     :meth:`observe` advances. Both are constructor arguments rather than
     environment reads, so that a test can stand two of these up side by side.
+
+    ``pose_age_seconds`` is the third, and it is how old the fix behind each
+    pose is said to be: each pose is stamped ``measured_t = t - age``, while
+    ``t`` stays the tick it belongs to. ``None`` — the default — reports no
+    measurement time at all, which is what this stub honestly knows, since
+    its poses are drawn at ``connect`` and never move.
+
+    It is configurable because the alternative is that nothing downstream
+    ever sees a stale fix until a link to a real vehicle serves one, on the
+    one run that is judged and the one where there is no debugger. A fast,
+    offline, seeded transport that hands the policy a two-second-old fix on
+    demand is the only place that path can be exercised cheaply.
+
+    An age may exceed the elapsed tick time, so early ticks report a
+    ``measured_t`` before the clock's zero. That is left alone rather than
+    clamped: clamping would report those fixes as fresher than they are,
+    which is the wrong answer in exactly the shape that is hard to notice.
     """
 
-    def __init__(self, seed: int = 0, tick_seconds: float = DEFAULT_TICK_SECONDS) -> None:
+    def __init__(
+        self,
+        seed: int = 0,
+        tick_seconds: float = DEFAULT_TICK_SECONDS,
+        pose_age_seconds: float | None = None,
+    ) -> None:
         if seed < 0:
             # The backstop behind the CLI's own check: `np.random.default_rng`
             # rejects a negative seed with an eight-frame numpy traceback, and
             # #25's episode loop will construct transports without going
             # through argparse. The seam's own error type, either way.
             raise TransportError(f"kinematic transport: seed {seed} is negative")
+        if pose_age_seconds is not None:
+            pose_age_seconds = float(pose_age_seconds)
+            if not math.isfinite(pose_age_seconds) or pose_age_seconds < 0.0:
+                # A negative age would stamp a fix taken *after* the tick it
+                # arrived in, and a non-finite one cannot be written to an
+                # episode log at all. Both are caller mistakes; refusing here
+                # names the argument instead of producing poses that fail the
+                # seam's conformance suite several calls later.
+                raise TransportError(
+                    f"kinematic transport: pose_age_seconds {pose_age_seconds} "
+                    f"is not a finite, non-negative number of seconds"
+                )
         self._seed = seed
         self._tick_seconds = float(tick_seconds)
+        self._pose_age_seconds = pose_age_seconds
         self._connected = False
         self._closed = False
         self._t = 0.0
@@ -125,6 +162,7 @@ class KinematicTransport:
         """Return this tick's parked fleet, and advance the clock."""
         self._require_connected("observe")
         t = self._t
+        measured_t = None if self._pose_age_seconds is None else t - self._pose_age_seconds
         poses = tuple(
             Pose(
                 asset_id=pose.asset_id,
@@ -136,6 +174,7 @@ class KinematicTransport:
                 heading=pose.heading,
                 speed=pose.speed,
                 energy_used=pose.energy_used,
+                measured_t=measured_t,
             )
             for pose in self._poses
         )

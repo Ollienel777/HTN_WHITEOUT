@@ -603,6 +603,55 @@ def test_the_stub_reports_static_poses_and_an_advancing_clock() -> None:
     assert all(pose.t == second.t for pose in second.poses)
 
 
+def test_the_stub_reports_no_measurement_time_unless_it_is_asked_to() -> None:
+    """The honest default: parked poses drawn at connect know nothing of fixes."""
+    transport = KinematicTransport(seed=3)
+    transport.connect()
+    for _tick in range(3):
+        assert all(pose.measured_t is None for pose in transport.observe().poses)
+    transport.close()
+
+
+def test_a_configured_pose_age_stamps_every_pose_behind_its_tick() -> None:
+    """The staleness-correction path, exercisable offline and at speed.
+
+    Without this the first stale fix anything downstream sees arrives from a
+    link to a real vehicle, on the one run that is judged. ``t`` stays the
+    tick; the age travels in ``measured_t``.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=0.5, pose_age_seconds=2.0)
+    transport.connect()
+    for tick in range(4):
+        observation = transport.observe()
+        assert observation.t == 0.5 * tick
+        for pose in observation.poses:
+            assert pose.t == observation.t, "the tick is still the tick"
+            assert pose.measured_t == pytest.approx(observation.t - 2.0)
+    transport.close()
+
+
+def test_a_pose_age_of_zero_is_not_the_same_as_no_pose_age() -> None:
+    """``0.0`` is a claim that the fix is this tick's; ``None`` is no claim."""
+    transport = KinematicTransport(seed=3, pose_age_seconds=0.0)
+    transport.connect()
+    observation = transport.observe()
+    transport.close()
+    assert all(pose.measured_t == pose.t for pose in observation.poses)
+    assert all(pose.measured_t is not None for pose in observation.poses)
+
+
+def test_an_unusable_pose_age_is_refused_by_the_transport() -> None:
+    """A negative age is a fix from the future; a non-finite one cannot be logged.
+
+    Refused at construction, naming the argument, rather than producing
+    poses that breach the seam's conformance suite several calls later.
+    """
+    for age in (-0.5, float("nan"), float("inf")):
+        with pytest.raises(TransportError) as raised:
+            KinematicTransport(seed=3, pose_age_seconds=age)
+        assert "pose_age_seconds" in str(raised.value)
+
+
 def test_the_stub_is_a_pure_function_of_its_seed() -> None:
     def first_observation(seed: int) -> tuple[tuple[float, float], ...]:
         transport = KinematicTransport(seed=seed)

@@ -199,6 +199,19 @@ def _optional_str(payload: Mapping[str, Any], where: str, name: str) -> str | No
     return _str(payload, where, name)
 
 
+def _optional_float(payload: Mapping[str, Any], where: str, name: str) -> float | None:
+    """``null`` or a number. ``null`` is a value here, never a missing key.
+
+    :func:`_check_keys` still requires the key, so an omitted field is a
+    rejected record and not a silent ``None`` — the difference between a
+    transport that says it has no measurement time and a writer that forgot
+    the field.
+    """
+    if payload[name] is None:
+        return None
+    return _float(payload, where, name)
+
+
 def _bool(payload: Mapping[str, Any], where: str, name: str) -> bool:
     value = payload[name]
     if not isinstance(value, bool):
@@ -260,6 +273,26 @@ class Pose:
     ``cls`` is the vehicle class, one of :data:`VEHICLE_CLASSES`;
     ``energy_used`` is cumulative over the episode and is what the efficiency
     axis of the scorer consumes.
+
+    **``t`` is the tick this pose belongs to, not when the fix was taken.**
+    A pose is part of a :class:`WorldObservation`, and an observation is a
+    coherent snapshot: ``pose.t == observation.t``, which the transport
+    conformance suite asserts as an equality. Every consumer already reading
+    ``pose.t`` reads it as the tick, and relaxing that would leave the field,
+    its type and its plausible value unchanged while changing its meaning —
+    the error class ``SPEC.md`` §4 records as the one we cannot detect.
+
+    ``measured_t`` is where the other question goes. A link to a real vehicle
+    serves a fix that was taken some time before the tick it lands in, and
+    ``measured_t`` is when: it is ``<= t``, and ``t - measured_t`` is the age
+    of the fix. It may be negative, for a fix taken before the episode clock's
+    zero.
+
+    **``None`` means "this transport does not report a measurement time"**,
+    and it is the default. A consumer that wants fix age must handle ``None``
+    explicitly, because there is no number that would be honest here: a
+    default of ``t`` would make an adapter that never sets the field report
+    every fix as zero seconds old — plausible, wrong, and invisible.
     """
 
     asset_id: str
@@ -271,9 +304,12 @@ class Pose:
     heading: float
     speed: float
     energy_used: float
+    measured_t: float | None = None
 
     def __post_init__(self) -> None:
         _as_floats(self, "t", "x", "y", "z", "heading", "speed", "energy_used")
+        if self.measured_t is not None:
+            _as_floats(self, "measured_t")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_json_dict(self)
@@ -292,6 +328,7 @@ class Pose:
             heading=_float(data, where, "heading"),
             speed=_float(data, where, "speed"),
             energy_used=_float(data, where, "energy_used"),
+            measured_t=_optional_float(data, where, "measured_t"),
         )
 
 

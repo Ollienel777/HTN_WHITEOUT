@@ -247,17 +247,27 @@ def check_connect_is_idempotent_while_the_link_is_up(factory: TransportFactory) 
 
 
 def check_the_tick_clock_is_monotonic(factory: TransportFactory) -> None:
-    """Every ``observe`` advances the world clock, and never turns it back.
+    """Every ``observe`` advances the tick clock, and never turns it back.
 
-    ``whiteout/transport/base.py`` makes each ``observe`` return one tick and
-    "advance to the next", so a clock that stands still is not serving ticks
-    even while the calls keep returning — which is why the assertion below is
-    a strict increase rather than merely non-decreasing.
+    The assertion below is a strict increase, and neither of the rules it
+    sits next to is the reason. ``whiteout/transport/base.py`` says the clock
+    is monotonic, which admits equality; ``whiteout/log.py`` accepts a
+    repeated ``t`` and refuses only one that runs backwards. The reason is
+    what ``t`` *is*: **the tick is our decision cadence, not the world's
+    clock.** ``observe`` is defined to serve one tick and advance, so a tick
+    that stands still is a coordinator that has stopped deciding while its
+    calls keep returning — a fault with no other symptom, because the
+    episode goes on producing records.
 
-    A clock that goes *backwards* costs more than the tick: ``whiteout/log.py``
-    refuses a record whose ``t`` is less than the previous one, so a transport
-    that rewound would lose the whole episode at write time rather than report
-    the fault where it happened. A repeated ``t`` the log does accept.
+    So strictness here is deliberate, and it costs an adapter nothing:
+    ``base.py`` requires the tick to come from the adapter's own monotonic
+    counter and never from the far side's clock, which may be sampled, may
+    drift, and can return the same instant twice.
+
+    A clock that goes *backwards* costs more than the tick: the log refuses a
+    record whose ``t`` is less than the previous one, so a transport that
+    rewound would lose the whole episode at write time rather than report the
+    fault where it happened.
     """
     with _connected(factory) as transport:
         where = _name(transport)
@@ -316,6 +326,12 @@ def check_silence_is_not_a_fault_and_every_report_is_attributable(
                 f"{where} tick {tick}: two poses for one asset in {assets}"
             )
             for pose in observation.poses:
+                # An equality, not `<=`. `Pose.t` is the tick the pose
+                # belongs to, so an observation is a coherent snapshot; a
+                # fix taken earlier says so in `measured_t`, which the next
+                # check owns. Relaxing this would leave the field, its type
+                # and its value plausible while changing what every reader
+                # of `pose.t` is looking at.
                 assert pose.t == observation.t, (
                     f"{where} tick {tick}: pose {pose.asset_id} is stamped t={pose.t} "
                     f"in an observation at t={observation.t}"
@@ -328,6 +344,53 @@ def check_silence_is_not_a_fault_and_every_report_is_attributable(
                 assert report.t == observation.t, (
                     f"{where} tick {tick}: a report from {report.asset_id} stamped "
                     f"t={report.t} in an observation at t={observation.t}"
+                )
+
+
+def check_a_reported_measurement_time_is_finite_and_never_after_its_tick(
+    factory: TransportFactory,
+) -> None:
+    """A fix is taken before the tick it lands in, or the transport says nothing.
+
+    ``Pose.t`` is the tick the pose belongs to and equals the observation's
+    ``t``, which the check above asserts. When the underlying fix was taken
+    earlier — the ordinary case on a link to a real vehicle — the transport
+    reports when in ``measured_t``, and ``t - measured_t`` is the age a
+    consumer corrects for.
+
+    ``measured_t`` is ``None`` when the transport does not know, and ``None``
+    is not a breach: it is the honest answer, and the reason the field does
+    not default to ``t``. What is asserted is only about a transport that
+    *does* answer. A ``measured_t`` after its tick is a fix from the future,
+    which a staleness correction would read as a negative age; a non-finite
+    one cannot be written to an episode log at all (``whiteout/log.py``) and
+    would silently poison any arithmetic done on it — ``-inf`` in particular
+    satisfies ``<= t`` and would otherwise pass here.
+
+    **A plausible measurement time is not a true one.** Nothing crosses this
+    seam to say when a fix was really taken, so a transport that stamps every
+    pose one tick old passes. What is caught is the incoherent answer.
+    """
+    with _connected(factory) as transport:
+        where = _name(transport)
+        for tick in range(TICKS):
+            with _accepts(transport, f"observe() on tick {tick}"):
+                observation = transport.observe()
+            for pose in observation.poses:
+                measured_t = pose.measured_t
+                if measured_t is None:
+                    continue
+                assert isinstance(measured_t, float), (
+                    f"{where} tick {tick}: pose {pose.asset_id} reports "
+                    f"measured_t={measured_t!r}, not a float"
+                )
+                assert math.isfinite(measured_t), (
+                    f"{where} tick {tick}: pose {pose.asset_id} reports "
+                    f"measured_t={measured_t!r}"
+                )
+                assert measured_t <= pose.t, (
+                    f"{where} tick {tick}: pose {pose.asset_id} was measured at "
+                    f"t={measured_t}, after the tick it is stamped at, t={pose.t}"
                 )
 
 
@@ -507,6 +570,7 @@ CONFORMANCE_CHECKS: tuple[Callable[[TransportFactory], None], ...] = (
     check_connect_is_idempotent_while_the_link_is_up,
     check_the_tick_clock_is_monotonic,
     check_silence_is_not_a_fault_and_every_report_is_attributable,
+    check_a_reported_measurement_time_is_finite_and_never_after_its_tick,
     check_command_is_accepted_for_every_tick,
     check_close_mid_episode_ends_the_episode,
     check_connect_after_close_refuses_rather_than_rewinding,
