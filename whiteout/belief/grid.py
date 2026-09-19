@@ -51,13 +51,32 @@ The vessel spawns at random and walks at random, with no evasion (``ARENA.md``
 convenient one — there is no adversary to model — and it makes the rate the
 only thing to choose.
 
-**Speed.** The operator measured the live target at **2.96 m/s on course
-304.5°**. That is one observation of one moment, so it sets the scale but not
-the value: :data:`DEFAULT_SPEED_MPS` is **4.0 m/s**, about 35 % above it. The
-asymmetry is deliberate. Diffusing too fast costs a little sharpness, which
-the next detection restores; diffusing too slowly leaves belief concentrated
-where the vessel no longer is, the fleet stops looking anywhere else, and
-nothing restores it.
+**Speed.** :data:`DEFAULT_SPEED_MPS` is **4.0 m/s**. Two numbers bear on it,
+and neither settles it:
+
+- **2.96 m/s on course 304.5°** — the operator's reading off the live sim,
+  reported verbally during the build. It is **not recorded anywhere in this
+  repository**, so no later reader can check it; it is cited here as what it
+  is, a single unverifiable observation of a single moment.
+- **``speed: 6.5``**, in ``ARENA.md`` §5. That is the example body of a
+  ``POST /api/tracks`` update, illustrating the submission format, and the
+  units are not stated anywhere. It is not presented as a measurement of the
+  target.
+
+The asymmetry argument for sitting *above* an observation is real — diffusing
+too fast costs a little sharpness, which the next detection restores, while
+diffusing too slowly leaves belief concentrated where the vessel no longer is,
+the fleet stops looking anywhere else, and nothing restores it. **But that
+argument does not hold against 6.5.** If ``ARENA.md``'s 6.5 is metres per
+second, then 4.0 is *below* the only speed in merged ground truth, the field
+under-diffuses by ``(6.5/4.0)² = 2.6×`` in variance, and this is precisely the
+unrecoverable failure that paragraph warns about. 4.0 is conservative against
+2.96 and optimistic against 6.5, and which of those is the vessel is not
+resolved here.
+
+The constructor takes ``speed_mps``, so the resolution is one argument away
+once someone reads a real speed off the sim. Until then a caller that has
+reason to trust 6.5 should pass it.
 
 **Heading persistence.** A boat is not a Brownian particle: it holds a course
 for a while. With speed ``v`` and a heading that decorrelates over a time
@@ -75,17 +94,23 @@ so the variance a tick of length ``dt`` adds to each axis is
     \\sigma^2 = 2 D\\, dt = v^2 \\tau\\, dt
     = 4.0^2 \\times 30 \\times 1.0 = 480\\ \\mathrm{m^2}
 
-**The number, stated: σ = 21.9 m per axis per 1 s tick.** Equivalently 69 m
+**The number, stated: σ = 21.9 m per axis per 1 s tick.** Equivalently 170 m
 after a minute, 537 m after ten minutes, and 1.3 km after an hour — at which
 point belief is smeared over a tenth of the strait and the field is doing what
-it should.
+it should. ``tests/test_belief_grid.py`` asserts all four of those figures
+against the arithmetic *and* against this docstring's own text, so neither can
+drift from the other.
 
-The choice of ``tau`` is what makes that defensible rather than tuned, because
-it has a check: after exactly one persistence time the diffused spread is
-``sqrt(v² tau × tau) = v tau = 120 m``, which is how far the vessel actually
-travels in 30 s while holding a course. The kernel and the ballistic
-displacement agree at the timescale the kernel is built for, and
-``tests/test_belief_grid.py`` asserts that equality to 5 %.
+``tau`` itself is a **judgement call and not a derivation**, and an earlier
+version of this docstring claimed otherwise. The claimed check was that after
+one persistence time the diffused spread is ``sqrt(v² tau × tau) = v tau``,
+the distance the vessel covers in ``tau`` while holding a course. That is an
+algebraic identity — ``sigma(t) = sqrt(v² tau t)`` gives ``sigma(tau) = v tau``
+for *every* ``tau``, 1 s or 3000 s — so it agrees with itself at any value and
+constrains nothing. 30 s is a plausible course-holding time for a small boat
+in a 2 km channel, chosen and stated, not measured. What the test that asserts
+it still does is check that the *implemented operator* reaches the analytic
+variance, which is worth having on its own terms.
 
 **What this rate does not model**, stated because it is the way it fails: a
 vessel that holds one course for many minutes outruns a diffusion, whose
@@ -147,13 +172,15 @@ DEFAULT_ALONG_M = 100.0
 #: Cell size across the channel, metres. 20 cells over the 2 km width.
 DEFAULT_ACROSS_M = 100.0
 
-#: Vessel speed scale for the diffusion, m/s. The operator measured the live
-#: target at 2.96 m/s on course 304.5°; see the module docstring for why the
-#: prior sits above a single observation rather than on it.
+#: Vessel speed scale for the diffusion, m/s. Above the operator's verbally
+#: reported 2.96 m/s, below ``ARENA.md`` §5's unit-less ``speed: 6.5``; see
+#: the module docstring, which states plainly that this is conservative
+#: against the first and optimistic against the second.
 DEFAULT_SPEED_MPS = 4.0
 
 #: Heading decorrelation time, seconds. A boat holds a course; this is how
-#: long for. Together with the speed it fixes the diffusion coefficient.
+#: long for. Together with the speed it fixes the diffusion coefficient. A
+#: stated judgement call, not a derived number — see the module docstring.
 DEFAULT_HEADING_PERSISTENCE_S = 30.0
 
 #: One-sigma position error of a camera fix, metres. From PR #72's measured
@@ -389,11 +416,32 @@ class ChannelBeliefGrid:
         ``A``.
 
         **Both branches are normalised, and that is load-bearing**, even
-        though only ratios of ``L`` survive the renormalisation. Dropping the
-        Gaussian's ``1 / 2 \\pi \\sigma^2`` would make a *tighter* fix carry
-        *less* total evidence than a loose one, because the flat branch would
-        then outweigh a narrow bump — so a 50 m fix would move the field less
-        than a 400 m one, which is backwards.
+        though only ratios of ``L`` survive the renormalisation. What it buys
+        is that ``q`` means what it says: each branch integrates to its own
+        weight over the water, so the false-alarm branch keeps exactly ``q``
+        of the posterior mass away from the fix — 2 % here — **whatever
+        ``sigma_m`` is**. That is the property
+        ``test_the_false_alarm_floor_keeps_its_stated_share_at_any_sigma``
+        pins, and it is what makes ``false_alarm_rate`` a dial a caller can
+        reason about rather than a number whose effect depends on the fix's
+        precision.
+
+        Drop the ``1 / 2 \\pi \\sigma^2`` and the bump's integral becomes
+        proportional to ``sigma^2``, so the floor's share of the posterior
+        falls away with the square of the error — measured on a straight
+        channel at 100 m resolution, the mass more than five sigma from the
+        fix goes from 0.0199 (sigma 150 m) and 0.0190 (sigma 400 m) to
+        2e-6 and 4e-6. The floor stops being a 2 % floor and becomes nothing.
+
+        An earlier version of this docstring gave a different reason: that
+        without the constant a *tighter* fix would carry *less* evidence than
+        a loose one, "so a 50 m fix would move the field less than a 400 m
+        one". **That is false and is not why the constant is here.** Measured
+        under exactly that mutation, the tight fix concentrates 57× harder,
+        not less (mass at the fix 0.618 at sigma 50 m against 0.011 at
+        sigma 400 m): unnormalised, the bump peaks at ``1 - q`` = 0.98 while
+        the floor is ``q / A`` = 5.0e-10, and no area a real strait could have
+        closes thirteen orders of magnitude.
 
         Without the flat branch at all, a single frame would drive every cell
         more than a few sigma away to a likelihood of ``1e-300`` and then to
@@ -466,10 +514,25 @@ class ChannelBeliefGrid:
         self._p[self._rows, self._columns] = posterior / total
 
     def _cell_of(self, lat_deg: float, lon_deg: float) -> tuple[int, int] | None:
-        """Indices of the water cell containing a position, or None."""
+        """Indices of the water cell containing a position, or None.
+
+        The end-of-strait guard is the same one
+        :meth:`StraitGeometry.is_water` applies, and it has to be repeated
+        here rather than left to the index bounds. ``to_channel`` clamps
+        ``s`` into ``[0, length]`` and measures ``w`` against the nearest
+        *segment's line*, so a position anywhere off the western mouth comes
+        back as ``s = 0``, ``w ≈ 0`` however far away it is — inside row 0 and
+        inside a water column. The eastern end escapes only because ``s``
+        clamps to exactly ``length_m`` and ``row == n_along`` fails the bound;
+        that is luck, not a guard. Without this line ``probability_at`` and
+        ``is_water`` disagree about the same position, and the policy reaches
+        the field through the first one.
+        """
         if not (math.isfinite(float(lat_deg)) and math.isfinite(float(lon_deg))):
             return None
         point = self._geometry.to_channel(float(lat_deg), float(lon_deg))
+        if point.s_m <= 0.0 or point.s_m >= self._geometry.length_m:
+            return None
         row = int(math.floor(point.s_m / self._along_step))
         column = int(math.floor((point.w_m + self._half_extent) / self._across_step))
         n_along, n_across = self.shape

@@ -327,9 +327,27 @@ class StraitGeometry:
 
 #: Bellot Strait, as a four-vertex ribbon. A parameterisation of ``ARENA.md``
 #: §2's "25 km × 2 km … near Fort Ross", **not a survey** — see the module
-#: docstring. The half-widths taper from 1 km at each mouth to 520 m at the
-#: narrows, which is what makes the shoreline a real constraint on diffusion
-#: rather than a box the grid never touches.
+#: docstring.
+#:
+#: **It guesses narrow, which is the direction that cannot be recovered
+#: from.** ARENA states one width, 2 km. These half-widths taper from 1 km at
+#: each mouth to 520 m at the narrows, a mean width of 1.59 km and 1.04 km at
+#: the choke. Because ``_water`` is boolean, water this parameterisation
+#: excludes is not merely unlikely — it is unreachable: belief there is
+#: identically zero, ``probability_at`` returns 0, ``peak()`` can never report
+#: it, and a vessel at ``|w| = 600`` m near the narrows is pulled up to 480 m
+#: toward the centreline in the position submitted to ``POST /api/tracks``.
+#: Guessing wide only costs cells. Until someone clicks a real shoreline off
+#: the sim, a flat 1000 m half-width would match the one stated fact and err
+#: the safe way; that change moves the water-cell count, the water area and
+#: the ribbon-vs-raster table in ``grid.py``, and leaves the default grid with
+#: no land in it at all, so it is left for the human to call rather than taken
+#: here.
+#:
+#: The taper is *not* here to make the shoreline bite in the tests, whatever
+#: an earlier version of this comment said: every shoreline test builds its
+#: own ``choked_channel()`` with a matched control, and only
+#: ``test_the_default_mask_has_land_in_it`` touches this geometry's mask.
 DEFAULT_STRAIT = StraitGeometry(
     vertices=(
         ChannelVertex(lat_deg=71.9860, lon_deg=-95.2023, half_width_m=1000.0),

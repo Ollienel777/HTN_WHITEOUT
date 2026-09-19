@@ -14,7 +14,13 @@ this protocol is not just three accessors. Issue #13's negative-information
 update has to multiply the field by "how likely is it that a camera pointed
 *there* saw nothing?", cell by cell, and it must be able to do that without
 knowing that cells exist. A callable from a position to a likelihood is that,
-exactly, and :meth:`update_detection` is implemented in terms of it.
+exactly, and :meth:`update_detection` is the same likelihood specialised: it
+builds the identical weights vectorised and hands them to the same
+multiply-and-renormalise step. It does **not** call
+:meth:`update_likelihood`, so the per-cell finite/non-negative validation on
+that path does not guard detections;
+``test_update_likelihood_is_the_general_seam`` is what holds the two to the
+same answer.
 """
 
 from __future__ import annotations
@@ -49,9 +55,19 @@ class BeliefPeak:
     ``probability`` is the *mass* of the single most probable region, not a
     density, so it is a number in ``[0, 1]`` a threshold can be written
     against. It does depend on how finely the field is resolved — a finer
-    field divides the same belief into smaller pieces — so two fields of
-    different resolution are compared by :meth:`BeliefField.entropy`, not by
-    this.
+    field divides the same belief into smaller pieces — so a threshold written
+    against it is a threshold written against one resolution.
+
+    **:meth:`BeliefField.entropy` is not the way around that**, and an earlier
+    version of this docstring said it was. Discrete Shannon entropy carries a
+    ``log N`` term, so it moves with resolution at least as much: the same
+    posterior on the default strait measures 0.774 nats at 400 m cells, 3.836
+    at 100 m and 5.221 at 50 m. Both numbers on this protocol are
+    resolution-dependent, there is no resolution-independent comparator here
+    yet, and a policy that hard-codes a threshold against either is coupled to
+    the field's internals through the back door. Normalising entropy by
+    ``log(water_cells)``, or reporting a credible interval in metres, would be
+    one; #13 and #14 should ask for it rather than assume it.
     """
 
     lat_deg: float

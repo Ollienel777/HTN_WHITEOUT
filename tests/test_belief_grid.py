@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import whiteout.belief.grid as grid_module
 from whiteout.belief import (
     DEFAULT_STRAIT,
     BeliefError,
@@ -28,7 +29,7 @@ from whiteout.belief import (
     GeometryError,
     StraitGeometry,
 )
-from whiteout.belief.geometry import enu_from_geodetic
+from whiteout.belief.geometry import enu_from_geodetic, geodetic_from_enu
 from whiteout.belief.grid import (
     DEFAULT_FALSE_ALARM_RATE,
     DEFAULT_HEADING_PERSISTENCE_S,
@@ -106,6 +107,28 @@ def cell_position(grid: ChannelBeliefGrid, row: int, column: int) -> tuple[float
         w_m=float(grid.across_centres_m()[column]),
     )
     return grid.geometry.to_geodetic(point)
+
+
+def beyond_the_mouth(geometry: StraitGeometry, metres: float) -> tuple[float, float]:
+    """A position ``metres`` off one end of the centreline, on its axis.
+
+    Negative ``metres`` walks west off vertex 0, positive walks east off the
+    last vertex. This is the construction ``to_channel`` cannot distinguish
+    from the mouth itself: it clamps ``s`` to the segment and measures ``w``
+    against the segment's infinite line, so every one of these comes back as
+    ``w ≈ 0`` at ``s = 0`` or ``s = length_m``, however far out it is.
+    """
+    vertices = geometry.vertices
+    if metres < 0.0:
+        first, second = vertices[1], vertices[0]
+    else:
+        first, second = vertices[-2], vertices[-1]
+    ax, ay = enu_from_geodetic(first.lat_deg, first.lon_deg)
+    bx, by = enu_from_geodetic(second.lat_deg, second.lon_deg)
+    span = math.hypot(bx - ax, by - ay)
+    ux, uy = (bx - ax) / span, (by - ay) / span
+    distance = abs(metres)
+    return geodetic_from_enu(bx + distance * ux, by + distance * uy)
 
 
 def along_marginal(grid: ChannelBeliefGrid) -> np.ndarray:
@@ -231,12 +254,31 @@ def test_mass_is_one_after_every_kind_of_update() -> None:
 
 
 def test_diffusion_conserves_mass_without_renormalising() -> None:
-    """The operator itself must not leak: 5000 ticks, no correction applied."""
-    grid = ChannelBeliefGrid(straight_channel())
-    seed(grid, grid.shape[0] // 2, grid.shape[1] // 2)
-    for _ in range(5_000):
-        grid.diffuse(1.0)
-    assert grid.mass() == pytest.approx(1.0, abs=MASS_TOLERANCE)
+    """The operator itself must not leak: 5000 ticks, no correction applied.
+
+    **The seed has to be off-centre**, and that is not a detail. On an
+    all-water channel the along-axis fluxes in a column telescope to
+    ``p_first - p_last``, so a seed at exactly ``shape[0] // 2`` of a
+    symmetric grid makes the net flux identically zero — and a leak
+    proportional to it stays zero too. Seeded in the middle, this test passed
+    under a 1 % flux leak (mass 1.0000000000000004 after 5000 leaky ticks):
+    the module's headline test was blind to the exact failure it exists to
+    catch. The choked channel is here for the same reason from the other
+    direction — an asymmetric shoreline gives the telescoping nothing to
+    cancel against.
+    """
+    for geometry, row_divisor, column_divisor in (
+        (straight_channel(), 3, 3),
+        (choked_channel(), 4, 3),
+    ):
+        grid = ChannelBeliefGrid(geometry)
+        row, column = grid.shape[0] // row_divisor, grid.shape[1] // column_divisor
+        assert grid.water_mask()[row, column]
+        assert row != grid.shape[0] // 2
+        seed(grid, row, column)
+        for _ in range(5_000):
+            grid.diffuse(1.0)
+        assert grid.mass() == pytest.approx(1.0, abs=MASS_TOLERANCE)
 
 
 # --------------------------------------------------------------------------
@@ -293,12 +335,31 @@ def test_diffusion_does_not_cross_the_lateral_shoreline() -> None:
     assert float(control.probabilities()[narrow_row, outermost + 1]) > 0.05
 
 
-def test_no_mass_escapes_the_ends_of_the_strait() -> None:
+def test_the_ends_of_the_strait_reflect_rather_than_absorb() -> None:
+    """Mass staying at 1.0 is not evidence about the ends.
+
+    This test used to assert only that, which
+    ``test_diffusion_conserves_mass_without_renormalising`` already asserts:
+    deleting the end faces entirely would not have failed it unless the total
+    also moved. So assert the behaviour a no-flux boundary actually has —
+    belief **piles up** against the wall. A free Gaussian of spread ``σ`` puts
+    ``cell / (sqrt(2 π) σ)`` in the cell at its centre; reflection at a wall
+    one half-cell away folds the missing half back on top of it, so the row
+    against the end carries twice that.
+    """
     grid = ChannelBeliefGrid(straight_channel())
-    seed(grid, 0, grid.shape[1] // 2)
+    column = grid.shape[1] // 2
+    seed(grid, 0, column)
+    seconds = 200 * 10.0
     for _ in range(200):
         grid.diffuse(10.0)
     assert grid.mass() == pytest.approx(1.0, abs=MASS_TOLERANCE)
+
+    sigma = math.sqrt(DEFAULT_SPEED_MPS**2 * DEFAULT_HEADING_PERSISTENCE_S * seconds)
+    step = float(grid.along_centres_m()[1] - grid.along_centres_m()[0])
+    assert sigma > 5.0 * step  # the wall is well inside the spread
+    free_peak = step / (math.sqrt(2.0 * math.pi) * sigma)
+    assert float(along_marginal(grid)[0]) == pytest.approx(2.0 * free_peak, rel=0.05)
 
 
 def test_a_detection_never_puts_mass_on_land() -> None:
@@ -329,13 +390,57 @@ def test_the_stated_diffusion_number() -> None:
     assert math.sqrt(variance_per_tick) == pytest.approx(21.9, abs=0.05)
 
 
-def test_spread_after_one_persistence_time_matches_the_vessels_travel() -> None:
-    """The check that makes the rate a derivation rather than a taste.
+def test_every_diffusion_figure_the_docstring_states() -> None:
+    """The acceptance criterion is "with the number stated", so check the words.
 
-    A vessel holding one course for ``tau`` seconds travels ``v tau`` = 120 m.
-    The diffusion's spread after the same ``tau`` is ``sqrt(v² tau × tau)``,
-    the same 120 m. The kernel and the thing it models agree at the timescale
-    the kernel is built for.
+    ``grid.py``'s docstring states four spreads — 21.9 m at 1 s, 170 m at a
+    minute, 537 m at ten minutes, 1.3 km at an hour. Three of them had a test
+    behind them and the one-minute figure did not; it read 69 m, which is
+    ``sqrt(480 × 60)`` = 169.7 m with the leading 1 dropped, and a reader
+    sizing a search box off it sized it 2.5× too small.
+
+    So this asserts the arithmetic *and* that the prose still says it. The
+    second half is the part that catches the next dropped digit: the numbers
+    live in exactly one place, and it is a place no test could previously see.
+    """
+    docstring = grid_module.__doc__
+    assert docstring is not None
+
+    def sigma(seconds: float) -> float:
+        return math.sqrt(DEFAULT_SPEED_MPS**2 * DEFAULT_HEADING_PERSISTENCE_S * seconds)
+
+    assert sigma(1.0) == pytest.approx(21.9, abs=0.05)
+    assert sigma(60.0) == pytest.approx(169.7, abs=0.05)
+    assert sigma(600.0) == pytest.approx(536.7, abs=0.05)
+    assert sigma(3600.0) == pytest.approx(1314.5, abs=0.05)
+
+    for stated in (
+        "σ = 21.9 m per axis per 1 s tick",
+        "170 m\nafter a minute",
+        "537 m after ten minutes",
+        "1.3 km after an hour",
+    ):
+        assert stated in docstring, stated
+
+    # and the operator reaches the one-minute figure, not just the algebra.
+    grid = ChannelBeliefGrid(straight_channel(), along_m=100.0, across_m=200.0)
+    seed(grid, grid.shape[0] // 2, grid.shape[1] // 2)
+    grid.diffuse(60.0)
+    assert along_std_m(grid) == pytest.approx(169.7, rel=0.03)
+
+
+def test_the_diffusion_reaches_its_analytic_spread_after_one_persistence_time() -> None:
+    """What this is, and what it is not.
+
+    It is a check that the implemented operator reaches the analytic variance
+    ``v² tau t`` at ``t = tau``: 30 one-second ticks of the real flux-form
+    kernel land within 5 % of 120 m.
+
+    It is **not** evidence for ``tau`` = 30 s, though the docstring used to
+    claim it was. ``sigma(t) = sqrt(v² tau t)`` makes ``sigma(tau) = v tau``
+    an identity at every ``tau`` — 1 s, 30 s, 3000 s all "agree with the
+    vessel's travel" — so the equality cannot distinguish the chosen value
+    from any other. ``tau`` is a stated judgement call; see ``grid.py``.
     """
     grid = ChannelBeliefGrid(straight_channel(), along_m=100.0, across_m=200.0)
     seed(grid, grid.shape[0] // 2, grid.shape[1] // 2)
@@ -492,6 +597,47 @@ def test_the_detection_likelihood_matches_the_documented_formula() -> None:
     assert ratio == pytest.approx(expected, rel=1e-9)
 
 
+def test_the_false_alarm_floor_keeps_its_stated_share_at_any_sigma() -> None:
+    """Why both branches of the likelihood are normalised densities.
+
+    ``L(d) = (1 - q) N(d; σ) + q / A`` with both branches integrating to their
+    own weight, so the false-alarm branch keeps exactly ``q`` of the posterior
+    away from the fix **whatever σ is**. That is what makes ``q`` a mixture
+    weight a caller can reason about, and it is the whole reason the
+    ``1 / 2 π σ²`` is there.
+
+    Drop the constant and the bump's integral scales as ``σ²``, so the floor's
+    share collapses and varies with the fix's precision: measured under
+    exactly that mutation, the mass beyond five sigma falls from 0.0199 to
+    2e-6 at σ = 150 m and from 0.0190 to 4e-6 at σ = 400 m.
+
+    The test this replaces as M9's evidence,
+    ``test_a_tighter_sigma_concentrates_harder``, **passes** under that
+    mutation — unnormalised, a tight fix concentrates 57× harder, not less.
+    A wide, straight channel is used so the Gaussian is not clipped by a
+    shoreline or by the ends, which is what makes the integral come out at 1.
+    """
+    geometry = straight_channel()
+    shares = []
+    for sigma in (150.0, 400.0):
+        grid = ChannelBeliefGrid(geometry, along_m=100.0, across_m=200.0)
+        row, column = grid.shape[0] // 2, grid.shape[1] // 2
+        # Straight channel: (s, w) is Cartesian, so this distance is exact.
+        s_centres = grid.along_centres_m()
+        w_centres = grid.across_centres_m()
+        distance = np.hypot(
+            (s_centres - s_centres[row])[:, None],
+            (w_centres - w_centres[column])[None, :],
+        )
+        assert distance.max() > 6.0 * sigma  # the far region is not empty
+        grid.update_detection(*cell_position(grid, row, column), sigma_m=sigma)
+        shares.append(float(grid.probabilities()[distance > 5.0 * sigma].sum()))
+
+    for share in shares:
+        assert share == pytest.approx(DEFAULT_FALSE_ALARM_RATE, rel=0.1)
+    assert shares[1] == pytest.approx(shares[0], rel=0.1)
+
+
 def test_a_tighter_sigma_concentrates_harder() -> None:
     loose = ChannelBeliefGrid()
     tight = ChannelBeliefGrid()
@@ -537,6 +683,71 @@ def test_probability_at_is_zero_off_the_water() -> None:
     on_land = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=12_500.0, w_m=950.0))
     assert not DEFAULT_STRAIT.is_water(*on_land)
     assert grid.probability_at(*on_land) == 0.0
+
+
+def test_probability_at_is_zero_off_both_ends_of_the_strait() -> None:
+    """The case the lat/lon column bound cannot catch.
+
+    ``(0.0, 0.0)`` above is rejected because its ``w`` is about 8000 km, so it
+    fails the *column* test and says nothing about the ends. A position due
+    west of the mouth is different: ``to_channel`` clamps ``s`` to 0 and
+    measures ``w`` against the first segment's infinite line, so it lands in
+    row 0 of a water column however far out it is, and before the guard in
+    ``_cell_of`` this returned the full uniform cell mass 200 km outside the
+    arena. The eastern end passed only because ``s`` clamps to exactly
+    ``length_m``; it is asserted here so it stops being luck.
+
+    The control is the two positions just *inside* each mouth: if the guard
+    were a blanket rejection rather than an end check, they would be zero too
+    and this test would pass for the wrong reason.
+    """
+    grid = ChannelBeliefGrid()
+    uniform_cell_mass = 1.0 / grid.water_cells
+
+    for metres in (-500.0, -5_000.0, -200_000.0, 500.0, 5_000.0, 200_000.0):
+        position = beyond_the_mouth(DEFAULT_STRAIT, metres)
+        channel = DEFAULT_STRAIT.to_channel(*position)
+        # It really does project onto an end of the centreline, on the axis.
+        assert abs(channel.w_m) < 1.0
+        assert channel.s_m in (0.0, DEFAULT_STRAIT.length_m)
+        assert not DEFAULT_STRAIT.is_water(*position)
+        assert grid.probability_at(*position) == 0.0
+
+    for s_m in (50.0, DEFAULT_STRAIT.length_m - 50.0):
+        inside = DEFAULT_STRAIT.to_geodetic(ChannelPoint(s_m=s_m, w_m=0.0))
+        assert DEFAULT_STRAIT.is_water(*inside)
+        assert grid.probability_at(*inside) == pytest.approx(uniform_cell_mass)
+
+
+def test_probability_at_and_is_water_agree_to_within_one_cell() -> None:
+    """One definition of "on water", not two — up to the mask's resolution.
+
+    ``probability_at`` is what the policy reaches through the Protocol and
+    ``is_water`` is what the geometry says; them disagreeing is how R1-C1 got
+    in. They cannot agree *exactly*: the mask is built by testing each cell's
+    **centre**, so a cell straddling the shore is water for its whole area and
+    a position up to half a cell outside the channel inherits its mass. That
+    residue is bounded by half the across-channel cell, and this asserts the
+    bound — which is the same thing as asserting that nothing outside it
+    survives, including everything off the two ends.
+    """
+    grid = ChannelBeliefGrid()
+    across_step = float(grid.across_centres_m()[1] - grid.across_centres_m()[0])
+    tolerance = 0.5 * across_step + 1e-6
+
+    wet = 0
+    for latitude in np.linspace(71.95, 72.04, 31):
+        for longitude in np.linspace(-95.60, -94.08, 61):
+            mass = grid.probability_at(float(latitude), float(longitude))
+            if mass == 0.0:
+                continue
+            wet += 1
+            channel = DEFAULT_STRAIT.to_channel(float(latitude), float(longitude))
+            assert 0.0 < channel.s_m < DEFAULT_STRAIT.length_m, (latitude, longitude)
+            overhang = abs(channel.w_m) - DEFAULT_STRAIT.half_width_at(channel.s_m)
+            assert overhang <= tolerance, (latitude, longitude, overhang)
+    # and the sweep is not vacuous: it does land on water, repeatedly.
+    assert wet > 100
 
 
 # --------------------------------------------------------------------------
