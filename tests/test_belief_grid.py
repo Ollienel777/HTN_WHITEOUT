@@ -396,27 +396,28 @@ def test_a_detection_never_puts_mass_on_land() -> None:
 
 
 def test_the_stated_diffusion_number() -> None:
-    """σ = 43.8 m per axis per 1 s tick, from v = 8.0 m/s and tau = 30 s.
+    """σ = 16.4 m per axis per 1 s tick, from v = 3.0 m/s and tau = 30 s.
 
     The module docstring states that number; this is the arithmetic behind it,
     so changing either parameter's default without restating the number fails
     here.
     """
-    assert DEFAULT_SPEED_MPS == 8.0
+    assert DEFAULT_SPEED_MPS == 3.0
     assert DEFAULT_HEADING_PERSISTENCE_S == 30.0
     variance_per_tick = DEFAULT_SPEED_MPS**2 * DEFAULT_HEADING_PERSISTENCE_S * 1.0
-    assert math.sqrt(variance_per_tick) == pytest.approx(43.8, abs=0.05)
+    assert math.sqrt(variance_per_tick) == pytest.approx(16.4, abs=0.05)
 
 
 def test_every_diffusion_figure_the_docstring_states() -> None:
     """The acceptance criterion is "with the number stated", so check the words.
 
-    ``grid.py``'s docstring states four spreads — 43.8 m at 1 s, 339 m at a
-    minute, 1.07 km at ten minutes, 2.6 km at an hour. Three of them had a
-    test behind them and the one-minute figure did not; at the earlier
-    ``v`` = 4.0 it read 69 m, which is ``sqrt(480 × 60)`` = 169.7 m with the
-    leading 1 dropped, and a reader sizing a search box off it sized it 2.5×
-    too small.
+    ``grid.py``'s docstring states four spreads — 16.4 m at 1 s, 127 m at a
+    minute, 402 m at ten minutes, 986 m at an hour. They have moved twice: at
+    ``v`` = 4.0 the one-minute figure read 69 m, which is
+    ``sqrt(480 × 60)`` = 169.7 m with the leading 1 dropped, and a reader
+    sizing a search box off it sized it 2.5× too small; at ``v`` = 8.0 every
+    figure was 2.7× too large, because the default was chosen from loss
+    asymmetry rather than read off the simulator's own ``SHIP_SPEED``.
 
     So this asserts the arithmetic *and* that the prose still says it. The
     second half is the part that catches the next dropped digit: the numbers
@@ -428,16 +429,16 @@ def test_every_diffusion_figure_the_docstring_states() -> None:
     def sigma(seconds: float) -> float:
         return math.sqrt(DEFAULT_SPEED_MPS**2 * DEFAULT_HEADING_PERSISTENCE_S * seconds)
 
-    assert sigma(1.0) == pytest.approx(43.8, abs=0.05)
-    assert sigma(60.0) == pytest.approx(339.4, abs=0.05)
-    assert sigma(600.0) == pytest.approx(1073.3, abs=0.05)
-    assert sigma(3600.0) == pytest.approx(2629.1, abs=0.05)
+    assert sigma(1.0) == pytest.approx(16.4, abs=0.05)
+    assert sigma(60.0) == pytest.approx(127.3, abs=0.05)
+    assert sigma(600.0) == pytest.approx(402.5, abs=0.05)
+    assert sigma(3600.0) == pytest.approx(985.9, abs=0.05)
 
     for stated in (
-        "σ = 43.8 m per axis per 1 s tick",
-        "339 m\nafter a minute",
-        "1.07 km after ten minutes",
-        "2.6 km after an hour",
+        "σ = 16.4 m per axis per 1 s tick",
+        "127 m\nafter a minute",
+        "402 m after ten minutes",
+        "986 m after an hour",
     ):
         assert stated in docstring, stated
 
@@ -445,7 +446,7 @@ def test_every_diffusion_figure_the_docstring_states() -> None:
     grid = ChannelBeliefGrid(straight_channel(), along_m=100.0, across_m=200.0)
     seed(grid, grid.shape[0] // 2, grid.shape[1] // 2)
     grid.diffuse(60.0)
-    assert along_std_m(grid) == pytest.approx(339.4, rel=0.03)
+    assert along_std_m(grid) == pytest.approx(127.3, rel=0.03)
 
 
 def test_the_diffusion_reaches_its_analytic_spread_after_one_persistence_time() -> None:
