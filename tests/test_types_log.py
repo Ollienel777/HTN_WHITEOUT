@@ -609,6 +609,41 @@ def test_writer_refuses_a_backwards_t_and_keeps_the_existing_log(
     assert list(tmp_path.iterdir()) == [log]
 
 
+def test_writer_refuses_an_empty_record_stream_and_keeps_the_existing_log(
+    tmp_path: Path,
+) -> None:
+    """The emptiness rule lived only in the reader.
+
+    ``validate_episode_log`` rejects an empty log, but the write loop simply
+    did not run for an empty ``records``, so the atomic replace fired anyway
+    and put a 0-byte file where a good five-record episode had been, handing
+    the caller ``0`` as a success value.
+    """
+    log = tmp_path / "episode.jsonl"
+    write_episode_log(log, [make_record(tick) for tick in range(5)])
+    before = log.read_bytes()
+
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [])
+    assert caught.value.line == 1
+    assert "empty episode log" in str(caught.value)
+    assert log.read_bytes() == before
+    assert validate_episode_log(log) == 5
+    assert list(tmp_path.iterdir()) == [log]
+
+
+def test_writer_refuses_an_empty_record_stream_with_no_existing_log(
+    tmp_path: Path,
+) -> None:
+    """With nothing to destroy the refusal still stands, and writes nothing."""
+    log = tmp_path / "fresh.jsonl"
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, iter(()))
+    assert "empty episode log" in str(caught.value)
+    assert not log.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_a_repeated_t_is_written(tmp_path: Path) -> None:
     """The rule is non-decreasing, not strictly increasing; the reader agrees."""
     log = tmp_path / "flat.jsonl"

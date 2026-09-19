@@ -124,8 +124,12 @@ def write_episode_log(path: Path | str, records: Iterable[EpisodeRecord]) -> int
     day it lands. The checks the reader performs outside ``from_dict`` are
     restated: ``schema_version`` must be :data:`SCHEMA_VERSION`, floats must
     be finite (the offender is named by its dotted field path), a record's
-    clocks must agree, and ``t`` must not run backwards between records. A
-    log this build cannot read back can never be produced by it.
+    clocks must agree, ``t`` must not run backwards between records, and — a
+    rule about the log rather than about any record in it — ``records`` must
+    yield at least one, because :func:`validate_episode_log` rejects an empty
+    log and there is no file this writer could produce for zero records that
+    the reader would accept. A log this build cannot read back can never be
+    produced by it.
 
     Round-tripping parses every record twice on write, which costs about
     120 ms per 1000 records — a write now costs roughly what reading the
@@ -133,8 +137,9 @@ def write_episode_log(path: Path | str, records: Iterable[EpisodeRecord]) -> int
     paid once per episode against a format whose only purpose is to be read.
 
     The write is atomic. Records are written to a sibling temp file, which
-    replaces ``path`` only after the last one succeeds; a rejected record
-    removes the temp file and leaves any existing log untouched.
+    replaces ``path`` only after the last one succeeds; a rejected record, or
+    an empty ``records``, removes the temp file and leaves any existing log
+    untouched.
     """
     out = Path(path)
     directory = out.parent if str(out.parent) else Path()
@@ -162,6 +167,8 @@ def write_episode_log(path: Path | str, records: Iterable[EpisodeRecord]) -> int
                 handle.write(_encode(payload))
                 handle.write("\n")
                 written += 1
+        if written == 0:
+            raise EpisodeLogError(1, "refusing to write an empty episode log")
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
