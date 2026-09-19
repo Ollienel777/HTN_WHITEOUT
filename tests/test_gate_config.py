@@ -194,6 +194,14 @@ def test_gate_reuses_an_existing_worktree_venv(
     assert gate.PY == str(python)
 
 
+def test_gate_reports_an_unlaunchable_interpreter(tmp_path: Path) -> None:
+    """Issue #53: a `.venv/` that cannot be launched is a reason, not a traceback."""
+    gate = _load_gate()
+    absent = tmp_path / "not-a-python.exe"
+    result = gate._run([str(absent)], capture=True)
+    assert result.returncode == 127
+
+
 def test_gate_venv_cannot_pollute_the_other_steps() -> None:
     """Issue #53: `.venv` is already ignored and excluded everywhere."""
     assert ".venv" in PYPROJECT["tool"]["ruff"]["exclude"]

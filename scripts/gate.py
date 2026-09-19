@@ -76,14 +76,21 @@ def _run(
     command: Sequence[str], *, capture: bool = False, cwd: Path = REPO_ROOT
 ) -> subprocess.CompletedProcess[str]:
     print(f"  $ {shlex.join(command)}", flush=True)
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        env=_env(),
-        text=True,
-        capture_output=capture,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=_env(),
+            text=True,
+            capture_output=capture,
+            check=False,
+        )
+    except OSError as error:
+        # An unlaunchable executable -- a half-written or hand-deleted
+        # `.venv/`, say -- must reach the caller as a failed step with a
+        # reason, not as a traceback out of the middle of the gate.
+        print(f"  ! could not run {command[0]}: {error}", flush=True)
+        return subprocess.CompletedProcess(list(command), 127, stdout="", stderr=str(error))
 
 
 def _shell_step(command: Sequence[str]) -> str | None:
