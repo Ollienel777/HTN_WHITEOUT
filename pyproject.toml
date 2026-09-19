@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=70.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -15,14 +15,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff",
-    "mypy",
+    # ruff and mypy are pinned exactly: their output is the gate's pass/fail
+    # signal, and 45 implementers plus CI run that gate. A minor release that
+    # adds a rule or changes the formatter would turn every open PR red at
+    # once, with no source change and no local reproduction.
+    "ruff==0.16.8",
+    "mypy==2.3.1",
     "pytest",
     "build",
     # The gate builds with `--no-isolation` (SPEC.md section 6), so the build backend
-    # has to be present in the environment rather than fetched from PyPI.
-    "setuptools>=68",
-    "wheel",
+    # has to be present in the environment rather than fetched from PyPI. setuptools
+    # vendors bdist_wheel from 70.1, so no separate `wheel` is needed.
+    "setuptools>=70.1",
 ]
 
 [project.scripts]

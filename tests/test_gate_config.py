@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -77,6 +80,13 @@ def test_gate_runs_the_spec_steps_in_order() -> None:
     assert [name for name, _ in gate.STEPS] == GATE_STEPS
 
 
+def test_gate_forces_fake_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SPEC.md §6: the gate runs in fake mode always, not merely by default."""
+    gate = _load_gate()
+    monkeypatch.setenv("WHITEOUT_TRANSPORT", "sitl")
+    assert gate._env()["WHITEOUT_TRANSPORT"] == "kinematic"
+
+
 def test_gate_test_step_deselects_slow() -> None:
     source = GATE.read_text(encoding="utf-8")
     assert '"-m", "not slow"' in source
@@ -121,4 +131,17 @@ def test_env_example_has_the_spec_names_and_no_values() -> None:
 
 
 def test_backlog_draft_is_deleted() -> None:
-    assert not (REPO_ROOT / "hackathon" / "backlog-draft.md").exists()
+    """The criterion is deletion from the repository, so ask the index.
+
+    Checking the working tree instead would turn this red for an untracked
+    local copy -- and `docs/build/PLAN.md` describes a planning lap that
+    recreates the file -- which has nothing to do with issue #4.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "hackathon/backlog-draft.md"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert tracked.stdout.strip() == ""

@@ -6,7 +6,8 @@ Only ``run`` and ``score`` do anything yet, and only enough for the gate's
 smoke and determinism steps to exercise the real command lines from
 ``hackathon/SPEC.md`` §6. The episode record set and the scorer land with
 their own tickets; until then ``run`` emits a placeholder log that is a pure
-function of ``--seed`` and ``--ticks``, and ``score`` reports four finite
+function of ``--seed``, ``--ticks`` and ``WHITEOUT_TRANSPORT`` — the header
+record carries the transport as provenance — and ``score`` reports four finite
 zeros. The other subcommands are stubs that refuse loudly.
 """
 
@@ -42,7 +43,7 @@ def _default_seed() -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Write a placeholder episode log that depends only on seed and ticks."""
+    """Write a placeholder episode log determined by seed, ticks and transport."""
     out = Path(args.out)
     if out.parent != Path():
         out.parent.mkdir(parents=True, exist_ok=True)

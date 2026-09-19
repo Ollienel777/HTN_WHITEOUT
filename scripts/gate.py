@@ -20,8 +20,10 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -37,16 +39,18 @@ PY = sys.executable
 
 def _env() -> dict[str, str]:
     env = dict(os.environ)
-    env.setdefault("WHITEOUT_TRANSPORT", "kinematic")
+    env["WHITEOUT_TRANSPORT"] = "kinematic"
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
-def _run(command: Sequence[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: Sequence[str], *, capture: bool = False, cwd: Path = REPO_ROOT
+) -> subprocess.CompletedProcess[str]:
     print(f"  $ {shlex.join(command)}", flush=True)
     return subprocess.run(
         command,
-        cwd=REPO_ROOT,
+        cwd=cwd,
         env=_env(),
         text=True,
         capture_output=capture,
@@ -62,31 +66,50 @@ def _shell_step(command: Sequence[str]) -> str | None:
     return None
 
 
+#: Distributions `pip install -e ".[dev]"` must have put in the environment.
+REQUIRED_DISTRIBUTIONS = (
+    "whiteout",
+    "numpy",
+    "scipy",
+    "networkx",
+    "ruff",
+    "mypy",
+    "pytest",
+    "build",
+    "setuptools",
+)
+
+
 def step_install() -> str | None:
-    """`pip install -e ".[dev]"` is done by CI; the gate asserts imports resolve."""
-    required = (
-        "whiteout",
-        "numpy",
-        "scipy",
-        "networkx",
-        "ruff",
-        "mypy",
-        "pytest",
-        "build",
-        "setuptools",
-        "wheel",
-    )
+    """`pip install -e ".[dev]"` is done by CI; the gate asserts that it ran.
+
+    The probe asks for installed *distributions*, not importable names, and it
+    runs from a directory outside the repository. Both halves are needed. A
+    name probe cannot fail on the entries that matter, because the other steps
+    run with ``cwd`` at the repo root: ``whiteout`` resolves from the source
+    tree with nothing installed, and the ``build/`` directory a gate run leaves
+    behind resolves as a namespace package whether or not pypa/build is there.
+    A metadata probe run from the repo root is defeated too, by the gitignored
+    ``whiteout.egg-info/`` that an editable install or a build leaves behind.
+    """
     script = (
-        "import importlib.util, sys\n"
-        f"names = {required!r}\n"
-        "print(' '.join(n for n in names if importlib.util.find_spec(n) is None))\n"
+        "import importlib.metadata as md\n"
+        f"names = {REQUIRED_DISTRIBUTIONS!r}\n"
+        "missing = []\n"
+        "for name in names:\n"
+        "    try:\n"
+        "        md.distribution(name)\n"
+        "    except md.PackageNotFoundError:\n"
+        "        missing.append(name)\n"
+        "print(' '.join(missing))\n"
     )
-    probe = _run([PY, "-c", script], capture=True)
+    with tempfile.TemporaryDirectory() as outside_the_repo:
+        probe = _run([PY, "-c", script], capture=True, cwd=Path(outside_the_repo))
     if probe.returncode != 0:
-        return f"import probe exited {probe.returncode}: {probe.stderr.strip()}"
+        return f"install probe exited {probe.returncode}: {probe.stderr.strip()}"
     missing = probe.stdout.split()
     if missing:
-        return f'imports do not resolve: {", ".join(missing)} -- run: pip install -e ".[dev]"'
+        return f'not installed: {", ".join(missing)} -- run: pip install -e ".[dev]"'
     return None
 
 
@@ -107,6 +130,12 @@ def step_test() -> str | None:
 
 
 def step_build() -> str | None:
+    # setuptools' build_py copies only files newer than their counterpart in
+    # build/lib and never prunes, so a wheel built over a stale tree ships
+    # modules that have since been deleted. CI never sees it (fresh checkout),
+    # which makes it exactly the machine that builds the submission artifact
+    # that gets the wrong wheel.
+    shutil.rmtree(REPO_ROOT / "build", ignore_errors=True)
     return _shell_step([PY, "-m", "build", "--wheel", "--no-isolation"])
 
 
