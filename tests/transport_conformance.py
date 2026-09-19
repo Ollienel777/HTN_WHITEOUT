@@ -22,14 +22,23 @@ run in cannot matter.
 
 A check reports a breach by raising :class:`AssertionError` naming the
 transport and what it did, so a failure reads as a sentence about the adapter
-rather than as a traceback through the suite. That holds for every check and
-for every breach, including a refusal: a call the contract says must succeed
-is made inside :func:`_accepts`, which catches the adapter's
-:class:`~whiteout.transport.base.TransportError` and re-raises it as an
-``AssertionError``. The one refusal that is not a breach is the *first*
-``connect`` — a link this machine cannot bring up at all is not a
-non-conforming transport, it is an absent one, and :func:`unavailable` owns
-that case for the runner to skip by name.
+rather than as a traceback through the suite. That holds for a refusal too:
+every call this module makes that the contract says must succeed —
+``observe``, ``command``, ``close``, and a ``connect`` on a live link — is
+made inside :func:`_accepts` or :func:`_closed_after`, which catch the
+adapter's :class:`~whiteout.transport.base.TransportError` and re-raise it as
+an ``AssertionError``. Two calls sit outside that, deliberately:
+
+* the *first* ``connect``, which is not wrapped at all — a link this machine
+  cannot bring up is not a non-conforming transport, it is an absent one, and
+  :func:`unavailable` owns that case for the runner to skip by name;
+* the ``close`` :func:`_closed_after` runs to tear down a block that has
+  *already* failed, whose refusal is swallowed rather than reported, so that
+  a broken teardown cannot replace the assertion the check came for.
+
+Neither of those can reach the caller as a ``TransportError``, so a planted
+breach against any check can be written in the usual
+``pytest.raises(AssertionError)`` style.
 """
 
 from __future__ import annotations
@@ -41,10 +50,19 @@ from dataclasses import fields, is_dataclass
 from typing import Any
 
 from whiteout.transport import TRANSPORT_METHODS, Transport, TransportError
-from whiteout.types import FleetIntent, TargetTruth, Truth, WaypointIntent, WorldObservation
+from whiteout.types import (
+    VEHICLE_CLASSES,
+    FleetIntent,
+    TargetTruth,
+    Truth,
+    WaypointIntent,
+    WorldObservation,
+)
 
 __all__ = [
     "CONFORMANCE_CHECKS",
+    "STATIC_CLASSES",
+    "STEERABLE_CLASSES",
     "TransportFactory",
     "check_id",
     "unavailable",
@@ -68,6 +86,21 @@ OBSERVATION_FIELDS = frozenset({"t", "poses", "reports"})
 #: and the viewer, and never observed. It is the single easiest way to cheat
 #: ourselves and believe the number afterwards.
 TRUTH_TYPES: tuple[type, ...] = (Truth, TargetTruth)
+
+#: Vehicle classes that cannot be sent anywhere, and so have no waypoint to
+#: refuse. The seam's only outbound record is a
+#: :class:`~whiteout.types.WaypointIntent` — a point to go to and a speed to
+#: go at — and the fleet the build is aimed at includes two masts that are
+#: bolted down: antenna trackers, whose whole command surface is a pan servo,
+#: a tilt servo and a scan mode (``hackathon/`` §3 on the fleet). Addressing
+#: one a waypoint is not something an adapter can honour, so the command
+#: check does not ask it to.
+STATIC_CLASSES = frozenset({"tower"})
+
+#: The classes a waypoint may be addressed to. Derived from
+#: :data:`~whiteout.types.VEHICLE_CLASSES` rather than listed, so a class
+#: added to the build is steerable here unless it is named above.
+STEERABLE_CLASSES = frozenset(VEHICLE_CLASSES) - STATIC_CLASSES
 
 
 def _name(transport: object) -> str:
@@ -102,14 +135,42 @@ def _accepts(transport: Transport, what: str) -> Iterator[None]:
 
 
 @contextmanager
+def _closed_after(transport: Transport) -> Iterator[None]:
+    """Run the block, then close — reporting a refused close as a breach.
+
+    ``close`` is "idempotent, and safe to call unconnected"
+    (``whiteout/transport/base.py``), so refusing it is a breach like any
+    other and must arrive as an ``AssertionError``. It cannot simply be run
+    inside :func:`_accepts`, because this close is a teardown: when the block
+    has already failed, the check's own assertion is the thing worth
+    reporting, and an exception raised out of the teardown would replace it
+    with a sentence about the wrong call. So a refusal here is reported only
+    when the block itself succeeded, and is swallowed otherwise — either way
+    the adapter's own fault type never reaches the caller.
+    """
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            transport.close()
+        except TransportError as refused:
+            if not failed:
+                raise AssertionError(
+                    f"{_name(transport)}: close() at the end of the episode was refused: {refused}"
+                ) from refused
+
+
+@contextmanager
 def _connected(factory: TransportFactory) -> Iterator[Transport]:
     """A fresh connected transport, closed however the block ends."""
     transport = factory()
     transport.connect()
-    try:
+    with _closed_after(transport):
         yield transport
-    finally:
-        transport.close()
 
 
 def _assert_no_truth(value: Any, where: str) -> None:
@@ -144,13 +205,11 @@ def _assert_no_truth(value: Any, where: str) -> None:
 def check_the_protocol_surface_is_the_whole_seam(factory: TransportFactory) -> None:
     """The four methods, and a structural match against the protocol."""
     transport = factory()
-    try:
+    with _closed_after(transport):
         assert isinstance(transport, Transport), f"{_name(transport)} is not a Transport"
         for method in TRANSPORT_METHODS:
             attribute = getattr(transport, method, None)
             assert callable(attribute), f"{_name(transport)}.{method} is not callable"
-    finally:
-        transport.close()
 
 
 def check_observe_and_command_refuse_before_connect(factory: TransportFactory) -> None:
@@ -160,30 +219,28 @@ def check_observe_and_command_refuse_before_connect(factory: TransportFactory) -
     link is down, at which point it reports a fault from the wrong call.
     """
     transport = factory()
-    try:
+    with _closed_after(transport):
         with _raises(TransportError, f"{_name(transport)}.observe() before connect()"):
             transport.observe()
         with _raises(TransportError, f"{_name(transport)}.command() before connect()"):
             transport.command(FleetIntent(t=0.0, intents=()))
-    finally:
-        transport.close()
 
 
 def check_connect_is_idempotent_while_the_link_is_up(factory: TransportFactory) -> None:
     """A second ``connect`` on a live link is not an error and does not rewind."""
     transport = factory()
-    try:
-        transport.connect()
-        first = transport.observe()
+    transport.connect()
+    with _closed_after(transport):
+        with _accepts(transport, "observe() on a live link"):
+            first = transport.observe()
         with _accepts(transport, "a second connect() on a live link"):
             transport.connect()
-        second = transport.observe()
+        with _accepts(transport, "observe() after a second connect()"):
+            second = transport.observe()
         assert second.t > first.t, (
             f"{_name(transport)}: a second connect() took the clock from "
             f"t={first.t} to t={second.t}"
         )
-    finally:
-        transport.close()
 
 
 def check_the_tick_clock_is_monotonic(factory: TransportFactory) -> None:
@@ -194,8 +251,9 @@ def check_the_tick_clock_is_monotonic(factory: TransportFactory) -> None:
     write time rather than report the fault where it happened.
     """
     with _connected(factory) as transport:
-        times = [transport.observe().t for _ in range(TICKS)]
         where = _name(transport)
+        with _accepts(transport, "observe() on a live link"):
+            times = [transport.observe().t for _ in range(TICKS)]
     for t in times:
         assert isinstance(t, float), f"{where}: observe() returned t={t!r}, not a float"
         assert math.isfinite(t), f"{where}: observe() returned t={t!r}"
@@ -210,13 +268,19 @@ def check_silence_is_not_a_fault_and_every_report_is_attributable(
 
     An asset that says nothing this tick simply has no report this tick, and
     a tick that carries no reports at all is the ordinary case rather than a
-    fault: the transport keeps serving, tick after tick, and the poses keep
-    coming. What it does report must be attributable — a report names an
-    asset the transport is posing this same tick, and is stamped at this same
-    tick. ``SPEC.md`` §4 makes non-detection the input to the
-    negative-information update, so a misattributed or stale report is
+    fault: the transport keeps serving, tick after tick, and every tick still
+    poses at least one asset. What it does report must be attributable — a
+    report names an asset the transport is posing this same tick, and is
+    stamped at this same tick. ``SPEC.md`` §4 makes non-detection the input to
+    the negative-information update, so a misattributed or stale report is
     evidence the belief field will erode on — the expensive kind of wrong,
     because it looks plausible.
+
+    What is asserted about the fleet is that it is *non-empty*, not that it
+    keeps its shape: a transport that returns no pose at all has stopped
+    reporting a world, but an asset that drops out mid-episode is an ordinary
+    thing for a link to a real vehicle to do, and pinning the roster here
+    would make that non-conforming.
 
     **This check cannot catch invention**, and does not claim to. A transport
     that manufactures a plausible report every tick, for an asset whose
@@ -229,13 +293,15 @@ def check_silence_is_not_a_fault_and_every_report_is_attributable(
     with _connected(factory) as transport:
         where = _name(transport)
         for tick in range(TICKS):
-            observation = transport.observe()
+            with _accepts(transport, f"observe() on tick {tick}"):
+                observation = transport.observe()
             assert isinstance(observation, WorldObservation), (
                 f"{where}: observe() returned {type(observation).__name__}"
             )
             assert isinstance(observation.reports, tuple), (
                 f"{where} tick {tick}: reports is {type(observation.reports).__name__}"
             )
+            assert observation.poses, f"{where} tick {tick}: the observation poses no asset at all"
             assets = [pose.asset_id for pose in observation.poses]
             assert len(assets) == len(set(assets)), (
                 f"{where} tick {tick}: two poses for one asset in {assets}"
@@ -267,6 +333,14 @@ def check_command_is_accepted_for_every_tick(factory: TransportFactory) -> None:
     the episode carried on — the clock still advances across a commanded
     tick.
 
+    Each asset is asked only for what its class can do. A
+    :class:`~whiteout.types.WaypointIntent` says where to go, and an asset in
+    :data:`STATIC_CLASSES` cannot go anywhere, so no waypoint is addressed to
+    one and refusing such a waypoint is not a breach of this check. An
+    adapter free to reject what its vehicle has no channel for is the point
+    of the seam; requiring it to pretend otherwise would write an assumption
+    about one fleet into the contract every fleet is held to.
+
     **Accepted is not delivered.** ``command`` returns nothing, so nothing
     crosses this seam to say the intent reached an asset, and a transport
     that drops every intent on the floor passes this check. Proving delivery
@@ -276,10 +350,12 @@ def check_command_is_accepted_for_every_tick(factory: TransportFactory) -> None:
     """
     with _connected(factory) as transport:
         where = _name(transport)
-        observation = transport.observe()
+        with _accepts(transport, "observe() on a live link"):
+            observation = transport.observe()
         for tick in range(TICKS):
             # Tick zero sends the empty intent — the ordinary quiet tick —
-            # and the rest steer every asset the transport is posing.
+            # and the rest steer every posed asset that can be steered.
+            steerable = [pose for pose in observation.poses if pose.cls in STEERABLE_CLASSES]
             intents = tuple(
                 WaypointIntent(
                     asset_id=pose.asset_id,
@@ -290,13 +366,14 @@ def check_command_is_accepted_for_every_tick(factory: TransportFactory) -> None:
                     reason="sweep",
                     task_id=f"conformance-{tick}-{index}",
                 )
-                for index, pose in enumerate(observation.poses)
+                for index, pose in enumerate(steerable)
             )
             if tick == 0:
                 intents = ()
             with _accepts(transport, f"command() on tick {tick} carrying {len(intents)} intents"):
                 transport.command(FleetIntent(t=observation.t, intents=intents))
-            after = transport.observe()
+            with _accepts(transport, f"observe() after commanding tick {tick}"):
+                after = transport.observe()
             assert after.t > observation.t, (
                 f"{where} tick {tick}: the clock did not advance across a commanded "
                 f"tick (t={observation.t} then t={after.t})"
@@ -312,15 +389,18 @@ def check_close_mid_episode_ends_the_episode(factory: TransportFactory) -> None:
     """
     transport = factory()
     transport.connect()
-    transport.observe()
-    transport.observe()
-    transport.close()
     where = _name(transport)
+    with _accepts(transport, "observe() on a live link"):
+        transport.observe()
+        transport.observe()
+    with _accepts(transport, "close() on a live link"):
+        transport.close()
     with _raises(TransportError, f"{where}.observe() after close()"):
         transport.observe()
     with _raises(TransportError, f"{where}.command() after close()"):
         transport.command(FleetIntent(t=0.0, intents=()))
-    transport.close()
+    with _accepts(transport, "a second close() after close()"):
+        transport.close()
 
 
 def check_connect_after_close_refuses_rather_than_rewinding(factory: TransportFactory) -> None:
@@ -333,9 +413,11 @@ def check_connect_after_close_refuses_rather_than_rewinding(factory: TransportFa
     """
     transport = factory()
     transport.connect()
-    first = transport.observe()
-    transport.close()
     where = _name(transport)
+    with _accepts(transport, "observe() on a live link"):
+        first = transport.observe()
+    with _accepts(transport, "close() on a live link"):
+        transport.close()
     with _raises(TransportError, f"{where}.connect() after close()"):
         transport.connect()
     assert math.isfinite(first.t), f"{where}: the episode's first tick was t={first.t!r}"
@@ -355,11 +437,9 @@ def check_close_is_safe_before_connect(factory: TransportFactory) -> None:
         transport.close()
     with _accepts(transport, "connect() after a close() on a link that was never up"):
         transport.connect()
-    try:
+    with _closed_after(transport):
         with _accepts(transport, "observe() after a close() on a link that was never up"):
             transport.observe()
-    finally:
-        transport.close()
 
 
 def check_observe_never_returns_ground_truth(factory: TransportFactory) -> None:
@@ -374,8 +454,9 @@ def check_observe_never_returns_ground_truth(factory: TransportFactory) -> None:
     """
     with _connected(factory) as transport:
         where = _name(transport)
-        for _ in range(TICKS):
-            observation = transport.observe()
+        for tick in range(TICKS):
+            with _accepts(transport, f"observe() on tick {tick}"):
+                observation = transport.observe()
             assert isinstance(observation, WorldObservation), (
                 f"{where}: observe() returned {type(observation).__name__}"
             )
@@ -420,9 +501,8 @@ def unavailable(factory: TransportFactory) -> str | None:
     """
     transport = factory()
     try:
-        transport.connect()
+        with _closed_after(transport):
+            transport.connect()
     except TransportError as refused:
         return str(refused)
-    finally:
-        transport.close()
     return None

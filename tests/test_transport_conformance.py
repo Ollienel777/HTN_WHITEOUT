@@ -24,6 +24,12 @@ owns that breach fails on it — as an ``AssertionError``, which is what the
 suite promises a breach arrives as. Every check owns at least one planted
 breach: a check nothing is planted against is a check nobody has shown to be
 load-bearing, and the gap is invisible while everything is green.
+
+Two of the cases plant a *refusal* rather than a wrong answer — a link that
+drops mid-episode, and a ``close`` a live link will not take — because those
+are the breaches that arrive as the adapter's own ``TransportError``, and the
+suite's conversion of them into ``AssertionError`` is itself a claim worth a
+guard.
 """
 
 from __future__ import annotations
@@ -36,7 +42,13 @@ from pathlib import Path
 
 import pytest
 import transport_conformance as conformance
-from transport_conformance import CONFORMANCE_CHECKS, TransportFactory, check_id, unavailable
+from transport_conformance import (
+    CONFORMANCE_CHECKS,
+    STATIC_CLASSES,
+    TransportFactory,
+    check_id,
+    unavailable,
+)
 
 from whiteout.transport import (
     IMPLEMENTED_TRANSPORTS,
@@ -293,6 +305,49 @@ class _SpentTransport(KinematicTransport):
         self._connected = False
 
 
+class _FlakyTransport(KinematicTransport):
+    """Serves one tick, then refuses every observe: the link dropped.
+
+    The ordinary shape of a radio link going away mid-episode, and the reason
+    a refused ``observe`` has to arrive as an ``AssertionError``: it is the
+    adapter's own fault type, raised from a call the contract says must
+    succeed.
+    """
+
+    def __init__(self, seed: int = 0) -> None:
+        super().__init__(seed=seed)
+        self._served = 0
+
+    def observe(self) -> WorldObservation:
+        if self._served >= 1:
+            raise TransportError("the link dropped mid-episode")
+        self._served += 1
+        return super().observe()
+
+
+class _UnclosableTransport(KinematicTransport):
+    """Refuses close() on a live link — an ordinary socket bug.
+
+    ``close`` is documented as idempotent and safe to call unconnected, so
+    this is a breach; it is planted because it is the one that fires from a
+    teardown, where an unconverted refusal would also mask whatever the check
+    was really asserting.
+    """
+
+    def close(self) -> None:
+        if self.connected:
+            raise TransportError("the link refuses to close")
+        super().close()
+
+
+class _EmptyFleetTransport(KinematicTransport):
+    """The clock still runs, but nothing is posed: a world with no assets."""
+
+    def observe(self) -> WorldObservation:
+        observation = super().observe()
+        return WorldObservation(t=observation.t, poses=(), reports=())
+
+
 def _footprint() -> SensorFootprint:
     """Some footprint. Nothing in the guard below depends on its shape."""
     return SensorFootprint(kind="circle", x=0.0, y=0.0, radius=100.0, heading=0.0, half_angle=0.0)
@@ -361,8 +416,11 @@ _PLANTED_BREACHES: tuple[tuple[type, str], ...] = (
     (_LazyTransport, "check_observe_and_command_refuse_before_connect"),
     (_JealousTransport, "check_connect_is_idempotent_while_the_link_is_up"),
     (_RewindingTransport, "check_the_tick_clock_is_monotonic"),
+    (_FlakyTransport, "check_the_tick_clock_is_monotonic"),
+    (_UnclosableTransport, "check_close_mid_episode_ends_the_episode"),
     (_DoublePosingTransport, _SILENCE_CHECK),
     (_MisattributingTransport, _SILENCE_CHECK),
+    (_EmptyFleetTransport, _SILENCE_CHECK),
     (_RefusingTransport, "check_command_is_accepted_for_every_tick"),
     (_LenientTransport, "check_close_mid_episode_ends_the_episode"),
     (_ReopeningTransport, "check_connect_after_close_refuses_rather_than_rewinding"),
@@ -413,3 +471,33 @@ def test_a_subclass_that_breaches_nothing_still_passes(check: Check) -> None:
         pass
 
     check(lambda: _Conforming(seed=SEED))
+
+
+class _StaticAssetTransport(KinematicTransport):
+    """Refuses a waypoint addressed to an asset that cannot move.
+
+    ``hackathon/ARENA.md`` §3: two of the four real assets are ArduPilot
+    AntennaTrackers, steered by `servo set 1/2` pan and tilt with no waypoint
+    channel at all. This is the `arena` adapter's honest behaviour, not a
+    breach, and the suite must not certify against it.
+    """
+
+    def command(self, intent: FleetIntent) -> None:
+        self._require_connected("command")
+        static = {pose.asset_id for pose in self._poses if pose.cls in STATIC_CLASSES}
+        for one in intent.intents:
+            if one.asset_id in static:
+                raise TransportError(f"{one.asset_id} is static: no waypoint channel")
+        super().command(intent)
+
+
+@pytest.mark.parametrize("check", CONFORMANCE_CHECKS, ids=check_id)
+def test_an_asset_with_no_waypoint_channel_is_not_a_breach(check: Check) -> None:
+    """Each asset is asked only for what its class can do.
+
+    Requiring every transport to take a waypoint for every posed asset would
+    write one fleet's shape into the contract every fleet is held to, and
+    would make the adapter this suite exists to hand a definition of done to
+    non-conforming on its first commanded tick.
+    """
+    check(lambda: _StaticAssetTransport(seed=SEED))
