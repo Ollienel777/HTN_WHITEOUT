@@ -2,14 +2,16 @@
 
 Subcommands: ``run``, ``replay``, ``score``, ``sweep``, ``ablate``, ``serve``.
 
-Only ``run`` and ``score`` do anything yet, and only enough for the gate's
-smoke and determinism steps to exercise the real command lines from
+Only ``run``, ``score`` and ``serve`` do anything yet, and only enough for
+the gate's smoke and determinism steps to exercise the real command lines from
 ``hackathon/SPEC.md`` §6. ``run`` drives the selected transport (§4's seam)
 one tick at a time and writes a real, validated episode log; the belief
 digest, the contacts and the truth on each record are placeholders, because
 the belief field, the estimator and the sim land with their own tickets, and
 the episode loop that fills them is issue #25. ``score`` reports four finite
-zeros. The other subcommands are stubs that refuse loudly.
+zeros. ``serve`` hands the source tree out to a browser so that the viewer in
+``viz/`` can read an episode log beside it, on ``PORT`` or an ephemeral port
+(``SPEC.md`` §6). The other subcommands are stubs that refuse loudly.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
+from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
 from whiteout.transport import TransportError, create_transport, selected_transport_name
 from whiteout.types import BeliefDigest, EpisodeRecord, FleetIntent, Truth
 
@@ -171,6 +174,30 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(_args: argparse.Namespace) -> int:
+    """Serve the viewer until interrupted.
+
+    No default port and no reuse: ``PORT`` decides, or the kernel does. Two
+    worktrees each running this command therefore never answer for each
+    other, which is what ``SPEC.md`` §6 asks of it.
+    """
+    try:
+        server = open_viewer_server(resolve_port())
+    except ServeError as exc:
+        print(f"serve: {exc}", file=sys.stderr)
+        return 1
+    print(f"serve: {viewer_url(server)}")
+    print("serve: ctrl-c to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nserve: stopped")
+    finally:
+        server.shutdown()
+        server.server_close()
+    return 0
+
+
 def _cmd_stub(name: str) -> int:
     print(f"{name}: {_NOT_YET}", file=sys.stderr)
     return 1
@@ -191,11 +218,13 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--weights", default=None)
     score.set_defaults(func=cmd_score)
 
+    serve = sub.add_parser("serve", help="serve the viewer on PORT, or an ephemeral port")
+    serve.set_defaults(func=cmd_serve)
+
     for name, help_text in (
         ("replay", "replay an episode log"),
         ("sweep", "sweep policy parameters"),
         ("ablate", "run the ablation table"),
-        ("serve", "serve the viewer"),
     ):
         stub = sub.add_parser(name, help=help_text)
         stub.set_defaults(func=lambda _args, _name=name: _cmd_stub(_name))

@@ -1,0 +1,673 @@
+/* viewer.css — the three-region shell and its states.
+ *
+ * DESIGN.md "Layout": topbar, field, 320px rail, transport bar. The field
+ * takes every pixel the other three do not. Content width is the viewport:
+ * this is an instrument, not a document, so there is no max-width and no
+ * centred column.
+ *
+ * Every value here is a token from tokens.css. The one exception is the
+ * @media condition at the foot of this file, because a media query cannot
+ * read a custom property; a test asserts its value still equals --bp-narrow.
+ */
+
+/* ── reset ─────────────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--n-950);
+  color: var(--n-100);
+  font: 400 var(--t-14) var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  display: grid;
+  grid-template-rows: var(--h-topbar) minmax(0, 1fr) var(--h-transport);
+  overflow: hidden;
+}
+
+h1, h2, p, dl, dd, dt, pre, ul, figure { margin: 0; }
+ul { list-style: none; padding: 0; }
+[hidden] { display: none !important; }
+
+button { font: inherit; color: inherit; background: none; border: 0; }
+
+:focus-visible {
+  outline: var(--w-focus) solid var(--accent);
+  /* Offset by a full space step, not a hairline: the ring is the accent and
+     so is the primary control's fill, so without dark ground between them the
+     ring is invisible on exactly the control most likely to be focused. */
+  outline-offset: var(--s-1);
+  border-radius: var(--r-sm);
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: var(--w-hairline);
+  height: var(--w-hairline);
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.panel-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--n-700) transparent;
+}
+
+/* ── topbar ────────────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-6);
+  padding: 0 var(--s-4);
+  background: var(--n-900);
+  border-bottom: var(--w-hairline) solid var(--n-700);
+  min-width: 0;
+}
+
+.brand { display: flex; align-items: baseline; gap: var(--s-2); }
+
+.brand-mark {
+  font: 600 var(--t-14) var(--font-sans);
+  letter-spacing: 0.14em;
+  color: var(--n-000);
+}
+
+.brand-sub { font: 400 var(--t-12) var(--font-sans); color: var(--n-400); }
+
+.meta { display: flex; align-items: center; gap: var(--s-4); min-width: 0; }
+
+.meta-slot { display: flex; align-items: baseline; gap: var(--s-2); min-width: 0; }
+
+.meta dt { font: 400 var(--t-12) var(--font-sans); color: var(--n-400); }
+
+.meta dd {
+  font: 500 var(--t-12) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-100);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dials { margin-left: auto; }
+
+.dial-row { display: flex; align-items: center; gap: var(--s-6); }
+
+.dial { display: flex; align-items: center; gap: var(--s-2); }
+
+.dial-arc {
+  width: var(--sz-dial);
+  height: var(--sz-dial);
+  transform: rotate(-90deg);
+  flex: none;
+}
+
+.dial-track, .dial-fill {
+  fill: none;
+  stroke-width: var(--w-bar);
+  stroke-linecap: butt;
+}
+
+.dial-track { stroke: var(--n-700); }
+
+.dial-fill {
+  stroke: var(--accent);
+  transition: stroke-dashoffset var(--m-base) var(--m-ease);
+}
+
+.dial-text { display: flex; flex-direction: column; }
+
+.dial-label {
+  font: 400 var(--t-12) var(--font-sans);
+  /* The dials sit in a 48px bar. Both steps keep their size and give up their
+     leading, so the pair is 36px tall instead of 48 and the bar does not grow
+     (DESIGN.md "Components": label --t-12, value --t-24). */
+  line-height: 1;
+  color: var(--n-400);
+  white-space: nowrap;
+}
+
+.dial-value {
+  font: 500 var(--t-24) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--n-000);
+  margin-top: var(--s-1);
+}
+
+
+/* ── stage ─────────────────────────────────────────────────────────── */
+
+.stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--w-rail);
+  min-height: 0;
+}
+
+/* ── field ─────────────────────────────────────────────────────────── */
+
+.field {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--n-950);
+  overflow: hidden;
+}
+
+.field-canvas { display: block; width: 100%; height: 100%; }
+
+.field-badge {
+  position: absolute;
+  top: var(--s-4);
+  left: var(--s-4);
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-4);
+  font: 500 var(--t-48) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ok);
+}
+
+.field-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--s-8);
+  pointer-events: none;
+}
+
+.field-overlay > .state { pointer-events: auto; }
+
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-4);
+  max-width: var(--w-prose);
+}
+
+.state-title { font: 600 var(--t-20) var(--font-sans); color: var(--n-000); }
+
+.state-body { font: 400 var(--t-14) var(--font-sans); color: var(--n-300); }
+
+.state-body code {
+  font: 400 var(--t-14) var(--font-mono);
+  color: var(--n-100);
+  background: var(--n-850);
+  border-radius: var(--r-sm);
+  padding: 0 var(--s-1);
+}
+
+.state-note { font: 400 var(--t-12) var(--font-mono); color: var(--n-400); }
+
+.state-detail {
+  width: 100%;
+  font: 400 var(--t-12) var(--font-mono);
+  color: var(--n-100);
+  background: var(--n-900);
+  border: var(--w-hairline) solid var(--n-700);
+  border-left: var(--w-bar) solid var(--danger);
+  border-radius: var(--r-sm);
+  padding: var(--s-3);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.state-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+
+/* The loading state is the only one that fills the field rather than sitting
+   in the middle of it: its block stands where the field will be. */
+.state-loading { align-items: stretch; width: 100%; height: 100%; max-width: none; gap: var(--s-3); }
+
+body[data-state="loading"] .field-overlay { place-items: stretch; }
+
+/* The counts belong to the content the skeleton is standing in for. */
+body[data-state="loading"] .panel-count { visibility: hidden; }
+
+/* ── buttons ───────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  height: var(--h-control);
+  padding: 0 var(--s-4);
+  border-radius: var(--r-sm);
+  border: var(--w-hairline) solid var(--n-600);
+  background: var(--n-850);
+  color: var(--n-100);
+  font: 500 var(--t-14) var(--font-sans);
+  cursor: pointer;
+  transition: background-color var(--m-fast) var(--m-ease),
+              border-color var(--m-fast) var(--m-ease);
+}
+
+.btn:hover { background: var(--n-800); border-color: var(--n-700); }
+.btn:active { background: var(--n-900); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--n-950);
+}
+
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-primary:active { background: var(--accent-active); border-color: var(--accent-active); }
+
+.btn-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--h-control);
+  height: var(--h-control);
+  border-radius: var(--r-sm);
+  border: var(--w-hairline) solid var(--n-600);
+  background: var(--n-850);
+  color: var(--n-100);
+  cursor: pointer;
+  transition: background-color var(--m-fast) var(--m-ease),
+              border-color var(--m-fast) var(--m-ease);
+}
+
+.btn-glyph:hover:not(:disabled) { background: var(--n-800); border-color: var(--n-700); }
+
+/* `.btn-glyph` is declared after `.btn-primary` and carries the same weight,
+   so the primary's fill has to be restated at a higher specificity or the one
+   accent-filled control on screen comes out grey. */
+.btn-glyph.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--n-950);
+}
+
+.btn-glyph.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-glyph .glyph { width: var(--s-6); height: var(--s-6); }
+.glyph-mirrored { transform: scaleX(-1); }
+
+.btn:disabled, .btn-glyph:disabled, .chip:disabled {
+  background: var(--n-900);
+  border-color: var(--n-700);
+  color: var(--n-400);
+  cursor: default;
+}
+
+/* A disabled primary keeps the shape and gives up the accent, so that exactly
+   one accent-filled control is on screen at a time (DESIGN.md "Layout"). */
+.btn-glyph.btn-primary:disabled { background: var(--n-900); border-color: var(--n-700); }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--h-control);
+  padding: 0 var(--s-3);
+  border-radius: var(--r-sm);
+  border: var(--w-hairline) solid transparent;
+  background: transparent;
+  color: var(--n-300);
+  font: 500 var(--t-12) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color var(--m-fast) var(--m-ease),
+              background-color var(--m-fast) var(--m-ease);
+}
+
+.chip:hover:not(:disabled) { color: var(--n-100); background: var(--n-850); }
+
+/* Selection, not a primary action: the accent tints, it does not fill. */
+.chip[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+/* ── rail ──────────────────────────────────────────────────────────── */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  background: var(--n-900);
+  border-left: var(--w-hairline) solid var(--n-700);
+  min-height: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: var(--w-hairline) solid var(--n-700);
+}
+
+/* Contacts take the room they need and no more, up to half the rail, after
+   which the list scrolls — state 7 of 7. Fleet is a fixed handful of rows.
+   The inspector absorbs what is left, so a rail with nothing in it has no
+   void down the middle. */
+.panel-contacts { flex: 0 1 auto; max-height: 50%; }
+.panel-fleet { flex: 0 0 auto; }
+.panel-inspector { flex: 1 1 auto; }
+
+.panel:last-child { border-bottom: 0; }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--h-row);
+  padding: 0 var(--s-4);
+  flex: none;
+}
+
+.panel-head h2 {
+  font: 500 var(--t-12) var(--font-sans);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--n-400);
+}
+
+.panel-count {
+  font: 500 var(--t-12) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-400);
+}
+
+.panel-body { padding: 0 var(--s-4) var(--s-4); min-height: 0; }
+
+.panel-empty {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--n-400);
+  padding: var(--s-2) 0;
+}
+
+/* ── fleet rows ────────────────────────────────────────────────────── */
+
+.fleet-row + .fleet-row { margin-top: var(--s-1); }
+
+.fleet-btn {
+  display: grid;
+  grid-template-columns: var(--sz-dot) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  height: var(--h-row);
+  padding: 0 var(--s-2);
+  margin-left: calc(var(--s-2) * -1);
+  border-radius: var(--r-sm);
+  border-left: var(--w-bar) solid transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--m-fast) var(--m-ease);
+}
+
+.fleet-btn:hover { background: var(--n-850); }
+
+.fleet-row[aria-selected="true"] .fleet-btn {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+}
+
+.cls-dot {
+  width: var(--sz-dot);
+  height: var(--sz-dot);
+  border-radius: 50%;
+  background: var(--n-400);
+}
+
+.cls-dot[data-cls="fixedwing"] { background: var(--cls-wing); }
+.cls-dot[data-cls="quad"] { background: var(--cls-quad); }
+.cls-dot[data-cls="rover"] { background: var(--cls-rover); }
+.cls-dot[data-cls="tower"] { background: var(--cls-tower); }
+
+.callsign {
+  font: 500 var(--t-12) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-100);
+}
+
+.task {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--n-300);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.energy {
+  grid-column: 2 / -1;
+  display: block;
+  height: var(--w-bar);
+  background: var(--n-800);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.energy-fill { display: block; height: 100%; background: var(--n-600); }
+
+/* ── contact rows ──────────────────────────────────────────────────── */
+
+.contact-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--s-2);
+  height: var(--h-row);
+  border-bottom: var(--w-hairline) solid var(--n-850);
+}
+
+.contact-row:last-child { border-bottom: 0; }
+
+.contact-id {
+  font: 500 var(--t-12) var(--font-mono);
+  color: var(--n-100);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.contact-state {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--n-400);
+  padding: 0 var(--s-2);
+  border-radius: var(--r-sm);
+  background: var(--n-850);
+}
+
+.contact-row[data-state="confirming"] .contact-state,
+.contact-row[data-state="unconfirmed"] .contact-state { color: var(--warn); }
+.contact-row[data-state="tracked"] .contact-state,
+.contact-row[data-state="handed_off"] .contact-state { color: var(--ok); }
+.contact-row[data-state="lost"] .contact-state { color: var(--danger); }
+
+.contact-confidence {
+  font: 400 var(--t-12) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-300);
+}
+
+/* ── inspector ─────────────────────────────────────────────────────── */
+
+.kv { display: grid; gap: var(--s-1); }
+
+.kv-row {
+  display: grid;
+  grid-template-columns: var(--w-inspector-key) minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--s-2);
+}
+
+.kv dt { font: 400 var(--t-12) var(--font-sans); color: var(--n-400); }
+
+.kv dd {
+  font: 400 var(--t-12) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-100);
+  text-align: right;       /* every value shares one right edge */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kv-error { width: 100%; }
+
+/* ── transport bar ─────────────────────────────────────────────────── */
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  padding: 0 var(--s-4);
+  background: var(--n-900);
+  border-top: var(--w-hairline) solid var(--n-700);
+  box-shadow: var(--e-1);
+}
+
+.transport-controls { display: flex; gap: var(--s-2); flex: none; }
+
+.scrub { flex: 1; min-width: 0; display: flex; align-items: center; }
+
+.scrub-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: var(--h-control);
+  background: transparent;
+  cursor: pointer;
+}
+
+.scrub-input::-webkit-slider-runnable-track {
+  height: var(--h-scrub);
+  border-radius: var(--r-sm);
+  background: var(--n-800);
+}
+
+.scrub-input::-moz-range-track {
+  height: var(--h-scrub);
+  border-radius: var(--r-sm);
+  background: var(--n-800);
+}
+
+.scrub-input::-moz-range-progress {
+  height: var(--h-scrub);
+  border-radius: var(--r-sm);
+  background: var(--n-600);
+}
+
+.scrub-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--s-3);
+  height: var(--s-3);
+  margin-top: calc((var(--h-scrub) - var(--s-3)) / 2);
+  border-radius: 50%;
+  background: var(--n-100);
+}
+
+.scrub-input::-moz-range-thumb {
+  width: var(--s-3);
+  height: var(--s-3);
+  border: 0;
+  border-radius: 50%;
+  background: var(--n-100);
+}
+
+.scrub-input:disabled { cursor: default; }
+.scrub-input:disabled::-webkit-slider-thumb { background: var(--n-600); }
+.scrub-input:disabled::-moz-range-thumb { background: var(--n-600); }
+
+.transport-readout { display: flex; align-items: center; gap: var(--s-3); flex: none; }
+
+.clock {
+  display: flex;
+  gap: var(--s-2);
+  font: 500 var(--t-14) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--n-000);
+}
+
+.clock-sep { color: var(--n-600); }
+
+.run-state {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--n-400);
+  padding: 0 var(--s-2);
+  border-radius: var(--r-sm);
+  background: var(--n-850);
+}
+
+.run-state[data-run-state="finished"] { color: var(--ok); }
+
+.speeds { display: flex; gap: var(--s-1); flex: none; }
+
+/* ── skeletons ─────────────────────────────────────────────────────── */
+/* DESIGN.md: "log loading (skeleton in the shape of the final layout — field
+   block, rail blocks, dials — never a spinner)". */
+
+/* A value the episode log does not carry is an em dash, and it steps back to
+   tertiary so that four unknowns do not read as loudly as four numbers. */
+.meta dd.is-unknown,
+.dial-value.is-unknown { color: var(--n-400); }
+
+.sk {
+  display: block;
+  background: var(--n-800);
+  border-radius: var(--r-sm);
+  animation: sk-pulse var(--m-skeleton) var(--m-ease) infinite alternate;
+}
+
+.sk-dial { width: var(--s-12); height: var(--h-control); }
+.sk-line { height: var(--h-skeleton-line); margin-bottom: var(--s-2); }
+.sk-block { height: var(--h-skeleton-block); }
+.sk-field { flex: 1; width: 100%; border-radius: var(--r-md); }
+
+@keyframes sk-pulse {
+  from { opacity: 1; }
+  to { opacity: 0.45; }
+}
+
+/* ── motion ────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* ── narrow ────────────────────────────────────────────────────────── */
+/* DESIGN.md --bp-narrow: below it the panels stack. Mobile is not supported;
+   this keeps the shell readable on a projector at an odd aspect, nothing
+   more. The literal repeats --bp-narrow because a media condition cannot
+   read a custom property; a test holds the two together. */
+
+@media (max-width: 960px) {
+  .stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 45%);
+  }
+  /* One scrolling column, so that no panel is clipped mid-row. */
+  .rail {
+    display: block;
+    overflow-y: auto;
+    border-left: 0;
+    border-top: var(--w-hairline) solid var(--n-700);
+  }
+  .panel, .panel-contacts, .panel-inspector { display: block; max-height: none; }
+  .panel-scroll { overflow: visible; }
+  /* The dials keep their labels and give up their arcs: four anonymous rings
+     say less than four words do. */
+  .dial-arc { display: none; }
+  .dial-row { gap: var(--s-4); }
+  .meta { display: none; }
+}

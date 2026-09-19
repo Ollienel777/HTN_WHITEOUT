@@ -1,0 +1,119 @@
+/* tokens.css — the only file in viz/ that may hold a raw value.
+ *
+ * Every colour, type step, space, radius, elevation, duration and structural
+ * size in the viewer comes from here. hackathon/DESIGN.md "Tokens" is the
+ * source: the colour, type, space, radius, elevation, motion and breakpoint
+ * blocks below are copied from it verbatim, and a test asserts they still
+ * match. The structural block at the end carries the sizes DESIGN.md states
+ * in prose ("TOPBAR 48px", "RAIL 320px", "TRANSPORT BAR 64px", "accent-filled,
+ * 40px", "a 2px energy bar") so that no rule outside this file spells a pixel.
+ *
+ * Dark only. DESIGN.md "Primary theme: dark. Only dark." — a light theme would
+ * cost a re-tune of every belief ramp stop for a screen nobody looks at.
+ */
+
+:root {
+  /* neutral scale — cool, not pure grey; the ground is ice */
+  --n-950: #07090c;   /* page */
+  --n-900: #0c1015;   /* surface 0 — panels */
+  --n-850: #12171e;   /* surface 1 — cards, raised */
+  --n-800: #1a212a;   /* surface 2 — hover, inputs */
+  --n-700: #2a3541;   /* border strong */
+  --n-600: #3d4a59;   /* border */
+  --n-400: #6f8095;   /* text tertiary */
+  --n-300: #93a3b6;   /* text secondary */
+  --n-100: #d7e0ea;   /* text primary */
+  --n-000: #f4f8fc;   /* text emphatic — numbers */
+
+  /* accent — one, ice cyan. primary action and the current selection only */
+  --accent:        #38d8e0;
+  --accent-hover:  #5ae6ec;
+  --accent-active: #22b4bc;
+  --accent-dim:    #38d8e01f;
+
+  /* semantic — meaning only, never decoration */
+  --ok:    #4ade80;   /* tracked, gate green, score improved */
+  --warn:  #fbbf24;   /* confirming, degraded, score flat */
+  --danger:#f87171;   /* lost, error, score worse */
+
+  /* belief field ramp — sequential, perceptually ordered, dark floor */
+  --belief-0: #07090c00;
+  --belief-1: #10264a;
+  --belief-2: #1d4e8f;
+  --belief-3: #2f7fc4;
+  --belief-4: #6fb6e8;
+  --belief-5: #d6ecff;
+
+  /* asset classes — categorical, distinguishable in greyscale and at 6px */
+  --cls-wing:  #ffb454;   /* fixed-wing  — warm, fast, long strokes */
+  --cls-quad:  #a78bfa;   /* quadcopter  — violet */
+  --cls-rover: #4ade80;   /* rover       — green, ground */
+  --cls-tower: #93a3b6;   /* tower       — neutral, immobile */
+  --truth:     #f87171;   /* ground truth target — the only red drawn on the
+                             field. Same hex as --danger deliberately: red
+                             means "the thing you must not miss" everywhere.
+                             Off the field (score deltas, errors) that is
+                             --danger; on the field it is only ever this. */
+
+  /* terrain */
+  --terrain-lo: #0a0f16;
+  --terrain-hi: #263442;
+  --cut-line:   #38d8e0;  /* flow-network cuts */
+
+  /* type */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  --t-12: 12px/16px;   /* labels, axis, legend */
+  --t-14: 14px/20px;   /* body, controls */
+  --t-16: 16px/24px;   /* panel titles */
+  --t-20: 20px/28px;   /* section heads */
+  --t-24: 24px/32px;   /* score values */
+  --t-48: 48px/1.0;    /* the hero readout: the beat-3 `TRACKED` badge, and the clock */
+
+  /* space */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-6: 24px; --s-8: 32px; --s-12: 48px;
+
+  /* radius — two. never a third. */
+  --r-sm: 4px;   /* inputs, chips, badges */
+  --r-md: 8px;   /* panels, cards */
+
+  /* elevation */
+  --e-1: 0 1px 2px #00000059;                      /* raised panel */
+  --e-2: 0 8px 24px #00000073;                     /* the one overlay */
+
+  /* motion */
+  --m-fast: 150ms; --m-base: 200ms; --m-slow: 300ms;
+  --m-skeleton: 1600ms;                            /* the loading skeleton's
+                                                      breath; slow enough to
+                                                      read as waiting, not as
+                                                      a spinner */
+  --m-ease: cubic-bezier(0.2, 0, 0, 1);            /* ease-out, no bounce */
+
+  /* breakpoints. CSS cannot read a custom property inside a media condition,
+   * so viewer.css repeats --bp-narrow's value in its one @media rule and a
+   * test asserts the two agree — the value is still stated once here. */
+  --bp-demo: 1440px;   /* the target. everything is designed here. */
+  --bp-video: 1280px;
+  --bp-narrow: 960px;  /* panels stack below this. mobile is not supported. */
+
+  /* structure — DESIGN.md "Layout" and "Components", in prose there, named
+   * here so that nothing outside this file spells a pixel. */
+  --h-topbar: 48px;        /* TOPBAR 48px */
+  --h-transport: 64px;     /* TRANSPORT BAR 64px */
+  --w-rail: 320px;         /* RAIL 320px, fixed */
+  --h-control: 40px;       /* the primary transport control, and the minimum
+                              hit target for every control in the shell */
+  --h-row: 32px;           /* a fleet or contact row's interactive height */
+  --sz-dial: 28px;         /* the ScoreDial arc */
+  --sz-dot: 8px;           /* the FleetRow class dot */
+  --w-hairline: 1px;       /* every border in the shell */
+  --w-bar: 2px;            /* the dial arc, the energy bar, the scrub fill */
+  --w-focus: 2px;          /* the focus ring */
+  --h-scrub: 4px;          /* the scrub track */
+  --w-inspector-key: 116px;/* the Inspector's shared right edge for values */
+  --h-skeleton-line: 12px; /* a skeleton text line */
+  --h-skeleton-block: 64px;/* a skeleton rail card */
+  --w-prose: 52ch;         /* the one measure a state's sentence is set to */
+}
