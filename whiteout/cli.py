@@ -4,10 +4,11 @@ Subcommands: ``run``, ``replay``, ``score``, ``sweep``, ``ablate``, ``serve``.
 
 Only ``run`` and ``score`` do anything yet, and only enough for the gate's
 smoke and determinism steps to exercise the real command lines from
-``hackathon/SPEC.md`` §6. The episode record set and the scorer land with
-their own tickets; until then ``run`` emits a placeholder log that is a pure
-function of ``--seed``, ``--ticks`` and ``WHITEOUT_TRANSPORT`` — the header
-record carries the transport as provenance — and ``score`` reports four finite
+``hackathon/SPEC.md`` §6. ``run`` drives the selected transport (§4's seam)
+one tick at a time and writes a real, validated episode log; the belief
+digest, the contacts and the truth on each record are placeholders, because
+the belief field, the estimator and the sim land with their own tickets, and
+the episode loop that fills them is issue #25. ``score`` reports four finite
 zeros. The other subcommands are stubs that refuse loudly.
 """
 
@@ -20,6 +21,10 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
+from whiteout.transport import TransportError, create_transport, selected_transport_name
+from whiteout.types import BeliefDigest, EpisodeRecord, FleetIntent, Truth
+
 #: Ordered scoring axes. The sponsor scores on exactly these four.
 AXES: tuple[str, str, str, str] = (
     "coverage",
@@ -29,11 +34,6 @@ AXES: tuple[str, str, str, str] = (
 )
 
 _NOT_YET = "not implemented yet"
-
-
-def _transport() -> str:
-    """Selected transport. ``WHITEOUT_TRANSPORT`` unset means ``kinematic``."""
-    return os.environ.get("WHITEOUT_TRANSPORT") or "kinematic"
 
 
 def _resolve_seed(explicit: int | None) -> int | None:
@@ -57,37 +57,64 @@ def _resolve_seed(explicit: int | None) -> int | None:
         return None
 
 
+def _placeholder_digest(t: float) -> BeliefDigest:
+    """A belief digest for a build with no belief field yet.
+
+    Every field is finite and zero-valued over a 1×1 grid, so the record
+    validates and the viewer has something to parse. The belief ticket
+    replaces this; nothing may read these numbers as meaning anything.
+    """
+    return BeliefDigest(
+        t=t,
+        entropy=0.0,
+        mass=0.0,
+        peak_xy=(0.0, 0.0),
+        peak_p=0.0,
+        covered_fraction=0.0,
+        grid_shape=(1, 1),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    """Write a placeholder episode log determined by seed, ticks and transport."""
+    """Drive the selected transport for ``--ticks`` ticks and write its log."""
     seed = _resolve_seed(args.seed)
     if seed is None:
         raw = os.environ.get("WHITEOUT_SEED")
         print(f"run: WHITEOUT_SEED={raw} is not an integer", file=sys.stderr)
         return 1
-    out = Path(args.out)
-    if out.parent != Path():
-        out.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        json.dumps(
-            {
-                "type": "header",
-                "seed": seed,
-                "ticks": args.ticks,
-                "transport": _transport(),
-                "schema": "placeholder",
-            },
-            sort_keys=True,
-        )
-    ]
-    for tick in range(args.ticks):
-        lines.append(
-            json.dumps(
-                {"type": "tick", "tick": tick, "seed": seed},
-                sort_keys=True,
+    try:
+        name = selected_transport_name()
+        transport = create_transport(name, seed=seed)
+    except TransportError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
+    records: list[EpisodeRecord] = []
+    transport.connect()
+    try:
+        for _tick in range(args.ticks):
+            observation = transport.observe()
+            intent = FleetIntent(t=observation.t, intents=())
+            transport.command(intent)
+            records.append(
+                EpisodeRecord(
+                    schema_version=SCHEMA_VERSION,
+                    t=observation.t,
+                    observation=observation,
+                    intent=intent,
+                    belief_digest=_placeholder_digest(observation.t),
+                    contacts=(),
+                    truth=Truth(t=observation.t, targets=()),
+                )
             )
-        )
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-    print(f"run: wrote {len(lines)} records to {out} (transport={_transport()})")
+    finally:
+        transport.close()
+    out = Path(args.out)
+    try:
+        written = write_episode_log(out, records)
+    except EpisodeLogError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
+    print(f"run: wrote {written} records to {out} (transport={name})")
     return 0
 
 
