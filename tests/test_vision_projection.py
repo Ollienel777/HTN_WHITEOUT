@@ -50,6 +50,7 @@ import math
 
 import pytest
 
+from whiteout.geo import GeoError
 from whiteout.vision.camera import (
     CAMERAS,
     FIXED_WING_CAMERA,
@@ -61,8 +62,6 @@ from whiteout.vision.camera import (
 from whiteout.vision.projection import (
     EARTH_MEAN_RADIUS_M,
     MAX_FLAT_PLANE_RANGE_ERROR,
-    WGS84_E2,
-    WGS84_F,
     CameraPose,
     ProjectionError,
     camera_basis,
@@ -84,17 +83,6 @@ METRE_TOL = 1e-4
 # --------------------------------------------------------------------------
 # The intrinsics, and the identity every hand-worked case leans on
 # --------------------------------------------------------------------------
-
-
-def test_wgs84_constants_are_the_published_ellipsoid() -> None:
-    """``e² = f (2 - f)`` with ``f = 1/298.257223563``, by hand.
-
-    ``1 / 298.257223563 = 0.0033528106647474805``
-    ``2 - f            = 1.9966471893352525``
-    ``f (2 - f)        = 0.0066943799901413``
-    """
-    assert WGS84_F == pytest.approx(0.0033528106647474805, abs=1e-18)
-    assert WGS84_E2 == pytest.approx(0.0066943799901413, abs=1e-15)
 
 
 @pytest.mark.parametrize("camera", [QUADCOPTER_CAMERA, FIXED_WING_CAMERA, TOWER_CAMERA])
@@ -387,7 +375,7 @@ def test_tower_pose_from_servo_pwm_projects_its_centre_pixel() -> None:
     assert fix.lon_deg == pytest.approx(-94.9946481641, abs=DEGREE_TOL)
 
 
-def test_enu_to_geodetic_matches_the_radii_worked_by_hand() -> None:
+def test_the_local_offset_step_matches_the_radii_worked_by_hand() -> None:
     """The tangent-plane step alone, at φ = 72°, from the module docstring.
 
     ``M = 6393420.763 m`` and ``N cos φ = 1976947.143 m``, so:
@@ -465,7 +453,9 @@ def test_the_horizon_and_the_default_range_bound_are_worked_by_hand() -> None:
     plane's own curvature error reaches a tenth of the range, because that
     error is ``(d / d_horizon)²`` — see the module docstring.
     """
-    assert EARTH_MEAN_RADIUS_M == pytest.approx(6371008.7714, abs=1e-3)
+    # In kilometres: whiteout/geo.py is the one place an earth radius is
+    # spelled in metres, and tests/test_geo.py's guard walks this file too.
+    assert EARTH_MEAN_RADIUS_M / 1000.0 == pytest.approx(6371.0087714, abs=1e-6)
     assert MAX_FLAT_PLANE_RANGE_ERROR == 0.1
 
     assert horizon_range_m(60.0) == pytest.approx(27650.0, abs=0.1)
@@ -559,12 +549,12 @@ def test_a_caller_may_bound_the_range_more_tightly_than_the_default() -> None:
 def test_a_pixel_outside_the_frame_is_refused() -> None:
     """A detector that reports a pixel off the sensor has a bug, not a fix.
 
-    On a 640-wide tower camera, ``px = 100000`` used to project 35 km
-    off-axis without a word. The frame is ``[0, W] × [0, H]``, corners
+    On a 640-wide tower camera, a pixel index in the tens of thousands used
+    to project tens of kilometres off-axis without a word. The frame is ``[0, W] × [0, H]``, corners
     included, because a pixel on the edge is a real pixel.
     """
     pose = CameraPose(72.0, -95.0, 100.0, yaw_deg=0.0, pitch_deg=-45.0)
-    for px, py in ((100000.0, 180.0), (-1.0, 180.0), (320.0, -0.5), (320.0, 361.0)):
+    for px, py in ((20000.0, 180.0), (-1.0, 180.0), (320.0, -0.5), (320.0, 361.0)):
         with pytest.raises(ProjectionError, match="outside"):
             project_pixel_to_ground(TOWER_CAMERA, pose, px, py)
 
@@ -602,7 +592,7 @@ def test_a_non_finite_pose_is_refused_at_construction() -> None:
     pose = CameraPose(72.0, -95.0, 100.0, yaw_deg=0.0, pitch_deg=-45.0)
     with pytest.raises(ProjectionError, match="ground_alt_m must be finite"):
         project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, 180.0, ground_alt_m=math.nan)
-    with pytest.raises(ProjectionError, match="must be finite"):
+    with pytest.raises(GeoError, match="east_m must be finite"):
         enu_to_geodetic(72.0, -95.0, math.nan, 0.0)
 
 
@@ -613,10 +603,15 @@ def test_the_pole_guard_fires_at_the_pole() -> None:
     ``enu_to_geodetic(90.0, 0.0, 1000.0, 0.0)`` returned
     ``lon_deg=146214141690153.44``. Unreachable at Bellot Strait, but it is
     an exported function and a guard that cannot fire is worse than none.
+
+    The guard now lives in ``whiteout.geo``, the repository's one converter,
+    so it raises that module's :class:`~whiteout.geo.GeoError` and draws the
+    line at 1000 m/rad rather than 1 m/rad — about a kilometre from the pole
+    instead of a millimetre. Strictly more of the pole is refused.
     """
-    with pytest.raises(ProjectionError, match="East radius"):
+    with pytest.raises(GeoError, match="East radius"):
         enu_to_geodetic(90.0, 0.0, 1000.0, 0.0)
-    with pytest.raises(ProjectionError, match="East radius"):
+    with pytest.raises(GeoError, match="East radius"):
         enu_to_geodetic(-90.0, 0.0, 1000.0, 0.0)
 
     # Bellot Strait is nowhere near it, and must be unaffected.
