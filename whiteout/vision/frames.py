@@ -46,6 +46,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from http.client import HTTPException
 from typing import IO
 
 from whiteout.vision.camera import VisionError
@@ -71,20 +72,42 @@ _CHUNK = 65536
 #: JPEG start-of-image marker. Every part of an MJPEG stream begins with it.
 _JPEG_SOI = b"\xff\xd8"
 
+#: Largest part payload, and largest buffer, this parser will accumulate
+#: before giving up. Every search here consumes from the buffer only when it
+#: finds what it is looking for, so a delimiter that never matches — a
+#: boundary read wrongly, a framing this parser does not speak — otherwise
+#: appends 64 KiB per read forever. Against a live camera that is an OOM
+#: rather than a diagnostic. A 640×480 MJPEG frame is tens of kilobytes, so
+#: 16 MiB is three orders of magnitude of headroom.
+_MAX_PART_BYTES = 16 * 1024 * 1024
+
+#: Largest single header or delimiter line. Headers are short; a megabyte
+#: without a newline means the stream is not multipart at all.
+_MAX_LINE_BYTES = 65536
+
+#: How many lines of preamble to scan for the first delimiter before giving
+#: up. Bounded for the same reason: against an endless stream whose boundary
+#: never matches, the unbounded version is a hang with no frames and no
+#: message — a camera that "just hangs" on demo day.
+_MAX_PREAMBLE_LINES = 1000
+
 
 class FrameError(VisionError):
     """A frame stream could not be parsed.
 
     Raised when no multipart boundary can be found, when a part's
-    ``Content-Length`` is not a number, and when a part's payload is not a
-    JPEG — the last of which is the one that catches a boundary parsed
-    wrongly, because a mis-split part almost never starts with the
-    start-of-image marker.
+    ``Content-Length`` is not a number, when a part's payload is not a JPEG —
+    the one that catches a boundary parsed wrongly, because a mis-split part
+    almost never starts with the start-of-image marker — and when a search
+    for a line terminator or a delimiter exceeds the buffer caps at the top
+    of this module.
 
-    A stream that simply *ends* is not an error. A live camera's connection
-    drops and a recording is whatever was on disk when the operator stopped
-    ``curl``, so a truncated trailing part ends the iteration and the frames
-    already read stand.
+    A stream that simply *ends* is not an error, and **a dropped connection
+    counts as ending**: :func:`_fill` treats :exc:`OSError` and
+    :exc:`http.client.HTTPException` as end of stream, so a reset socket, a
+    read timeout or a truncated chunked response ends the iteration and the
+    frames already read stand. A recording behaves the same way — it is
+    whatever was on disk when the operator stopped ``curl``.
     """
 
 
@@ -105,7 +128,21 @@ class Frame:
 
 
 def _fill(stream: IO[bytes], buf: bytearray) -> bool:
-    chunk = stream.read(_CHUNK)
+    """Append one chunk; return whether the stream is still going.
+
+    A dropped connection is **end of stream, not an exception**, which is
+    what :class:`FrameError` promises and what a socket does not do on its
+    own. :func:`live_frames` reads from an ``http.client`` response with a
+    timeout, where the realistic endings are :exc:`ConnectionResetError`,
+    :exc:`socket.timeout` (both :exc:`OSError`) and
+    :exc:`http.client.IncompleteRead` (an :exc:`HTTPException`). Letting
+    those escape would make a link drop kill a track-maintenance loop written
+    to the documented contract; the frames already read stand instead.
+    """
+    try:
+        chunk = stream.read(_CHUNK)
+    except (OSError, HTTPException):
+        return False
     if not chunk:
         return False
     buf += chunk
@@ -120,6 +157,11 @@ def _read_line(stream: IO[bytes], buf: bytearray) -> bytes | None:
             line = bytes(buf[:index])
             del buf[: index + 1]
             return line.rstrip(b"\r")
+        if len(buf) > _MAX_LINE_BYTES:
+            raise FrameError(
+                f"no line terminator in the first {len(buf)} bytes: this does not look like a "
+                f"multipart stream"
+            )
         if not _fill(stream, buf):
             return None
 
@@ -143,8 +185,32 @@ def _read_until(stream: IO[bytes], buf: bytearray, sep: bytes) -> bytes | None:
             del buf[: index + len(sep)]
             return out
         start = max(0, len(buf) - len(sep) + 1)
+        if len(buf) > _MAX_PART_BYTES:
+            raise FrameError(
+                f"no delimiter {sep!r} in {len(buf)} bytes: the multipart boundary is probably "
+                f"wrong, or this stream's framing is not one this parser speaks"
+            )
         if not _fill(stream, buf):
             return None
+
+
+def _read_part_until_delimiter(stream: IO[bytes], buf: bytearray, delimiter: bytes) -> bytes | None:
+    """Read a length-less part's payload, up to the line break before ``delimiter``.
+
+    **Both line endings are accepted.** RFC 2046 says CRLF, and cameras
+    mostly send it, but :func:`_read_line` splits on ``\\n`` and strips a
+    trailing ``\\r`` — so the header path has always accepted a bare-LF
+    stream. Searching the payload for ``CRLF + delimiter`` only meant that on
+    such a stream the headers parsed, the payload search never matched, and
+    the iteration yielded **zero frames with no error at all** while the
+    buffer grew for as long as the camera kept sending. Searching for
+    ``LF + delimiter`` and dropping a trailing ``\\r`` handles both framings
+    and keeps the payload byte-exact either way.
+    """
+    payload = _read_until(stream, buf, b"\n" + delimiter)
+    if payload is None:
+        return None
+    return payload[:-1] if payload.endswith(b"\r") else payload
 
 
 def _find_first_delimiter(stream: IO[bytes], buf: bytearray, delimiter: bytes | None) -> bytes:
@@ -154,7 +220,7 @@ def _find_first_delimiter(stream: IO[bytes], buf: bytearray, delimiter: bytes | 
     body: it is the first line that opens with ``--``, which is exactly how
     RFC 2046 defines the delimiter.
     """
-    while True:
+    for _ in range(_MAX_PREAMBLE_LINES):
         line = _read_line(stream, buf)
         if line is None:
             raise FrameError("no multipart boundary found in the stream")
@@ -163,6 +229,10 @@ def _find_first_delimiter(stream: IO[bytes], buf: bytearray, delimiter: bytes | 
                 return line
         elif line == delimiter or line == delimiter + b"--":
             return delimiter
+    raise FrameError(
+        f"no multipart boundary found in the first {_MAX_PREAMBLE_LINES} lines of the stream"
+        + (f": looked for {delimiter!r}" if delimiter is not None else "")
+    )
 
 
 def read_mjpeg(
@@ -188,6 +258,10 @@ def read_mjpeg(
     delimiter. Reading by length is preferred where it is offered because a
     JPEG's entropy-coded bytes can in principle contain the delimiter, and
     length is exact.
+
+    Both **line endings** are handled too — CRLF as RFC 2046 specifies it,
+    and the bare LF some servers and every ``sed``-mangled recording emit.
+    See :func:`_read_part_until_delimiter`.
     """
     buf = bytearray()
     delimiter = _find_first_delimiter(stream, buf, None if boundary is None else b"--" + boundary)
@@ -209,7 +283,7 @@ def read_mjpeg(
 
         closing: bool
         if content_length is None:
-            payload = _read_until(stream, buf, b"\r\n" + delimiter)
+            payload = _read_part_until_delimiter(stream, buf, delimiter)
             if payload is None:
                 return
             tail = _read_line(stream, buf)
@@ -285,8 +359,12 @@ def live_frames(
     **This is the one function here that opens a socket**, so it is the one
     the gate never reaches. Everything it does after the connection is
     :func:`read_mjpeg`, which the tests exercise against bytes; what is not
-    covered offline is the connection itself and the boundary coming out of
-    the ``Content-Type`` header, and both of those need the live arena.
+    covered offline is the connection itself, and the tests cover the two
+    header shapes it produces by feeding the same boundary strings to
+    :func:`read_mjpeg` directly.
+
+    A connection that drops mid-stream ends the iteration rather than
+    raising; see :class:`FrameError`.
     """
     from urllib.request import urlopen
 
@@ -296,5 +374,11 @@ def live_frames(
         for parameter in content_type.split(";")[1:]:
             name, separator, value = parameter.partition("=")
             if separator and name.strip().lower() == "boundary":
-                boundary = value.strip().strip('"').encode("ascii")
+                # A fair number of MJPEG servers put the delimiter's leading
+                # "--" into the header, where RFC 2046 says the boundary
+                # parameter does not carry it. read_mjpeg prepends its own,
+                # so taking the header verbatim would hunt for "----foo" —
+                # and against a never-ending live stream that is no frames,
+                # no error and no diagnostic. Strip it if it is there.
+                boundary = value.strip().strip('"').removeprefix("--").encode("ascii")
         yield from read_mjpeg(response, asset_id, lambda _seq: clock(), boundary=boundary)

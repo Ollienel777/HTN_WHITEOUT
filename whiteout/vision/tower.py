@@ -25,15 +25,39 @@ The map is linear across the servo's pulse range:
 clamped to the pulse range at both ends, which is what the servo itself does.
 
 **The default range is ArduPilot's AntennaTracker default, and it is an
-assumption until someone reads the live parameters.** ``YAW_RANGE`` defaults
-to 360° and ``PITCH_MIN``/``PITCH_MAX`` to −90°/+90°, over a 1000–2000 µs
-pulse; that is what :data:`TOWER_PAN_TILT` encodes, and it puts the servo trim
-at 1500 µs on 0° for both axes. If the arena's trackers are configured
-differently — and ``ARENA.md`` §8 does not say either way — the fix is to read
-those three parameters off the tracker over MAVLink and pass a
-:class:`PanTiltCalibration` built from them. **Nothing else in the projection
-chain changes**, which is why the calibration is a parameter and not a
-constant folded into the arithmetic.
+assumption until someone reads the live parameters.** Four defaults in
+ArduPilot master combine to give it, and each was read out of the source
+rather than recalled:
+
+* ``AntennaTracker/config.h`` — ``YAW_RANGE_DEFAULT 360``,
+  ``PITCH_MIN_DEFAULT -90``, ``PITCH_MAX_DEFAULT 90``.
+* ``AntennaTracker/servos.cpp`` — ``init_servos`` calls
+  ``SRV_Channels::set_angle(k_tracker_yaw, g.yaw_range * 100 / 2)`` and
+  ``set_angle(k_tracker_pitch, (-g.pitch_min + g.pitch_max) * 100 / 2)``, so
+  each axis is an *angle* channel spanning ±180° and ±90° respectively.
+* ``libraries/SRV_Channel/SRV_Channel.cpp`` — ``SERVOn_MIN`` defaults to
+  **1100**, ``SERVOn_MAX`` to **1900**, ``SERVOn_TRIM`` to **1500**.
+* ``SRV_Channel::pwm_from_angle`` interpolates the positive half between
+  ``TRIM`` and ``MAX`` and the negative half between ``MIN`` and ``TRIM``.
+  With the default 1100/1500/1900 those two halves have equal width, so the
+  map is a single straight line from 1100 to 1900.
+
+So the stock travel is **1100–1900 µs**, not 1000–2000, and that is what
+:data:`TOWER_PAN_TILT` encodes. Trim still lands on 0° for both axes.
+Reading it as 1000–2000 would put the full ±180° across a 20% wider pulse
+span and under-read every angle by a ninth — 36° of pan at the travel limit,
+and −18° instead of −22.5° at a tilt pulse of 1400 µs.
+
+**It remains an assumption about the arena**, because ``ARENA.md`` §8 does
+not say whether these trackers are on ArduPilot's defaults, and because
+``servo set N <pwm>`` is ``MAV_CMD_DO_SET_SERVO``, which writes the raw pulse
+to the output and bypasses ``pwm_from_angle`` altogether — so what the pulse
+means physically is the sim's servo model, which these parameters describe
+but do not control. The fix either way is to read ``YAW_RANGE``,
+``PITCH_MIN``, ``PITCH_MAX``, ``SERVO1_MIN``/``MAX`` and ``SERVO2_MIN``/``MAX``
+off the tracker over MAVLink and pass a :class:`PanTiltCalibration` built from
+them. **Nothing else in the projection chain changes**, which is why the
+calibration is a parameter and not a constant folded into the arithmetic.
 
 :data:`TOWER_PAN_TILT` also assumes the tracker's pan zero points at true
 North. A tracker mounted with a different reference is handled by
@@ -44,6 +68,7 @@ geometry, the other is where the mast was bolted down.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from whiteout.vision.camera import VisionError
@@ -78,6 +103,12 @@ class ServoRange:
             raise VisionError(
                 f"servo pulse range must increase, got {self.pwm_min!r}..{self.pwm_max!r}"
             )
+        for field_name, value in (
+            ("angle_min_deg", self.angle_min_deg),
+            ("angle_max_deg", self.angle_max_deg),
+        ):
+            if not math.isfinite(value):
+                raise VisionError(f"{field_name} must be finite, got {value!r}")
 
     def angle(self, pwm: float) -> float:
         """Return the angle in degrees for ``pwm``, clamping outside the range.
@@ -87,7 +118,16 @@ class ServoRange:
         what the hardware does, and a tower scan that overshoots its limit
         should report the limit rather than raise while the fleet is
         searching.
+
+        A pulse that is **not finite** is refused instead of clamped.
+        ``min(max(nan, lo), hi)`` is ``nan`` in Python, so a dropped MAVLink
+        field would otherwise sail through the clamp, through the projection
+        and into a ``POST /api/tracks`` body — where a NaN is not even valid
+        JSON. Refusing here means the detection is discarded at the point the
+        bad value entered.
         """
+        if not math.isfinite(pwm):
+            raise VisionError(f"servo pulse width must be finite, got {pwm!r}")
         clamped = min(max(pwm, float(self.pwm_min)), float(self.pwm_max))
         fraction = (clamped - self.pwm_min) / (self.pwm_max - self.pwm_min)
         return self.angle_min_deg + fraction * (self.angle_max_deg - self.angle_min_deg)
@@ -102,11 +142,13 @@ class PanTiltCalibration:
 
 
 #: ArduPilot AntennaTracker defaults — ``YAW_RANGE`` 360°, ``PITCH_MIN``
-#: −90°, ``PITCH_MAX`` +90°, over a 1000–2000 µs pulse. See the module
-#: docstring: this is an assumption until the live parameters are read.
+#: −90°, ``PITCH_MAX`` +90°, over the **1100–1900 µs** pulse that
+#: ``SERVOn_MIN``/``SERVOn_MAX`` default to. The module docstring cites each
+#: source file; this is still an assumption about *this arena* until the live
+#: parameters are read off the trackers.
 TOWER_PAN_TILT = PanTiltCalibration(
-    pan=ServoRange(1000, 2000, -180.0, 180.0),
-    tilt=ServoRange(1000, 2000, -90.0, 90.0),
+    pan=ServoRange(1100, 1900, -180.0, 180.0),
+    tilt=ServoRange(1100, 1900, -90.0, 90.0),
 )
 
 

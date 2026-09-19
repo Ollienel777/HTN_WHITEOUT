@@ -37,6 +37,8 @@ from whiteout.vision.frames import (
     recorded_frames,
 )
 from whiteout.vision.projection import (
+    EARTH_MEAN_RADIUS_M,
+    MAX_FLAT_PLANE_RANGE_ERROR,
     WGS84_A,
     WGS84_E2,
     WGS84_F,
@@ -46,6 +48,8 @@ from whiteout.vision.projection import (
     Vec3,
     camera_basis,
     enu_to_geodetic,
+    horizon_range_m,
+    max_flat_plane_range_m,
     pixel_ray_enu,
     project_pixel_to_ground,
 )
@@ -60,7 +64,9 @@ from whiteout.vision.tower import (
 __all__ = [
     "CAMERAS",
     "DEFAULT_FPS",
+    "EARTH_MEAN_RADIUS_M",
     "FIXED_WING_CAMERA",
+    "MAX_FLAT_PLANE_RANGE_ERROR",
     "QUADCOPTER_CAMERA",
     "TOWER_CAMERA",
     "TOWER_PAN_TILT",
@@ -79,7 +85,9 @@ __all__ = [
     "VisionError",
     "camera_basis",
     "enu_to_geodetic",
+    "horizon_range_m",
     "live_frames",
+    "max_flat_plane_range_m",
     "pan_tilt_from_pwm",
     "pixel_ray_enu",
     "project_pixel_to_ground",

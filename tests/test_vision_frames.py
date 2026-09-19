@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import IO, cast
 
 import pytest
 
@@ -202,3 +203,116 @@ def test_a_non_positive_frame_rate_is_refused(tmp_path: Path) -> None:
     path.write_bytes(multipart(with_content_length=True))
     with pytest.raises(FrameError, match="fps must be positive"):
         list(recorded_frames(path, "tower-2", fps=0.0))
+
+
+# --------------------------------------------------------------------------
+# Streams that are not quite the textbook shape
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_content_length", [True, False])
+def test_a_bare_lf_stream_yields_its_frames_rather_than_none(with_content_length: bool) -> None:
+    """LF-only framing parsed its headers and then silently yielded nothing.
+
+    ``_read_line`` has always split on ``\\n`` and stripped a trailing
+    ``\\r``, so the header path accepted bare LF. The length-less payload
+    path searched for ``CRLF + delimiter``, which on such a stream never
+    matched: the result was **zero frames and no error**, and on a live
+    socket the buffer grew by 64 KiB a read for as long as the camera kept
+    sending.
+
+    The payloads must still come back byte for byte — a parser that left a
+    stray ``\\r`` on the end would hand the detector JPEGs that decode with
+    a warning on one library and not at all on the next.
+    """
+    body = multipart(with_content_length=with_content_length).replace(b"\r\n", b"\n")
+    frames = frames_of(body)
+    assert [frame.jpeg for frame in frames] == list(PAYLOADS)
+    assert [frame.seq for frame in frames] == [0, 1, 2]
+
+
+def test_a_boundary_header_that_includes_its_dashes_still_matches() -> None:
+    """RFC 2046's boundary parameter carries no ``--``; plenty of servers add it.
+
+    :func:`~whiteout.vision.frames.read_mjpeg` prepends its own, so taking
+    the ``Content-Type`` header verbatim would hunt for ``----arcticframe``.
+    Against a recording that is an error; against a never-ending live stream
+    it was a hang with no frames, no error and no diagnostic. Both spellings
+    now give the same frames, which is what
+    :func:`~whiteout.vision.frames.live_frames` relies on after it strips the
+    prefix off the header.
+    """
+    body = multipart(with_content_length=True)
+    assert frames_of(body, boundary=b"arcticframe") == frames_of(body)
+
+
+def test_a_boundary_that_never_occurs_does_not_scan_forever() -> None:
+    """An endless stream whose delimiter never matches must report, not hang.
+
+    This is the live-camera shape of the previous test's mistake: the bytes
+    never run out, so "read another line and look again" never terminates.
+    The stream here is infinite; if the scan were unbounded this test would
+    never return.
+    """
+
+    class Endless:
+        def read(self, size: int = -1) -> bytes:
+            return b"noise noise noise\r\n" * 64
+
+    stream = cast("IO[bytes]", Endless())
+    with pytest.raises(FrameError, match="no multipart boundary"):
+        list(read_mjpeg(stream, "tower-1", lambda seq: float(seq), boundary=b"arcticframe"))
+
+
+def test_a_payload_with_no_delimiter_in_sight_is_bounded() -> None:
+    """The same cap on the payload search, which is where the bytes actually pile up.
+
+    ``_read_until`` only consumes from the buffer when it finds the
+    separator, so a delimiter that never matches appends every read and
+    releases none. Against a real camera that is an OOM; here it is a
+    :class:`FrameError` that names the delimiter it could not find.
+    """
+
+    header = BOUNDARY + b"\r\nContent-Type: image/jpeg\r\n\r\n" + PAYLOADS[0]
+
+    class EndlessPart:
+        def __init__(self) -> None:
+            self._head: bytes | None = header
+
+        def read(self, size: int = -1) -> bytes:
+            if self._head is not None:
+                out, self._head = self._head, None
+                return out
+            return b"\x00" * 65536
+
+    stream = cast("IO[bytes]", EndlessPart())
+    with pytest.raises(FrameError, match="no delimiter"):
+        list(read_mjpeg(stream, "tower-1", lambda seq: float(seq)))
+
+
+def test_a_dropped_connection_ends_the_iteration_instead_of_escaping() -> None:
+    """``FrameError``'s docstring promises this, and a socket does not do it.
+
+    ``live_frames`` reads from an ``http.client`` response with a timeout,
+    where the realistic endings are ``ConnectionResetError``,
+    ``socket.timeout`` and ``http.client.IncompleteRead`` — none of them a
+    :class:`~whiteout.vision.camera.VisionError`. A track-maintenance loop
+    written to the documented contract, catching one base class, would die on
+    the first link drop. The frames already read stand instead.
+    """
+    body = multipart(with_content_length=True)
+    cut = body.rindex(PAYLOADS[2])
+
+    class Dropping:
+        def __init__(self) -> None:
+            self._rest = body[:cut]
+
+        def read(self, size: int = -1) -> bytes:
+            if self._rest:
+                out, self._rest = self._rest, b""
+                return out
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+    stream = cast("IO[bytes]", Dropping())
+    frames = list(read_mjpeg(stream, "tower-1", lambda seq: seq / 10.0))
+    assert [frame.jpeg for frame in frames] == [PAYLOADS[0], PAYLOADS[1]]

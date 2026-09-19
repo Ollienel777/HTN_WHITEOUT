@@ -59,12 +59,16 @@ from whiteout.vision.camera import (
     VisionError,
 )
 from whiteout.vision.projection import (
+    EARTH_MEAN_RADIUS_M,
+    MAX_FLAT_PLANE_RANGE_ERROR,
     WGS84_E2,
     WGS84_F,
     CameraPose,
     ProjectionError,
     camera_basis,
     enu_to_geodetic,
+    horizon_range_m,
+    max_flat_plane_range_m,
     pixel_ray_enu,
     project_pixel_to_ground,
 )
@@ -341,13 +345,14 @@ def test_tower_pose_from_servo_pwm_projects_its_centre_pixel() -> None:
     """Case C — a tower pose built from raw servo PWM, hand-worked.
 
     **Setup.** Tower at 72.0000° N, 95.0000° W, camera 60.0 m above the
-    water, pan servo at 1750 µs and tilt servo at 1400 µs, on the default
-    AntennaTracker travel (pan ±180° and tilt ±90° across 1000–2000 µs).
-    Centre pixel ``(320.0, 180.0)``.
+    water, pan servo at 1700 µs and tilt servo at 1420 µs, on the default
+    AntennaTracker travel (pan ±180° and tilt ±90° across the 1100–1900 µs
+    that ``SERVOn_MIN``/``SERVOn_MAX`` default to). Centre pixel
+    ``(320.0, 180.0)``.
 
     **1. PWM → angles**, linearly across the pulse range:
-    ``pan  = -180 + (1750 - 1000)/1000 × 360 = -180 + 0.75 × 360 = +90°``
-    ``tilt = -90  + (1400 - 1000)/1000 × 180 = -90  + 0.40 × 180 = -18°``
+    ``pan  = -180 + (1700 - 1100)/800 × 360 = -180 + 0.750 × 360 = +90°``
+    ``tilt = -90  + (1420 - 1100)/800 × 180 = -90  + 0.400 × 180 = -18°``
     So the camera looks due East, 18° below the horizon.
 
     **2 and 3. Centre pixel → water plane.** The centre pixel normalises to
@@ -369,7 +374,7 @@ def test_tower_pose_from_servo_pwm_projects_its_centre_pixel() -> None:
     ``lat = 72.0`` unchanged — a due-East look does not change latitude
     ``lon = -95.0 + 0.0053518359 = -94.9946481641``
     """
-    pose = tower_camera_pose(72.0, -95.0, 60.0, pan_pwm=1750, tilt_pwm=1400)
+    pose = tower_camera_pose(72.0, -95.0, 60.0, pan_pwm=1700, tilt_pwm=1420)
     assert pose.yaw_deg == pytest.approx(90.0, abs=1e-12)
     assert pose.pitch_deg == pytest.approx(-18.0, abs=1e-12)
     assert pose.roll_deg == 0.0
@@ -443,6 +448,181 @@ def test_ground_altitude_offsets_the_plane() -> None:
     fix = project_pixel_to_ground(TOWER_CAMERA, high, 320.0, 180.0, ground_alt_m=100.0)
     assert fix.lat_deg == pytest.approx(72.0, abs=DEGREE_TOL)
     assert fix.lon_deg == pytest.approx(-94.9946481641, abs=DEGREE_TOL)
+
+
+def test_the_horizon_and_the_default_range_bound_are_worked_by_hand() -> None:
+    """``d_horizon = sqrt(2 R h)`` and the bound is ``sqrt(0.1)`` of it.
+
+    ``R = (2a + b)/3`` with ``b = a(1 - f) = 6356752.314...``, so
+    ``R = (12756274 + 6356752.314)/3 = 6371008.771 m``.
+
+    ``h = 60``:   ``2 R h = 764521052.6``, ``sqrt = 27650.0 m``
+    ``h = 120``:  ``2 R h = 1529042105``, ``sqrt = 39103.0 m``
+    ``h = 500``:  ``2 R h = 6371008771``, ``sqrt = 79818.6 m``
+
+    and ``sqrt(0.1) = 0.31622777``, so the default bounds are 8743.7 m,
+    12365.4 m and 25240.9 m. Those are the ranges at which the flat water
+    plane's own curvature error reaches a tenth of the range, because that
+    error is ``(d / d_horizon)²`` — see the module docstring.
+    """
+    assert EARTH_MEAN_RADIUS_M == pytest.approx(6371008.7714, abs=1e-3)
+    assert MAX_FLAT_PLANE_RANGE_ERROR == 0.1
+
+    assert horizon_range_m(60.0) == pytest.approx(27650.0, abs=0.1)
+    assert horizon_range_m(120.0) == pytest.approx(39103.0, abs=0.1)
+    assert horizon_range_m(500.0) == pytest.approx(79818.6, abs=0.1)
+
+    assert max_flat_plane_range_m(60.0) == pytest.approx(8743.7, abs=0.1)
+    assert max_flat_plane_range_m(120.0) == pytest.approx(12365.4, abs=0.1)
+    assert max_flat_plane_range_m(500.0) == pytest.approx(25240.9, abs=0.1)
+
+    # The identity the bound is defined by: the error is (d/d_horizon)², so
+    # the tolerance and the ratio of the two ranges are a square apart.
+    assert (max_flat_plane_range_m(60.0) / horizon_range_m(60.0)) ** 2 == pytest.approx(
+        MAX_FLAT_PLANE_RANGE_ERROR, abs=1e-12
+    )
+
+
+@pytest.mark.parametrize(
+    ("py", "unbounded_range_m"),
+    [
+        # 0.1° of pitch per pixel row on a 36.1°/360 px camera, so these rows
+        # sit 17.95°, 17.85° and 17.75° below the horizon: still descending,
+        # and still nonsense.
+        (1.0, 78445.0),
+        (2.0, 24957.0),
+        (3.0, 14833.0),
+    ],
+)
+def test_a_ray_that_descends_but_grazes_the_horizon_is_refused(
+    py: float, unbounded_range_m: float
+) -> None:
+    """Descending is not enough: ``-h / ray[2]`` is unbounded as the ray flattens.
+
+    This is case C's attitude — a tower camera 60 m up, pitched 18° down —
+    scanning the top of an ordinary frame. Two pixel rows from the top it
+    projects 25.0 km, the whole length of the strait, and one row from the
+    top 78.4 km, well past the 27.6 km horizon a 60 m camera actually has.
+    Nothing about those points looks wrong: they are ordinary
+    :class:`GeoPoint`\\ s, and they would be submitted to ``POST /api/tracks``
+    as detections and read by the *accuracy* criterion.
+
+    The ranges in the parameters are what the unbounded intersection gives,
+    computed from the ray here rather than taken from the implementation's
+    output, so this test pins the size of the problem and not just its sign.
+    """
+    pose = CameraPose(72.0, -95.0, 60.0, yaw_deg=90.0, pitch_deg=-18.0)
+
+    ray = pixel_ray_enu(TOWER_CAMERA, pose, 320.0, py)
+    assert ray[2] < 0.0, "the ray descends, which is exactly why the old guard passed it"
+    scale = -60.0 / ray[2]
+    assert math.hypot(scale * ray[0], scale * ray[1]) == pytest.approx(unbounded_range_m, rel=1e-4)
+
+    with pytest.raises(ProjectionError, match="grazes the horizon"):
+        project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, py)
+
+
+def test_the_same_frame_still_projects_everywhere_the_plane_is_trustworthy() -> None:
+    """The bound must not cost the frame: row 5 downward still projects.
+
+    Same pose. Row 5 is 8.2 km, inside the 8.74 km bound, and every row below
+    it is nearer. A bound that also rejected the useful part of the frame
+    would trade one silent failure for another.
+    """
+    pose = CameraPose(72.0, -95.0, 60.0, yaw_deg=90.0, pitch_deg=-18.0)
+    for py in (5.0, 10.0, 20.0, 40.0, 180.0, 359.0, 360.0):
+        fix = project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, py)
+        assert fix.lat_deg == pytest.approx(72.0, abs=DEGREE_TOL)
+        assert -95.0 < fix.lon_deg < -94.7
+
+
+def test_a_caller_may_bound_the_range_more_tightly_than_the_default() -> None:
+    """Bellot Strait is 2 km across, and this module cannot know that.
+
+    ``max_range_m`` is how a caller that does know says so. The default is a
+    *model* bound — where this arithmetic stops meaning anything — not an
+    arena one.
+    """
+    pose = CameraPose(72.0, -95.0, 60.0, yaw_deg=90.0, pitch_deg=-18.0)
+    assert project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, 10.0) is not None
+
+    with pytest.raises(ProjectionError, match="grazes the horizon"):
+        project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, 10.0, max_range_m=3000.0)
+
+    near = project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, 180.0, max_range_m=3000.0)
+    assert near.lon_deg == pytest.approx(-94.9946481641, abs=DEGREE_TOL)
+
+    with pytest.raises(ProjectionError, match="max_range_m"):
+        project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, 180.0, max_range_m=0.0)
+
+
+def test_a_pixel_outside_the_frame_is_refused() -> None:
+    """A detector that reports a pixel off the sensor has a bug, not a fix.
+
+    On a 640-wide tower camera, ``px = 100000`` used to project 35 km
+    off-axis without a word. The frame is ``[0, W] × [0, H]``, corners
+    included, because a pixel on the edge is a real pixel.
+    """
+    pose = CameraPose(72.0, -95.0, 100.0, yaw_deg=0.0, pitch_deg=-45.0)
+    for px, py in ((100000.0, 180.0), (-1.0, 180.0), (320.0, -0.5), (320.0, 361.0)):
+        with pytest.raises(ProjectionError, match="outside"):
+            project_pixel_to_ground(TOWER_CAMERA, pose, px, py)
+
+    # The edges themselves are inside.
+    for px, py in ((0.0, 0.1), (640.0, 360.0), (320.0, 360.0)):
+        project_pixel_to_ground(TOWER_CAMERA, pose, px, py)
+
+
+def test_a_non_finite_pose_is_refused_at_construction() -> None:
+    """A dropped MAVLink field is a NaN, and NaN is not valid JSON.
+
+    Unchecked, ``yaw_deg=nan`` produces ``GeoPoint(lat_deg=nan,
+    lon_deg=nan)`` with no error raised anywhere in the chain — the one
+    failure mode that reaches ``POST /api/tracks`` and breaks the request
+    body itself.
+    """
+    for field, value in (
+        ("lat_deg", math.nan),
+        ("alt_m", math.inf),
+        ("yaw_deg", math.nan),
+        ("pitch_deg", math.nan),
+        ("roll_deg", math.nan),
+    ):
+        kwargs = {
+            "lat_deg": 72.0,
+            "lon_deg": -95.0,
+            "alt_m": 100.0,
+            "yaw_deg": 0.0,
+            "pitch_deg": -45.0,
+            field: value,
+        }
+        with pytest.raises(ProjectionError, match="must be finite"):
+            CameraPose(**kwargs)  # type: ignore[arg-type]
+
+    pose = CameraPose(72.0, -95.0, 100.0, yaw_deg=0.0, pitch_deg=-45.0)
+    with pytest.raises(ProjectionError, match="ground_alt_m must be finite"):
+        project_pixel_to_ground(TOWER_CAMERA, pose, 320.0, 180.0, ground_alt_m=math.nan)
+    with pytest.raises(ProjectionError, match="must be finite"):
+        enu_to_geodetic(72.0, -95.0, math.nan, 0.0)
+
+
+def test_the_pole_guard_fires_at_the_pole() -> None:
+    """``cos(radians(90))`` is ``6.12e-17``, not ``0``.
+
+    A guard written as ``east_radius <= 0.0`` therefore never fires, and
+    ``enu_to_geodetic(90.0, 0.0, 1000.0, 0.0)`` returned
+    ``lon_deg=146214141690153.44``. Unreachable at Bellot Strait, but it is
+    an exported function and a guard that cannot fire is worse than none.
+    """
+    with pytest.raises(ProjectionError, match="East radius"):
+        enu_to_geodetic(90.0, 0.0, 1000.0, 0.0)
+    with pytest.raises(ProjectionError, match="East radius"):
+        enu_to_geodetic(-90.0, 0.0, 1000.0, 0.0)
+
+    # Bellot Strait is nowhere near it, and must be unaffected.
+    assert enu_to_geodetic(71.99, -94.84, 1000.0, 0.0).lon_deg == pytest.approx(
+        -94.811034, abs=1e-6
+    )
 
 
 def test_a_malformed_camera_is_refused() -> None:

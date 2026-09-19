@@ -55,17 +55,82 @@ takes the vehicle's attitude unchanged:
 A gimballed camera is the same type with the gimbal's angles substituted for
 the airframe's; a tower's come from :mod:`whiteout.vision.tower`.
 
-Accuracy of the tangent-plane step
-----------------------------------
+Accuracy, and the two approximations that cost the most
+-------------------------------------------------------
 
-:func:`enu_to_geodetic` divides the North offset by the meridional radius of
-curvature :math:`M` and the East offset by :math:`N \\cos\\varphi`, both
-evaluated at the camera's latitude. That is a first-order expansion of the
-geodesic, and its error grows as the square of the range: it is under a
-centimetre at 3 km and under a decimetre at 10 km at Bellot Strait's latitude.
-The strait is 25 km × 2 km and the fleet's useful slant ranges are a few
-kilometres, so the approximation is two orders of magnitude inside the pose
-error and is not worth replacing with a full geodesic solver.
+Both of the following were **measured**, not estimated, and the numbers are
+the measurement. Neither is corrected for, and the reason in both cases is
+that something else in the chain is larger.
+
+**1. The tangent plane is not the ellipsoid.** :func:`enu_to_geodetic`
+divides the North offset by the meridional radius of curvature :math:`M` and
+the East offset by :math:`N \\cos\\varphi`, both evaluated at the camera's
+latitude. That is a first-order expansion, and the term it drops is not
+symmetric: a purely **East** displacement on the tangent plane also changes
+latitude, by about
+
+.. math::
+
+    \\Delta(\\text{north}) \\approx -\\frac{E^2 \\tan\\varphi}{2N}
+
+and :math:`\\Delta\\varphi = \\text{north}/M` sets that to zero. Measured
+against an exact ECEF round trip (geodetic → ECEF, displace along the true
+ENU basis, invert with Bowring iteration) at φ = 71.99°, where
+:math:`\\tan\\varphi = 3.076`:
+
+.. code-block:: text
+
+    displacement    position error of enu_to_geodetic
+    E    200 m          0.010 m
+    E    500 m          0.060 m
+    E   1000 m          0.240 m
+    E   2000 m          0.962 m
+    E   3000 m          2.164 m
+    E   5000 m          6.010 m
+    E  10000 m         24.039 m
+    N   1000 m          0.0005 m
+    N   3000 m          0.0044 m
+    N  10000 m          0.055 m
+
+So it is **sub-millimetre along the meridian and a couple of metres at 3 km
+East**, growing as the square of the East offset. East is the direction that
+matters here — Bellot Strait's long axis runs roughly East–West — so these
+are the figures to quote, not the North ones.
+
+**2. The water plane is flat and the sea is not.** The sea surface falls
+:math:`d^2/2R` below the tangent plane at ground range :math:`d`, so the ray
+meets the flat plane *beyond* where it meets the water. With the camera at
+height :math:`h` the ray descends at about :math:`h/d`, so the range is long
+by :math:`d^3/(2Rh)` — a fractional error of
+
+.. math::
+
+    \\frac{\\Delta d}{d} \\approx \\frac{d^2}{2Rh}
+    = \\left(\\frac{d}{d_{\\text{horizon}}}\\right)^2
+    \\qquad d_{\\text{horizon}} = \\sqrt{2Rh}
+
+This is a systematic bias, always outward:
+
+.. code-block:: text
+
+    tower  h= 60 m  d=2000 m   +10.5 m    tower  h= 60 m  d=5000 m  +163.5 m
+    quad   h=120 m  d=5000 m   +81.8 m    f-wing h=500 m  d=5000 m   +19.6 m
+
+It is the **larger of the two at every range for the low-mounted assets**, and
+it is why :func:`project_pixel_to_ground` bounds the range it will return at
+all: see :data:`MAX_FLAT_PLANE_RANGE_ERROR` and :func:`max_flat_plane_range_m`.
+
+**Why neither is corrected.** The altitude datum is a bigger number than
+both. ``pose.alt_m`` comes from ``GLOBAL_POSITION_INT``, which is above the
+ellipsoid, and the geoid separation in the Canadian Arctic is tens of metres;
+that scales the range *linearly*, so on a 120 m quadcopter it is a
+double-digit percentage. Correcting either approximation above while the
+datum is unresolved would move the answer by less than the thing it is
+measured against. Both corrections are small — one extra term in
+:func:`enu_to_geodetic`, and a two-iteration fixpoint on the plane height —
+and the only real cost of applying them is re-deriving the hand-worked cases
+in ``tests/test_vision_projection.py``, which are pinned tighter than the
+corrections are large.
 """
 
 from __future__ import annotations
@@ -76,6 +141,8 @@ from dataclasses import dataclass
 from whiteout.vision.camera import CameraModel, VisionError
 
 __all__ = [
+    "EARTH_MEAN_RADIUS_M",
+    "MAX_FLAT_PLANE_RANGE_ERROR",
     "WGS84_A",
     "WGS84_E2",
     "WGS84_F",
@@ -85,6 +152,8 @@ __all__ = [
     "Vec3",
     "camera_basis",
     "enu_to_geodetic",
+    "horizon_range_m",
+    "max_flat_plane_range_m",
     "pixel_ray_enu",
     "project_pixel_to_ground",
 ]
@@ -101,18 +170,45 @@ WGS84_F = 1.0 / 298.257223563
 #: WGS-84 first eccentricity squared, ``f (2 - f)``.
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 
+#: WGS-84 mean radius ``R1 = (2a + b) / 3``, metres. Used only for the two
+#: curvature quantities in the module docstring — the drop of the sea below
+#: the tangent plane and the horizon that follows from it — where the
+#: difference between a mean sphere and the ellipsoid is far below the error
+#: being bounded.
+EARTH_MEAN_RADIUS_M = (2.0 * WGS84_A + WGS84_A * (1.0 - WGS84_F)) / 3.0
+
+#: How much of the range the flat water plane's own curvature error may reach
+#: before :func:`project_pixel_to_ground` refuses the fix. See the module
+#: docstring: that error is ``(d / d_horizon)²`` of the range, so 0.10 puts
+#: the default bound at ``d_horizon / sqrt(10)``.
+MAX_FLAT_PLANE_RANGE_ERROR = 0.10
+
+#: Smallest East radius of curvature, metres, for which a longitude offset is
+#: meaningful. ``cos(radians(90))`` is ``6.12e-17`` rather than ``0``, so a
+#: guard written against zero never fires; at this radius one metre East is
+#: already 57° of longitude.
+_MIN_EAST_RADIUS_M = 1.0
+
 
 class ProjectionError(VisionError):
     """A pixel has no well-defined point on the water plane.
 
     Raised when the ray does not descend — the pixel is on or above the
-    horizon — and when the camera is not above the plane it is being
-    projected onto. Both are real conditions in the arena rather than
-    programming errors: a fixed-wing at 500 m with a 42.6° vertical field of
-    view sees the horizon in the top of almost every frame, and a tower
-    scanning at ``mode scan`` sweeps through it. The caller's response is to
-    discard the detection, not to crash, so this is a catchable error with a
-    message that names the cause.
+    horizon — when it descends so shallowly that the intersection is past the
+    range the flat water plane can be trusted to, when the camera is not
+    above the plane it is being projected onto, and when the pixel is outside
+    the frame. All are real conditions in the arena rather than programming
+    errors: a fixed-wing at 500 m with a 42.6° vertical field of view sees
+    the horizon in the top of almost every frame, and a tower scanning at
+    ``mode scan`` sweeps through it. The caller's response is to discard the
+    detection, not to crash, so this is a catchable error with a message that
+    names the cause.
+
+    **The shallow-ray case is the one that matters.** ``ray[2] < 0`` alone is
+    not enough: a ray one pixel below the horizon still descends, and
+    ``-h / ray[2]`` is unbounded, so it returns an ordinary-looking
+    :class:`GeoPoint` tens of kilometres away. Refusing is the whole point —
+    that point would be submitted to the tracks API as a detection.
     """
 
 
@@ -154,6 +250,63 @@ class CameraPose:
     yaw_deg: float
     pitch_deg: float
     roll_deg: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Refuse a pose with a non-finite field.
+
+        A dropped or unset MAVLink field arrives as a NaN, and every step
+        after this one propagates it silently: ``camera_basis`` returns NaN
+        axes, the intersection returns a NaN scale, and
+        :class:`GeoPoint` ends up with ``lat_deg=nan``, which is not valid
+        JSON in a ``POST /api/tracks`` body. Catching it at construction is
+        the one place the caller still knows which message the value came
+        from.
+        """
+        for field_name, value in (
+            ("lat_deg", self.lat_deg),
+            ("lon_deg", self.lon_deg),
+            ("alt_m", self.alt_m),
+            ("yaw_deg", self.yaw_deg),
+            ("pitch_deg", self.pitch_deg),
+            ("roll_deg", self.roll_deg),
+        ):
+            if not math.isfinite(value):
+                raise ProjectionError(f"pose {field_name} must be finite, got {value!r}")
+
+
+def horizon_range_m(height_m: float) -> float:
+    """Ground range to the geometric horizon from ``height_m``, ``sqrt(2 R h)``.
+
+    The hard limit of the model: past it the ray does not meet the real sea
+    at all, whatever the flat plane says. 27.6 km from a 60 m tower, 39.1 km
+    from a 120 m quadcopter, 79.8 km from a fixed-wing at 500 m. Refraction
+    would extend it by roughly 8%; that is ignored, which makes this bound
+    the conservative one.
+    """
+    if not (math.isfinite(height_m) and height_m > 0.0):
+        raise ProjectionError(f"horizon needs a positive finite height, got {height_m!r}")
+    return math.sqrt(2.0 * EARTH_MEAN_RADIUS_M * height_m)
+
+
+def max_flat_plane_range_m(height_m: float, tolerance: float = MAX_FLAT_PLANE_RANGE_ERROR) -> float:
+    """Ground range at which the flat plane's error reaches ``tolerance`` of the range.
+
+    ``sqrt(tolerance) × horizon_range_m(height_m)``, from the module
+    docstring's ``Δd/d ≈ (d / d_horizon)²``. At the default tolerance of 0.10
+    that is 8.7 km from a 60 m tower, 12.4 km from a 120 m quadcopter and
+    25.2 km from a fixed-wing at 500 m.
+
+    This is the bound :func:`project_pixel_to_ground` applies when the caller
+    names none, and it is deliberately a *model* bound rather than an arena
+    one: it says where this module's own arithmetic stops meaning anything,
+    not where the boat can be. A caller that knows the arena should pass a
+    tighter ``max_range_m`` — Bellot Strait is 2 km across, so a
+    cross-channel fix beyond about 3 km is impossible for reasons this
+    module cannot see.
+    """
+    if not (math.isfinite(tolerance) and tolerance > 0.0):
+        raise ProjectionError(f"tolerance must be positive and finite, got {tolerance!r}")
+    return math.sqrt(tolerance) * horizon_range_m(height_m)
 
 
 def _cross(a: Vec3, b: Vec3) -> Vec3:
@@ -262,9 +415,19 @@ def enu_to_geodetic(lat_deg: float, lon_deg: float, east_m: float, north_m: floa
         \\qquad
         M = \\frac{a(1 - e^2)}{(1 - e^2 \\sin^2\\varphi)^{3/2}}
 
-    See the module docstring for the error this carries: under a centimetre
-    at 3 km.
+    See the module docstring for the error this carries, which was measured
+    against an exact ECEF round trip: sub-millimetre along the meridian, and
+    about 2.2 m at 3 km East at Bellot Strait's latitude, growing as the
+    square of the East offset.
     """
+    for name, value in (
+        ("lat_deg", lat_deg),
+        ("lon_deg", lon_deg),
+        ("east_m", east_m),
+        ("north_m", north_m),
+    ):
+        if not math.isfinite(value):
+            raise ProjectionError(f"{name} must be finite, got {value!r}")
     phi = math.radians(lat_deg)
     sin_phi = math.sin(phi)
     cos_phi = math.cos(phi)
@@ -272,9 +435,10 @@ def enu_to_geodetic(lat_deg: float, lon_deg: float, east_m: float, north_m: floa
     prime_vertical = WGS84_A / math.sqrt(w)
     meridional = WGS84_A * (1.0 - WGS84_E2) / (w**1.5)
     east_radius = prime_vertical * cos_phi
-    if east_radius <= 0.0:
+    if abs(east_radius) < _MIN_EAST_RADIUS_M:
         raise ProjectionError(
-            f"longitude is undefined at latitude {lat_deg!r}: the East radius vanishes at the pole"
+            f"longitude is undefined at latitude {lat_deg!r}: the East radius of "
+            f"{east_radius!r} m is below {_MIN_EAST_RADIUS_M!r} m"
         )
     return GeoPoint(
         lat_deg + math.degrees(north_m / meridional),
@@ -289,6 +453,7 @@ def project_pixel_to_ground(
     py: float,
     *,
     ground_alt_m: float = 0.0,
+    max_range_m: float | None = None,
 ) -> GeoPoint:
     """Project a pixel onto the water plane and return its lat/lon.
 
@@ -302,8 +467,14 @@ def project_pixel_to_ground(
         is right whenever ``alt_m`` is height above the water. It is a
         parameter because the arena reports altitude in more than one datum
         and the caller, not this function, knows which one it has.
-    :raises ProjectionError: if the camera is not above the plane, or if the
-        ray does not descend to it.
+    :param max_range_m: the furthest ground range this function will return a
+        fix at. ``None``, the default, is
+        :func:`max_flat_plane_range_m` of the camera's height above the
+        plane — the range at which the flat plane's own curvature error
+        reaches :data:`MAX_FLAT_PLANE_RANGE_ERROR` of the range itself.
+    :raises ProjectionError: if the pixel is outside the frame, if the camera
+        is not above the plane, if the ray does not descend to it, or if the
+        intersection is beyond ``max_range_m``.
 
     The intersection: with the camera at height :math:`h = \\text{alt} -
     \\text{ground}` above the plane and the ray direction
@@ -319,13 +490,46 @@ def project_pixel_to_ground(
         \\text{north} = t\\, v_N
 
     which needs :math:`v_U < 0` — the pixel must look below the horizon.
+
+    **Descending is not sufficient, which is why there is a range bound.**
+    :math:`t = -h/v_U` is unbounded as :math:`v_U \\to 0^-`, so a ray one
+    pixel below the horizon still satisfies :math:`v_U < 0` and returns a
+    perfectly ordinary :class:`GeoPoint`. A tower camera at 60 m, pitched
+    18° down — 0.1° of pitch per pixel row — projects row 2 of its frame to
+    25.0 km and row 1 to 78.4 km. The strait is 25 km end to end. Without a
+    bound, one hot pixel of ice glare near the top of a routine frame becomes
+    a track submission on the far side of the arena, and the *accuracy*
+    criterion reads it.
+
+    **Why this bound.** Two candidates are defensible. The geometric horizon,
+    :func:`horizon_range_m`, is the hard one: past it the ray does not meet
+    the sea at all. But at the horizon the flat plane's range error is
+    already 100% of the range — the error is exactly
+    :math:`(d/d_\\text{horizon})^2` — so a fix taken there is not wrong by a
+    little, it is meaningless. The default is therefore the *accuracy* bound
+    rather than the geometric one: the range at which that error reaches
+    10%, which is :math:`d_\\text{horizon}/\\sqrt{10}`, or 8.7 km from a 60 m
+    tower. It rejects both rows above. An arena-aware caller should pass
+    something tighter still; Bellot Strait is 2 km across.
     """
+    if not (0.0 <= px <= camera.width and 0.0 <= py <= camera.height):
+        raise ProjectionError(
+            f"pixel ({px!r}, {py!r}) is outside {camera.name}'s "
+            f"{camera.width}×{camera.height} frame"
+        )
+    if not math.isfinite(ground_alt_m):
+        raise ProjectionError(f"ground_alt_m must be finite, got {ground_alt_m!r}")
     height_above_plane = pose.alt_m - ground_alt_m
     if height_above_plane <= 0.0:
         raise ProjectionError(
             f"camera is not above the plane: altitude {pose.alt_m!r} m against a plane at "
             f"{ground_alt_m!r} m"
         )
+    limit = (
+        max_flat_plane_range_m(height_above_plane) if max_range_m is None else float(max_range_m)
+    )
+    if not (math.isfinite(limit) and limit > 0.0):
+        raise ProjectionError(f"max_range_m must be positive and finite, got {max_range_m!r}")
     ray = pixel_ray_enu(camera, pose, px, py)
     if ray[2] >= 0.0:
         raise ProjectionError(
@@ -334,4 +538,13 @@ def project_pixel_to_ground(
             f"roll {pose.roll_deg!r}"
         )
     scale = -height_above_plane / ray[2]
-    return enu_to_geodetic(pose.lat_deg, pose.lon_deg, scale * ray[0], scale * ray[1])
+    east_m = scale * ray[0]
+    north_m = scale * ray[1]
+    ground_range_m = math.hypot(east_m, north_m)
+    if ground_range_m > limit:
+        raise ProjectionError(
+            f"pixel ({px!r}, {py!r}) grazes the horizon: it projects to {ground_range_m:.0f} m, "
+            f"past the {limit:.0f} m this camera's {height_above_plane!r} m height supports "
+            f"(geometric horizon {horizon_range_m(height_above_plane):.0f} m)"
+        )
+    return enu_to_geodetic(pose.lat_deg, pose.lon_deg, east_m, north_m)
