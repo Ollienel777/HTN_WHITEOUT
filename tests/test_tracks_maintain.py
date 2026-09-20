@@ -312,15 +312,26 @@ def test_a_noisy_fix_is_not_read_as_speed() -> None:
     """
     import numpy as np
 
+    from whiteout.geo import GeoPoint, LocalPoint, local_to_geodetic
+
     hold = TrackHold("Sierra One", None)
     rng = np.random.default_rng(4)
-    sigma_deg = 60.0 / 111_000.0  # 60 m of fix error, in degrees of latitude
+    # The offset is drawn in **metres** and converted by `whiteout.geo`. An
+    # earlier version wrote `60.0 / 111_000.0` here and the ellipsoid guard
+    # in tests/test_geo.py refused it, correctly: a metres-per-degree written
+    # in a hurry is exactly the second converter that guard exists to stop,
+    # and a test is no more exempt than a module.
+    still = GeoPoint(71.995, -94.84)
     for tick in range(60):
+        jitter = local_to_geodetic(
+            still,
+            LocalPoint(float(rng.normal(0.0, 60.0)), float(rng.normal(0.0, 60.0))),
+        )
         hold.sight(
             Sighting(
                 t=float(tick),
-                lat_deg=71.995 + float(rng.normal(0.0, sigma_deg)),
-                lon_deg=-94.84 + float(rng.normal(0.0, sigma_deg)) / 0.31,
+                lat_deg=jitter.lat_deg,
+                lon_deg=jitter.lon_deg,
                 asset_id="quadcopter",
             )
         )
