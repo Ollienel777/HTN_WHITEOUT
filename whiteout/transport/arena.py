@@ -426,7 +426,15 @@ class ArenaTransport:
             0,
             link.asset.system_id,
             1,
-            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            # MSL, to match what observe() reports (#76, #106). Pose.z is
+            # GLOBAL_POSITION_INT.alt, which is MSL; commanding in
+            # GLOBAL_RELATIVE_ALT_INT would put the two sides of the seam in
+            # different datums, each vehicle's offset being its own home
+            # elevation. Measured live: a target_z of 150 sent the quadcopter
+            # to 225 m MSL, because its home sits on 75 m of terrain. The
+            # policy asks for an altitude above the water and this is the
+            # frame that means that.
+            mavutil.mavlink.MAV_FRAME_GLOBAL_INT,
             _POSITION_ONLY_MASK,
             int(waypoint.target_lat * 1e7),
             int(waypoint.target_lon * 1e7),

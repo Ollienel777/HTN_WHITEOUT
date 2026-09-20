@@ -413,3 +413,37 @@ def test_altitude_is_msl_and_not_relative_to_the_vehicle_s_own_home() -> None:
     )
     (pose,) = transport.observe().poses
     assert pose.z == pytest.approx(116.8)
+
+
+def test_a_waypoint_is_commanded_in_the_same_datum_it_is_observed_in() -> None:
+    """Observation and command must share an altitude frame (#106).
+
+    ``Pose.z`` is ``GLOBAL_POSITION_INT.alt``, which is MSL. Commanding in
+    ``GLOBAL_RELATIVE_ALT_INT`` puts the two sides of the seam in different
+    datums, offset by each vehicle's own home elevation. Measured live before
+    the fix: a ``target_z`` of 150 sent the quadcopter to 225 m MSL, because
+    its home sits on 75 m of terrain.
+    """
+    from pymavlink import mavutil
+
+    transport, link = _wired("quad")
+    transport.command(
+        FleetIntent(
+            t=1.0,
+            intents=(
+                WaypointIntent(
+                    asset_id="quadcopter",
+                    t=1.0,
+                    target_lat=72.0,
+                    target_lon=-94.8,
+                    target_z=150.0,
+                    speed=5.0,
+                    reason="search",
+                    task_id="task-1",
+                ),
+            ),
+        )
+    )
+    (_, args) = next(a for a in link.conn.mav.sent if a[0] == "position_target")
+    assert args[3] == mavutil.mavlink.MAV_FRAME_GLOBAL_INT
+    assert args[7] == pytest.approx(150.0)
