@@ -23,11 +23,13 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from whiteout.coordinate import Coordinator
+from whiteout.coordinate import DEFAULT_TRACK_NAME, Coordinator, SightingSource
 from whiteout.geo import ARENA_ORIGIN
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
 from whiteout.policy import AssetRole
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
+from whiteout.tracks.client import TrackPoster
+from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
 from whiteout.types import BeliefDigest, Contact, EpisodeRecord, FleetIntent, Truth
 
@@ -88,7 +90,11 @@ def _placeholder_digest(t: float) -> BeliefDigest:
     )
 
 
-def _coordinator_for(transport: object) -> Coordinator | None:
+def _coordinator_for(
+    transport: object,
+    poster: TrackPoster | None = None,
+    sightings: SightingSource | None = None,
+) -> Coordinator | None:
     """A coordinator over whatever assets this transport rosters.
 
     ``None`` when the transport does not publish a roster. The kinematic fake
@@ -100,7 +106,10 @@ def _coordinator_for(transport: object) -> Coordinator | None:
     if not assets:
         return None
     roles = tuple(AssetRole(asset.asset_id, asset.cls) for asset in assets)
-    return Coordinator(roles)
+    hold: TrackHold | None = None
+    if poster is not None:
+        hold = TrackHold(DEFAULT_TRACK_NAME, poster)
+    return Coordinator(roles, hold=hold, sightings=sightings)
 
 
 def cmd_run(args: argparse.Namespace) -> int:

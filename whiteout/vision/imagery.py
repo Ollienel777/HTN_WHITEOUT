@@ -248,12 +248,14 @@ def decode_jpeg_luma(jpeg: bytes) -> NDArray[np.uint8]:
         is an ``ImportError`` from three frames down that reads as a bug.
 
     Pillow first, then OpenCV, because Pillow is the smaller of the two and
-    ``.convert("L")`` is exactly ITU-R 601 luma. Neither is in
-    ``pyproject.toml`` and **nothing in the gate calls this**; the fixture
-    source is the gate's path.
+    ``.convert("L")`` is exactly ITU-R 601 luma. **Pillow is now a declared
+    dependency** (#105): detection is a vision problem and the arena's
+    cameras are MJPEG, so a decoder is on the critical path rather than
+    optional. OpenCV stays as a fallback for an environment that has it
+    instead, and the final error stays for one that has neither.
     """
     try:
-        from PIL import Image  # type: ignore[import-not-found]
+        from PIL import Image
     except ImportError:
         pass
     else:
