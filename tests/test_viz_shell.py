@@ -440,7 +440,10 @@ def test_the_viewers_projection_is_pinned_to_whiteout_geo() -> None:
 #: The footprint block, cut out of ``viewer.js`` so ``node`` can run it. It
 #: reads the ellipsoid out of the drawing frame above it, so both blocks are
 #: handed to node together.
-_FOOTPRINT_OPENS = "var EARTH_MEAN_RADIUS_M"
+#: Opens at `radians`, not at the earth radius below it: the unit conversion
+#: is the first thing in this section and `groundFootprint` does not run
+#: without it.
+_FOOTPRINT_OPENS = "function radians"
 _FOOTPRINT_CLOSES = "function cameraFor"
 
 
@@ -481,6 +484,12 @@ _PINNED_FOOTPRINTS = (
     ("tower", 60.0, -70.0),
 )
 
+#: A boresight that is nobody's default and reads differently in each unit:
+#: taken as radians, 137 wraps to 289.5 degrees, so a viewer that confused
+#: the two cannot pass by accident. Zero was the old value and is the one
+#: heading at which degrees and radians agree.
+_PINNED_HEADING_DEG = 137.0
+
 
 def _ground_range_m(camera: CameraModel, pose: CameraPose, py: float) -> float:
     """Ground range of the frame's centre column at row ``py``, in metres."""
@@ -500,9 +509,12 @@ def test_the_viewers_footprint_is_the_frame_whiteout_vision_projects() -> None:
     node and compares it to ``whiteout.vision.projection`` at the same two
     pixels.
     """
+    # Degrees, because that is what a `Pose` carries. Feeding radians here
+    # would let the viewer read the field in either unit and still pass, and
+    # a revision of it did: see `test_the_footprint_reads_a_pose_in_degrees`.
     cases = [
         (
-            {"z": alt, "heading": 0.0, "pitch": math.radians(pitch), "cls": name},
+            {"z": alt, "heading": _PINNED_HEADING_DEG, "pitch": pitch, "cls": name},
             {"hfov": CAMERAS[name].hfov_deg, "vfov": CAMERAS[name].vfov_deg},
         )
         for name, alt, pitch in _PINNED_FOOTPRINTS
@@ -522,15 +534,82 @@ def test_the_viewers_footprint_is_the_frame_whiteout_vision_projects() -> None:
             lat_deg=ARENA_ORIGIN.lat_deg,
             lon_deg=ARENA_ORIGIN.lon_deg,
             alt_m=alt,
-            yaw_deg=0.0,
+            yaw_deg=_PINNED_HEADING_DEG,
             pitch_deg=pitch,
         )
         assert drawn is not None, f"{name} at {pitch} deg drew no footprint"
+        assert drawn["bearing"] == pytest.approx(math.radians(_PINNED_HEADING_DEG))
         assert drawn["near"] == pytest.approx(
             _ground_range_m(camera, pose, float(camera.height)), rel=1e-6
         )
         assert drawn["far"] == pytest.approx(_ground_range_m(camera, pose, 0.0), rel=1e-6)
         assert drawn["halfAngle"] == pytest.approx(math.radians(camera.hfov_deg) / 2.0)
+
+
+def _class_cameras() -> dict[str, str]:
+    """The viewer's own vehicle-class to camera-name map, read off the page.
+
+    Parsed rather than restated because the log spells a class (``quad``) and
+    ``whiteout.vision.camera`` spells a camera (``quadcopter``), and a third
+    copy of that correspondence is a third thing to keep in step.
+    """
+    block = re.search(r"var CAMERA_OF_CLASS = \{(.*?)\};", _read("viewer.js"), re.DOTALL)
+    assert block is not None, "the viewer's class-to-camera map has moved"
+    found = dict(re.findall(r'([\w-]+):\s*"([\w-]+)"', block.group(1)))
+    assert found, "no classes were parsed out of the viewer"
+    return found
+
+
+def test_the_footprint_reads_a_pose_in_degrees() -> None:
+    """A `Pose`'s heading is degrees, and the wedge has to be drawn there.
+
+    Driven with a pose lifted out of the committed episode rather than one
+    built here, because the unit is a property of the log and a hand-built
+    case can be written in whichever unit the viewer happens to want. Read as
+    radians the arena's headings wrap — 279.2468 becomes 2.787 rad, 240
+    degrees off — so the wedge keeps its shape and size and points at the
+    wrong water, which is the failure least likely to be caught by eye.
+
+    `whiteout.vision.sightings` settles the unit: it builds the camera pose
+    as ``CameraPose(yaw_deg=pose.heading, pitch_deg=pose.pitch, ...)``.
+    """
+    cameras = _class_cameras()
+    record = read_episode_log(BUNDLED_EPISODE)[0]
+    poses = [pose for pose in record.observation.poses if pose.cls in cameras]
+    assert poses, "the committed episode carries no pose with a camera"
+
+    cases = [
+        (
+            {"z": pose.z, "heading": pose.heading, "pitch": pose.pitch, "cls": pose.cls},
+            {
+                "hfov": CAMERAS[cameras[pose.cls]].hfov_deg,
+                "vfov": CAMERAS[cameras[pose.cls]].vfov_deg,
+            },
+        )
+        for pose in poses
+    ]
+    tail = (
+        "var cases = " + json.dumps(cases) + ";\n"
+        "process.stdout.write(JSON.stringify(cases.map(function (c) {\n"
+        "  return groundFootprint(c[0], c[1]);\n"
+        "})));\n"
+    )
+    got = _run_viewer_block(_footprint_source(), tail)
+    assert isinstance(got, list)
+
+    # Some of these headings exceed 2*pi, so a viewer reading them as radians
+    # does not merely scale the bearing -- it wraps it, and no assertion on a
+    # single pose would be enough to say which unit was read.
+    assert any(pose.heading > 2 * math.pi for pose in poses), (
+        "the committed episode no longer carries a heading that wraps; pick "
+        "a record that does, or this test cannot tell the two units apart"
+    )
+    for pose, drawn in zip(poses, got, strict=True):
+        assert drawn is not None, f"{pose.asset_id} drew no footprint"
+        assert drawn["bearing"] == pytest.approx(math.radians(pose.heading)), (
+            f"{pose.asset_id}'s wedge is drawn at "
+            f"{math.degrees(drawn['bearing']) % 360:.1f} deg, not {pose.heading:.1f}"
+        )
 
 
 def test_a_level_camera_stops_where_the_flat_water_plane_does() -> None:
@@ -573,7 +652,7 @@ def test_a_camera_pitched_past_its_own_nadir_starts_underneath_itself() -> None:
     tail = (
         "process.stdout.write(JSON.stringify(groundFootprint("
         "{ z: 120, heading: 0, pitch: "
-        + repr(math.radians(-60.0))
+        + repr(-60.0)
         + " }, { hfov: "
         + repr(camera.hfov_deg)
         + ", vfov: "

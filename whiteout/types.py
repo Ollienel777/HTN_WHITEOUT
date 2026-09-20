@@ -348,7 +348,17 @@ class Pose:
     ``energy_used`` is cumulative over the episode and is what the efficiency
     axis of the scorer consumes.
 
-    **Orientation is three angles, and two of them are optional.**
+    **Orientation is three angles in degrees, and two of them are optional.**
+    Degrees, because that is what the arena reports and what
+    :class:`whiteout.vision.projection.CameraPose` takes: the adapter hands
+    ``heading`` straight over as ``yaw_deg``. Said here because the unit is
+    not guessable from a reader's side and this file does not hold it
+    everywhere — :class:`SightingFootprint`'s ``heading`` and ``half_angle``
+    are *radians*, which makes the wrong assumption the easy one. Both
+    mistakes have been made: the fake transport once reported this field in
+    radians, and the viewer once consumed it as radians, drawing every
+    camera's footprint at a bearing hundreds of degrees off.
+
     ``heading`` is the yaw every transport can report. ``pitch`` and ``roll``
     are ``None`` when the transport does not know them, for the same reason
     ``measured_t`` is: there is no number that would be honest. A default of

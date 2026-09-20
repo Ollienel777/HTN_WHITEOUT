@@ -524,7 +524,7 @@
           ["latitude", fixed(pose.lat, 5) + "\u00b0"],
           ["longitude", fixed(pose.lon, 5) + "\u00b0"],
           ["altitude", fixed(pose.z, 1) + " m"],
-          ["heading", fixed((Number(pose.heading) * 180) / Math.PI, 1) + "°"],
+          ["heading", fixed(Number(pose.heading), 1) + "°"],
           ["speed", fixed(pose.speed, 2) + " m/s"],
           ["energy used", fixed(pose.energy_used, 2)],
           ["task", taskFor(record, pose.asset_id)]
@@ -945,6 +945,25 @@
 
   /* ── the camera footprint ────────────────────────────────────────── */
 
+  /* **The episode log mixes angle units by record type, and this is the
+   * trap.** A `Pose`'s `heading`, `pitch` and `roll` are **degrees** — they
+   * reach `whiteout.vision.projection` as `CameraPose(yaw_deg=pose.heading,
+   * pitch_deg=pose.pitch, ...)`, and the committed episode's first record
+   * reads `heading: 279.2468`, which is no radian. A `SightingFootprint`'s
+   * `heading` and `half_angle` are **radians**, and its own docstring says
+   * so. So every pose angle crosses into this file's trigonometry through
+   * `radians()`, and nothing else does.
+   *
+   * Getting this backwards is not a subtle failure. Read as radians, that
+   * 279.2468 wraps to 2.787 rad and the wedge is drawn 240 degrees off — the
+   * right shape, the right size, pointing at the wrong water. An earlier
+   * revision of this file did exactly that, in `groundFootprint`,
+   * `drawAssets` and the pose readout alike. `tests/test_viz_shell.py` now
+   * feeds these functions the degrees a log actually carries. */
+  function radians(degrees) {
+    return (Number(degrees) * Math.PI) / 180;
+  }
+
   /* WGS-84 mean radius, from the ellipsoid this file already carries.
    * whiteout.vision.projection.EARTH_MEAN_RADIUS_M, same expression. */
   var EARTH_MEAN_RADIUS_M = (2 * WGS84_A + WGS84_A * (1 - WGS84_F)) / 3;
@@ -962,7 +981,13 @@
   /* The ground the camera's frame covers, as an annular sector about the
    * asset: `near` and `far` in metres along the ground, `bearing` the
    * boresight clockwise from North, `halfAngle` the horizontal half field of
-   * view. Radians out, radians in — the log's angles are radians.
+   * view.
+   *
+   * **Degrees in, radians out.** `pose.heading` and `pose.pitch` arrive in
+   * the degrees the log spells them in, and the camera's fields of view in
+   * the degrees `ARENA.md` publishes; everything returned is radians, which
+   * is what `screenAngle` and the canvas take. See `radians()` above on why
+   * that seam is where it is.
    *
    * The near and far edges are the bottom and top rows of the frame:
    * depression theta +/- VFOV/2, and a range of h / tan(depression). A ray
@@ -983,13 +1008,13 @@
   function groundFootprint(pose, camera, limitM) {
     var height = Number(pose.z);
     if (!camera || !isFinite(height) || height <= 0) { return null; }
-    var bearing = Number(pose.heading);
-    if (!isFinite(bearing)) { return null; }
+    if (!isFinite(Number(pose.heading))) { return null; }
+    var bearing = radians(pose.heading);
     /* Pitch is optional on a Pose and nose-up positive, so the depression
      * below the horizontal is its negation, and an absent attitude reads as
      * level rather than as a guess at a tilt. */
-    var pitch = isFinite(Number(pose.pitch)) ? Number(pose.pitch) : 0;
-    var halfVertical = (camera.vfov * Math.PI) / 360;
+    var pitch = isFinite(Number(pose.pitch)) ? radians(pose.pitch) : 0;
+    var halfVertical = radians(camera.vfov) / 2;
     var model = Math.sqrt(MAX_FLAT_PLANE_RANGE_ERROR) * horizonRangeM(height);
     var limit = isFinite(Number(limitM)) ? Math.min(model, Number(limitM)) : model;
     var lower = -pitch + halfVertical;
@@ -1001,7 +1026,7 @@
     var near = lower >= Math.PI / 2 ? 0 : Math.min(limit, height / Math.tan(lower));
     var far = upper <= 0 ? limit : Math.min(limit, height / Math.tan(upper));
     if (!(far > near)) { return null; }
-    return { near: near, far: far, bearing: bearing, halfAngle: (camera.hfov * Math.PI) / 360 };
+    return { near: near, far: far, bearing: bearing, halfAngle: radians(camera.hfov) / 2 };
   }
 
   function cameraFor(pose) {
@@ -1185,9 +1210,8 @@
       var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
       var at = project(local.east, local.north);
       var colour = classColour(pose.cls);
-      var bearing = Number(pose.heading);
-      if (isFinite(bearing)) {
-        var angle = screenAngle(bearing);
+      if (isFinite(Number(pose.heading))) {
+        var angle = screenAngle(radians(pose.heading));
         ctx.strokeStyle = colour;
         ctx.lineWidth = size("--w-hairline");
         ctx.beginPath();
