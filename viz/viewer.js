@@ -19,10 +19,18 @@
  *   6 zero contacts   the rail's contacts panel, which says what would post one
  *   7 many contacts   the rail's contacts panel scrolls; the field does not
  *
- * The field's layered content draw — terrain, belief, cuts, footprints,
- * intents, sprites, truth — is FieldCanvas's, and lands with its own ticket.
- * What is here is the field's chrome: the extent graticule and the scale bar,
- * so that the canvas reads as an instrument at rest rather than a blank area.
+ * The field draws in one pass, back to front: the chrome (the extent
+ * graticule and the scale bar), the belief field over the water the vessel
+ * could be in, and the fleet over that. #20, scoped to those two layers —
+ * camera footprints, the contact track and its age are the rest of that
+ * ticket and are not here.
+ *
+ * Three things the original #20 asked for are deliberately absent, because
+ * the arena turned out not to have them: there is no terrain hillshade (the
+ * sponsor renders Bellot Strait themselves), no cut chords (#14 is closed, a
+ * min-cut over one channel is degenerate) and no truth marker (the arena
+ * gives no ground truth, so drawing one would be drawing a number we do not
+ * have).
  */
 (function (global) {
   "use strict";
@@ -54,6 +62,11 @@
    * value. A zero would be a number the system never produced. */
   var UNKNOWN = "—";
 
+  /* How many colours the belief ramp is resolved to. Finer than the eye
+   * separates in a 100 m cell, and a quarter of the 255 the log quantises to,
+   * so the ramp is never what loses a gradient. */
+  var PALETTE_STEPS = 64;
+
   var state = {
     phase: "empty",          /* empty | loading | error | ready */
     records: [],
@@ -63,7 +76,9 @@
     source: "",
     selected: null,
     extent: 1000,            /* metres of half-width the field frames */
+    extentNorth: 1000,       /* the same across the channel, which is far less */
     origin: null,            /* the drawing frame's origin, as {lat, lon} */
+    lattice: null,           /* the belief cells' corners, in metres */
     failure: null            /* { line, reason } */
   };
 
@@ -637,16 +652,263 @@
 
   /* The extent is a property of the episode, so it is measured once per load
    * rather than per frame. */
+  /* The two half-extents, measured apart rather than as one square.
+   *
+   * A square frame is the wrong shape for this world. Bellot Strait is about
+   * 6.25 km along and 1.5 km across, so squaring the extent sizes everything
+   * to the long axis and then shows the channel at a quarter of the width the
+   * canvas has for it, inside a margin of empty water on all four sides. Held
+   * apart, whichever axis actually binds sets the scale, and on a 1440-wide
+   * field that is the along-channel one — the strait fills the frame it is
+   * given. */
   function measureExtent() {
     var span = DEFAULT_EXTENT;
+    var across = DEFAULT_EXTENT;
     state.origin = measureOrigin();
+    state.lattice = measureLattice();
     state.records.forEach(function (record) {
       record.observation.poses.filter(isPlaced).forEach(function (pose) {
         var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
-        span = Math.max(span, Math.abs(local.east) * 1.2, Math.abs(local.north) * 1.2);
+        span = Math.max(span, Math.abs(local.east) * 1.2);
+        across = Math.max(across, Math.abs(local.north) * 1.2);
       });
     });
+    /* The channel has to fit too, not just the fleet. The assets start inside
+     * the water and stay there, so sizing on poses alone framed the episode
+     * tightly enough to clip the ends of the belief ribbon — the thing the
+     * field is mostly showing. No 1.2 margin here: the lattice is the world's
+     * own edge, and padding it would leave the channel floating in dead
+     * space. */
+    var lattice = state.lattice;
+    if (lattice) {
+      for (var i = 0; i < lattice.east.length; i += 1) {
+        span = Math.max(span, Math.abs(lattice.east[i]));
+        across = Math.max(across, Math.abs(lattice.north[i]));
+      }
+    }
     state.extent = span;
+    state.extentNorth = across;
+  }
+
+  /* ── the belief field ────────────────────────────────────────────── */
+
+  /* base64 to bytes. `atob` is in every browser this opens in, and the
+   * viewer has no build step to bring in anything else. */
+  function bytesOf(text) {
+    var binary = global.atob(text);
+    var out = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i += 1) { out[i] = binary.charCodeAt(i); }
+    return out;
+  }
+
+  /* The episode-constant cell lattice, parsed once per load.
+   *
+   * `whiteout.types.BeliefGeometry` is the contract: `water` is a row-major
+   * bitfield over `shape`, most significant bit first, and `corners` is the
+   * (along + 1) x (across + 1) corner lattice as interleaved big-endian
+   * float32 lat/lon. Cell (row, column) is the quadrilateral on corners
+   * (row, column), (row + 1, column), (row + 1, column + 1), (row, column + 1).
+   *
+   * **Projected here rather than per frame.** The origin is fixed for the
+   * episode, so a corner's metres never change; `toLocal` runs a sine, a
+   * cosine and a power per call, and doing that for 3400 corners on all 400
+   * ticks is 1.4M transcendental calls to redraw a constant. Held as metres,
+   * a redraw is one multiply-add per corner.
+   *
+   * Returns null for a log carrying no field, which is every episode written
+   * before schema 6 and any run of a transport that reports none. The field
+   * simply is not drawn; that is not an error state. */
+  function measureLattice() {
+    var carrier = null;
+    for (var r = 0; r < state.records.length; r += 1) {
+      if (state.records[r].belief_field && state.records[r].belief_field.geometry) {
+        carrier = state.records[r].belief_field.geometry;
+        break;
+      }
+    }
+    if (!carrier) { return null; }
+    var along = Number(carrier.shape[0]);
+    var across = Number(carrier.shape[1]);
+    var mask = bytesOf(carrier.water);
+    var raw = bytesOf(carrier.corners);
+    var view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    var corners = (along + 1) * (across + 1);
+    var east = new Float64Array(corners);
+    var north = new Float64Array(corners);
+    for (var i = 0; i < corners; i += 1) {
+      var local = toLocal(state.origin, view.getFloat32(i * 8, false), view.getFloat32(i * 8 + 4, false));
+      east[i] = local.east;
+      north[i] = local.north;
+    }
+    /* The set bits, in mask order: byte k of a frame's `cells` is cell
+     * `water[k]`, which is what makes a byte's position mean a place. */
+    var water = [];
+    for (var c = 0; c < along * across; c += 1) {
+      if ((mask[c >> 3] >> (7 - (c & 7))) & 1) { water.push(c); }
+    }
+    return { along: along, across: across, east: east, north: north, water: water };
+  }
+
+  /* `#rrggbb` or `#rrggbbaa` as [r, g, b, a]. The ramp's floor carries an
+   * alpha of 00 so that an emptied cell reveals the graticule under it
+   * rather than painting a near-black patch over it. */
+  function rgbaOf(hex) {
+    var text = hex.replace("#", "");
+    return [
+      parseInt(text.substring(0, 2), 16),
+      parseInt(text.substring(2, 4), 16),
+      parseInt(text.substring(4, 6), 16),
+      text.length >= 8 ? parseInt(text.substring(6, 8), 16) / 255 : 1
+    ];
+  }
+
+  /* The belief ramp as a fixed number of ready-made `rgba()` strings.
+   *
+   * Built per draw rather than per cell: `token()` is a getComputedStyle
+   * call, and six of those plus 850 string builds every frame is work the
+   * ramp does not need — it is the same ramp for every cell. 64 steps is
+   * finer than the eye resolves in a 100 m cell and a quarter of the
+   * quantiser's own 255. */
+  function beliefPalette() {
+    var stops = [];
+    for (var s = 0; s <= 5; s += 1) { stops.push(rgbaOf(token("--belief-" + s))); }
+    var palette = [];
+    for (var i = 0; i < PALETTE_STEPS; i += 1) {
+      var x = (i / (PALETTE_STEPS - 1)) * (stops.length - 1);
+      var low = Math.min(Math.floor(x), stops.length - 2);
+      var f = x - low;
+      var a = stops[low];
+      var b = stops[low + 1];
+      palette.push(
+        "rgba(" + Math.round(a[0] + (b[0] - a[0]) * f) +
+        "," + Math.round(a[1] + (b[1] - a[1]) * f) +
+        "," + Math.round(a[2] + (b[2] - a[2]) * f) +
+        "," + (a[3] + (b[3] - a[3]) * f).toFixed(3) + ")"
+      );
+    }
+    return palette;
+  }
+
+  /* The belief field, one filled quadrilateral per water cell.
+   *
+   * **Byte value, not absolute probability.** A frame's bytes are already
+   * relative to that frame's own peak (`scale`), and drawing them as they
+   * come is what makes the erosion legible: the most probable cell holds
+   * full luminance throughout while swept water drains toward the floor, so
+   * what moves on screen is the shape of what the fleet has ruled out. An
+   * absolute ramp would instead dim the whole field together as the peak
+   * climbed, which is the same information rendered as a fade.
+   *
+   * Each quad is stroked in its own fill colour as well as filled. Adjacent
+   * antialiased fills leave a hairline of background between them, and 850
+   * of those read as a grid laid over the field rather than as water. */
+  function drawBelief(ctx, cx, cy, scale) {
+    var record = state.records[state.index];
+    var frame = record && record.belief_field;
+    var lattice = state.lattice;
+    if (!frame || !lattice) { return; }
+    var bytes = bytesOf(frame.cells);
+    var palette = beliefPalette();
+    var last = palette.length - 1;
+    var stride = lattice.across + 1;
+    var east = lattice.east;
+    var north = lattice.north;
+    var water = lattice.water;
+    var count = Math.min(water.length, bytes.length);
+    ctx.lineWidth = 1;
+    ctx.lineJoin = "round";
+    for (var k = 0; k < count; k += 1) {
+      var cell = water[k];
+      var row = (cell / lattice.across) | 0;
+      var column = cell % lattice.across;
+      var a = row * stride + column;
+      var b = a + stride;
+      var colour = palette[Math.round((bytes[k] / 255) * last)];
+      ctx.fillStyle = colour;
+      ctx.strokeStyle = colour;
+      ctx.beginPath();
+      ctx.moveTo(cx + east[a] * scale, cy - north[a] * scale);
+      ctx.lineTo(cx + east[b] * scale, cy - north[b] * scale);
+      ctx.lineTo(cx + east[b + 1] * scale, cy - north[b + 1] * scale);
+      ctx.lineTo(cx + east[a + 1] * scale, cy - north[a + 1] * scale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  /* The four assets, over the field.
+   *
+   * A tower is a square because it cannot move; an aircraft is a triangle
+   * pointing along its heading, which is degrees clockwise from North
+   * (`whiteout.types.Pose`). Both carry a dark outline so the mark holds its
+   * shape over the ramp's bright end as well as over the empty floor, and a
+   * label, because a judge watching a handoff needs to know which airframe
+   * moved. Nothing glows. */
+  function drawAssets(ctx, cx, cy, scale) {
+    var record = state.records[state.index];
+    if (!record) { return; }
+    var poses = record.observation.poses.filter(isPlaced);
+    ctx.font = canvasFont("--t-12", "--font-mono");
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "miter";
+    /* Where a label has already been put, so the next one can step over it.
+     * Two assets converging on the same waypoint is the normal end of a
+     * handoff, not an edge case — the quadcopter and the fixed-wing finish
+     * this episode a few metres apart — and two labels on the same baseline
+     * overprint into a word that reads as a rendering fault. */
+    var placed = [];
+    poses.forEach(function (pose) {
+      var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
+      var x = cx + local.east * scale;
+      var y = cy - local.north * scale;
+      var reach = size("--s-2");
+      ctx.lineWidth = size("--w-hairline") * 2;
+      ctx.strokeStyle = token("--n-950");
+      ctx.fillStyle = pose.cls === "tower" ? token("--n-300") : token("--n-000");
+      ctx.beginPath();
+      if (pose.cls === "tower") {
+        ctx.rect(x - reach, y - reach, reach * 2, reach * 2);
+      } else {
+        /* Heading is degrees clockwise from North, and the canvas y axis
+         * points down, so North is -y: forward is (sin, -cos) and the
+         * airframe's right is that turned 90 degrees clockwise, (cos, sin).
+         * The triangle is nose-forward with its base behind the position, so
+         * the mark's centre of area sits on the fix rather than ahead of it. */
+        var heading = ((Number(pose.heading) || 0) * Math.PI) / 180;
+        var forwardX = Math.sin(heading);
+        var forwardY = -Math.cos(heading);
+        var rightX = Math.cos(heading);
+        var rightY = Math.sin(heading);
+        var nose = reach * 1.9;
+        var back = reach * 0.9;
+        var beam = reach * 1.0;
+        ctx.moveTo(x + nose * forwardX, y + nose * forwardY);
+        ctx.lineTo(x - back * forwardX + beam * rightX, y - back * forwardY + beam * rightY);
+        ctx.lineTo(x - back * forwardX - beam * rightX, y - back * forwardY - beam * rightY);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      var labelX = x + reach * 2.2;
+      var labelY = y;
+      var step = size("--s-3") || 12;
+      var width = ctx.measureText(pose.asset_id).width;
+      for (var tries = 0; tries < placed.length + 1; tries += 1) {
+        var clash = placed.some(function (box) {
+          return Math.abs(box.y - labelY) < step &&
+            labelX < box.x + box.width && box.x < labelX + width;
+        });
+        if (!clash) { break; }
+        labelY += step;
+      }
+      placed.push({ x: labelX, y: labelY, width: width });
+      ctx.fillStyle = token("--n-300");
+      ctx.strokeStyle = token("--n-950");
+      ctx.lineWidth = size("--w-hairline") * 3;
+      ctx.strokeText(pose.asset_id, labelX, labelY);
+      ctx.fillText(pose.asset_id, labelX, labelY);
+    });
   }
 
   /* A round grid step that puts between four and ten lines across the view. */
@@ -681,7 +943,11 @@
     ctx.fillRect(0, 0, box.width, box.height);
 
     var span = state.extent;
-    var scale = Math.min(box.width, box.height) / (span * 2);
+    /* Whichever axis runs out of room first sets the scale, so the channel is
+     * framed by the canvas it has rather than by the square that contains it.
+     * One scale for both axes still, because the field is a map and a map
+     * with two scales is a lie. */
+    var scale = Math.min(box.width / (span * 2), box.height / (state.extentNorth * 2));
     var cx = box.width / 2;
     var cy = box.height / 2;
     var step = gridStep(span);
@@ -709,6 +975,11 @@
     ctx.moveTo(0, Math.round(cy) + half); ctx.lineTo(box.width, Math.round(cy) + half);
     ctx.stroke();
 
+    /* Layered in one pass, back to front: the chrome above, then the water
+     * the vessel could be in, then the fleet over it. The scale bar goes
+     * last so it stays readable where the field runs bright under it. */
+    drawBelief(ctx, cx, cy, scale);
+    drawAssets(ctx, cx, cy, scale);
     drawScaleBar(ctx, box, step, scale);
   }
 
