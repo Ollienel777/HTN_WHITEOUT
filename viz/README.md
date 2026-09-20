@@ -11,6 +11,7 @@ step, opens from `file://`. Nothing in `whiteout/` imports from here.
 | `tokens.css` | **the only file allowed a raw value.** `DESIGN.md`'s token block, plus the structural sizes it states in prose |
 | `viewer.css` | the shell's layout and components, in tokens only |
 | `viewer.js` | the state machine, the episode-log reader, the replay clock, and the field's chrome |
+| `basemap.js` | **generated** by `scripts/make_basemap.py` — the channel's two shores, in lat/lon, from `whiteout.belief.geometry.DEFAULT_STRAIT`. The field fills everything outside them as land. Optional: a page without it draws the dark ground it always did |
 | `icons.js` | the three transport glyphs, as inline SVG paths. There are no other icons |
 
 ## Running it

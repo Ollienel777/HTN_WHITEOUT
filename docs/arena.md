@@ -177,9 +177,6 @@ have to guess at:
 - The rail's contacts panel shows each contact's fix synchronisation, and a line
   counting fixes the camera path refused and why. An empty contacts panel with
   refusals counted means the cameras are working and the poses are not.
-- `curl http://10.99.4.1:8010/api/tracks` is the ground truth on whether
-  anything is being scored. A climbing `fixes` count under one name is the
-  whole chain working.
 
 ---
 

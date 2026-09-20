@@ -179,6 +179,22 @@ button { font: inherit; color: inherit; background: none; border: 0; }
   color: var(--ok);
 }
 
+/* Bottom-right, opposite the canvas's scale bar: the Observable habit of
+ * putting the label next to the thing it labels, at the size and the
+ * tertiary colour the axis labels use. */
+.field-credit {
+  position: absolute;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  margin: 0;
+  font: 400 var(--t-12) var(--font-mono);
+  /* --n-300 and not the tertiary --n-400 the canvas's own axis labels use:
+   * this line sits over the land tone rather than over the page, and at
+   * --n-400 that ground puts it at 4.3:1, under AA. */
+  color: var(--n-300);
+  pointer-events: none;
+}
+
 .field-overlay {
   position: absolute;
   inset: 0;
