@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from whiteout.geo import ARENA_ORIGIN, WGS84_A, WGS84_F, LocalPoint, local_to_geodetic
-from whiteout.log import SCHEMA_VERSION, validate_episode_log
+from whiteout.log import SCHEMA_VERSION, read_episode_log, validate_episode_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIZ = REPO_ROOT / "viz"
@@ -222,6 +222,33 @@ def test_the_bundled_episode_is_a_real_valid_episode_log() -> None:
     """The empty state's primary action must never land in the error state."""
     assert BUNDLED_EPISODE.is_file(), "the empty state offers an episode that is not there"
     assert validate_episode_log(BUNDLED_EPISODE) > 0
+
+
+def test_the_bundled_episode_shows_a_fleet_doing_something() -> None:
+    """Valid is not the same as worth looking at, and this is the difference.
+
+    The committed fixture was a valid episode log for a day and a half while
+    being 120 ticks of four parked assets, an empty intent every tick and a
+    1x1 placeholder belief digest with zero mass. Every test above passed the
+    whole time. A judge opening the viewer would have seen a correctly
+    rendered instrument reporting that nothing was happening.
+
+    So this asserts the three things that make it a demo rather than a
+    well-formed file: the fleet is tasked, at least one asset actually goes
+    somewhere, and the belief field is a real grid rather than the
+    placeholder. It deliberately says nothing about *how much* the field
+    moves -- the negative-information update (#13) is not merged, so the
+    field is still uniform, and pinning a number here would have to be
+    rewritten the day it lands.
+    """
+    records = read_episode_log(BUNDLED_EPISODE)
+    last = records[-1]
+    assert last.belief_digest.grid_shape != (1, 1), "the bundled episode carries a placeholder"
+    assert last.belief_digest.mass > 0.0
+    assert any(record.intent.intents for record in records), "nothing was ever tasked"
+    assert any(pose.energy_used > 0.0 for record in records for pose in record.observation.poses), (
+        "no asset moved for the whole episode"
+    )
 
 
 def test_the_viewer_reads_the_same_schema_version_as_the_python_reader() -> None:
