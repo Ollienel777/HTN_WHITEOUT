@@ -40,10 +40,12 @@ Two endpoints, and what each is good for
     The site's own description: its centre, ``bounds3413`` — the extent in
     EPSG:3413, the polar stereographic grid the arena tiles its terrain in —
     and ``convergence_deg``, the angle between that grid's North and true
-    North. **We have never called it.** The fixture therefore records it as
-    *not recorded*, rather than inventing a plausible answer, and
-    :class:`SiteParameters` reports ``convergence_deg`` and ``bounds3413`` as
-    ``None`` until somebody runs the script against a live arena.
+    North. Called and recorded, from the SIM-5 arena at ``10.99.4.1`` on
+    2026-09-20. A record whose ``response`` is ``null`` still means *not
+    recorded*, and :class:`SiteParameters` still reports the two grid fields
+    as ``None`` in that case rather than inventing a plausible answer; that
+    is the state the file shipped in before the tunnel existed, and the state
+    it would return to on a site nobody has asked yet.
 
 When both are recorded they overlap on the centre, and that overlap is
 checked: :func:`parse_site` refuses a fixture whose two centres disagree by
@@ -77,6 +79,20 @@ published as the angle from grid to true or from true to grid — so
 centre quoted to fewer decimals than ours, not to absorb a different
 projection. Half a degree at the site's 3.25 km half-extent is 28 m; a wrong
 projection is tens of degrees out, not tenths.
+
+That slack turned out to be needed, and to be the right size. The arena
+answers ``-49.80479318596525``; the identity at ``SITE_LON`` gives
+``-49.822428``. The two agree to **0.0176°**, which is 1 m across the site's
+half-extent and about a thirtieth of the tolerance. The residual is not
+rounding — the centre is quoted to six decimals — so the arena is computing
+its convergence some other way than the closed form, most likely by
+differentiating the projection numerically. That is not worth chasing: what
+the check is for is telling EPSG:3413 apart from some other grid, and tenths
+of a degree is an answer of *yes, this grid*. The recorded ``bounds3413``
+says the same thing independently — reprojecting ``SITE_LAT``/``SITE_LON``
+into EPSG:3413 by the closed form lands on the centre of the recorded box to
+**0.0 m**, and the box spans 6468.62 grid metres across 6500 ground metres,
+which is the scale factor at 72° N against a 70° N standard parallel.
 """
 
 from __future__ import annotations
@@ -91,6 +107,8 @@ from typing import Any
 from whiteout.geo import GeoPoint, geodetic_to_local
 
 __all__ = [
+    "BOUNDS_EXTENT_TOLERANCE",
+    "BOUNDS_SQUARENESS_M",
     "CENTRE_AGREEMENT_M",
     "CONVERGENCE_TOLERANCE_DEG",
     "GRID_CENTRAL_MERIDIAN_DEG",
@@ -124,6 +142,22 @@ CONVERGENCE_TOLERANCE_DEG = 0.5
 #: site, one centre; a kilometre of disagreement is a bug in the record and
 #: not a rounding.
 CENTRE_AGREEMENT_M = 50.0
+
+#: How far ``bounds3413``'s span may sit from ``SITE_EXTENT`` as a fraction,
+#: before :func:`parse_site` refuses the fixture. The two are not equal and
+#: are not meant to be: ``SITE_EXTENT`` is ground metres, the bounds are
+#: EPSG:3413 grid metres, and the polar stereographic scale factor between
+#: them is 0.4952% at the recorded centre (6468.62 m of grid across 6500 m of
+#: ground). This bound is wide enough to hold that and any neighbouring
+#: latitude, and narrow enough to catch a bounds box of the wrong site, the
+#: wrong extent, or the wrong units.
+BOUNDS_EXTENT_TOLERANCE = 0.02
+
+#: How far ``bounds3413``'s width and height may sit apart, metres, before
+#: :func:`parse_site` refuses the fixture. The arena renders a square site and
+#: the recorded box is square to the last decimal it quotes; a rectangle means
+#: the box is not this site's.
+BOUNDS_SQUARENESS_M = 1.0
 
 
 class SiteError(ValueError):
@@ -254,7 +288,7 @@ def parse_site(data: Mapping[str, Any], *, where: str = "<record>") -> SiteParam
         # preference rather than a second frame.
         centre_lat, centre_lon = site_lat, site_lon
         convergence_deg = _convergence(site_raw, centre_lon, site_where)
-        bounds = _bounds(site_raw, site_where)
+        bounds = _bounds(site_raw, extent_m, site_where)
 
     return SiteParameters(
         centre_lat_deg=centre_lat,
@@ -271,11 +305,12 @@ def parse_site(data: Mapping[str, Any], *, where: str = "<record>") -> SiteParam
 #
 # Every reader below takes the response **as the arena sent it** and looks for
 # the field under the spellings it might have used. That tolerance is
-# deliberate and it is bounded: `/api/site` has never been called, so its exact
-# key names are not known here, and the choice is between guessing one spelling
-# and failing silently on another, or accepting the obvious few and failing
-# loudly on everything else. These fail loudly, naming the keys they did see,
-# and the raw response is kept in the fixture so the next reader can widen the
+# deliberate and it is bounded. The spellings the arena actually uses are now
+# known and recorded — `centre` as an object, `bounds3413` as an object of
+# xmin/ymin/xmax/ymax, `convergence_deg` — and those come first below; the
+# alternatives stay because one arena answering one way is not a contract, and
+# `competition.lock` pins three sites. These fail loudly, naming the keys they
+# did see, and the raw response is kept in the fixture so the next reader can widen the
 # list from evidence instead of from imagination.
 
 
@@ -355,20 +390,75 @@ def _convergence(response: Mapping[str, Any], lon_deg: float, where: str) -> flo
     return value
 
 
-def _bounds(response: Mapping[str, Any], where: str) -> tuple[float, float, float, float]:
+def _bounds(
+    response: Mapping[str, Any], extent_m: float, where: str
+) -> tuple[float, float, float, float]:
+    """``(min_x, min_y, max_x, max_y)``, however the arena spelled the box.
+
+    The arena sends an object — ``{"xmin": …, "ymin": …, "xmax": …, "ymax":
+    …}`` — which is why that form comes first. A list of four is still read,
+    because it is the other obvious spelling and reading it costs two lines.
+    """
     raw = _pick(response, "bounds3413", "bounds_3413", "bounds")
-    if not isinstance(raw, list | tuple):
-        raise SiteError(f"{where}: bounds3413 is {type(raw).__name__}, expected four numbers")
-    if len(raw) != 4:
-        raise SiteError(f"{where}: bounds3413 has {len(raw)} entries, expected four")
-    min_x, min_y, max_x, max_y = (
-        _number(value, f"{where}: bounds3413[{index}]") for index, value in enumerate(raw)
-    )
+    if isinstance(raw, Mapping):
+        corners = (("xmin", "min_x"), ("ymin", "min_y"), ("xmax", "max_x"), ("ymax", "max_y"))
+        values = []
+        for name, alternative in corners:
+            found = _maybe(raw, name, alternative)
+            if found is None:
+                raise SiteError(
+                    f"{where}: bounds3413 has no {name} or {alternative}; it has: {_keys(raw)}"
+                )
+            values.append(_number(found, f"{where}: bounds3413.{name}"))
+        min_x, min_y, max_x, max_y = values
+    elif isinstance(raw, list | tuple):
+        if len(raw) != 4:
+            raise SiteError(f"{where}: bounds3413 has {len(raw)} entries, expected four")
+        min_x, min_y, max_x, max_y = (
+            _number(value, f"{where}: bounds3413[{index}]") for index, value in enumerate(raw)
+        )
+    else:
+        raise SiteError(
+            f"{where}: bounds3413 is {type(raw).__name__}, expected four numbers as a list "
+            f"or as an object of xmin, ymin, xmax and ymax"
+        )
+
     if min_x >= max_x or min_y >= max_y:
         raise SiteError(
-            f"{where}: bounds3413 is not [min_x, min_y, max_x, max_y] — got {list(raw)!r}"
+            f"{where}: bounds3413 is not [min_x, min_y, max_x, max_y] — got "
+            f"{[min_x, min_y, max_x, max_y]!r}"
         )
+    _bounds_match_extent(min_x, min_y, max_x, max_y, extent_m, where)
     return min_x, min_y, max_x, max_y
+
+
+def _bounds_match_extent(
+    min_x: float, min_y: float, max_x: float, max_y: float, extent_m: float, where: str
+) -> None:
+    """Refuse a bounds box that is not this site's square of this size.
+
+    Grid metres against ground metres, so the comparison is deliberately loose
+    — see :data:`BOUNDS_EXTENT_TOLERANCE`. It is here because the two records
+    otherwise only overlap on the centre, and a box agreeing on the centre
+    while disagreeing on the size would say the endpoints describe different
+    renders of the same place.
+    """
+    width = max_x - min_x
+    height = max_y - min_y
+    if abs(width - height) > BOUNDS_SQUARENESS_M:
+        raise SiteError(
+            f"{where}: bounds3413 is {width:.3f} m by {height:.3f} m, which is not square "
+            f"to within {BOUNDS_SQUARENESS_M} m, but the arena renders a square site"
+        )
+    span = 0.5 * (width + height)
+    off = abs(span - extent_m) / extent_m
+    if off > BOUNDS_EXTENT_TOLERANCE:
+        raise SiteError(
+            f"{where}: bounds3413 spans {span:.1f} m against a SITE_EXTENT of {extent_m:.1f} m, "
+            f"{off:.2%} apart and over the {BOUNDS_EXTENT_TOLERANCE:.0%} bound. Grid metres and "
+            f"ground metres differ by the polar stereographic scale factor, which is under 1% "
+            f"here, so a gap this size means the box is not this site's"
+        )
 
 
 def _agree(env_lat: float, env_lon: float, site_lat: float, site_lon: float, where: str) -> None:

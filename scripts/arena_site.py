@@ -3,8 +3,13 @@
 
 The only thing in this repository that talks to ``:8090``. Issue #112.
 
-    python scripts/arena_site.py --endpoint 10.99.0.1          # show it
-    python scripts/arena_site.py --endpoint 10.99.0.1 --write   # record it
+    python scripts/arena_site.py --endpoint 10.99.4.1          # show it
+    python scripts/arena_site.py --endpoint 10.99.4.1 --write   # record it
+
+The arena answers on the tunnel's first address. Which tunnel that is depends
+on the config pack: the SIM-5 pack routes ``10.99.4.0/24``, so the host is
+``10.99.4.1``. An earlier attempt at this recorded nothing because it probed
+``10.99.0.1``, which is a different pack's /24.
 
 **It is opt-in twice over.** It refuses to run without an endpoint named on
 the command line or in ``WHITEOUT_ARENA_ENDPOINT``, and it leaves
@@ -29,11 +34,25 @@ moment, from the same host; and ``/api/env``'s answer is currently a
 transcription from PR #102 rather than a fetch, which is the weaker evidence
 of the two and worth upgrading the first time anyone can.
 
-``/api/env`` may answer with JSON or with ``KEY=VALUE`` lines — #102 quotes it
-as ``SITE_EXTENT=6500``, which is the latter. Both are accepted, and the
-untouched body is kept under ``body`` whenever the parse was not a plain JSON
-object, so a surprise in the format is visible in the diff rather than
-swallowed here.
+``/api/env`` answers with neither shape this script first guessed. It sends a
+JSON object of a single key, ``{"env": "<the whole .env file>"}``, and the
+``KEY=VALUE`` lines #102 quotes (``SITE_EXTENT=6500``) live inside that string
+with the organisers' own comments around them. All three shapes are accepted
+now — a plain JSON object, bare ``KEY=VALUE`` lines, and that envelope — and
+the body is kept under ``body`` whenever the parse was not a plain JSON
+object, so a further surprise in the format is visible in the diff rather
+than swallowed here.
+
+The one thing not kept as sent
+------------------------------
+
+That ``.env`` is the arena's own and it carries credentials, a live
+``MAPBOX_TOKEN`` among them. **This repository is public.** So the single
+alteration this script makes to what the arena sent is to replace the value
+of any key that looks like a credential — :data:`SECRET_KEY_MARKERS` — with
+:data:`REDACTED`, in the parsed fields and in the kept body alike. The key
+itself stays, so a redaction reads as a redaction rather than as a gap, and
+no site parameter matches those markers.
 """
 
 from __future__ import annotations
@@ -61,6 +80,23 @@ TIMEOUT_S = 10.0
 
 #: The endpoints fetched, and the key each is recorded under.
 ENDPOINTS = (("env", "/api/env"), ("site", "/api/site"))
+
+#: A key holding a credential rather than a site parameter, matched as a
+#: substring without regard to case. ``/api/env`` returns the organisers'
+#: whole ``.env``, and this repository is public, so these values never reach
+#: the fixture. Deliberately wider than the one key that matches today
+#: (``MAPBOX_TOKEN``): the arena's ``.env`` is not ours and may grow another.
+SECRET_KEY_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "_KEY")
+
+#: What a credential's value is replaced with. Says who did it, so that
+#: whoever reads the fixture looks here rather than at the arena.
+REDACTED = "<redacted by scripts/arena_site.py>"
+
+
+def is_secret(key: str) -> bool:
+    """Whether ``key``'s value is a credential and must not be recorded."""
+    folded = str(key).upper()
+    return any(marker in folded for marker in SECRET_KEY_MARKERS)
 
 
 def base_url(endpoint: str) -> str:
@@ -97,25 +133,50 @@ def fetch(url: str) -> tuple[Any, str]:
 def as_fields(parsed: Any, body: str) -> tuple[dict[str, Any], str | None]:
     """``(fields, kept_body)`` — the response as an object, and the body if it differs.
 
-    A JSON object is taken as it stands. Anything else is read as
-    ``KEY=VALUE`` lines, which is how ``/api/env`` is quoted in #102, and the
-    raw body is kept alongside so the next reader can see what was really
-    sent.
+    A JSON object is taken as it stands. The one-key envelope ``/api/env``
+    actually sends, ``{"env": "<file>"}``, is opened and its contents read as
+    ``KEY=VALUE`` lines, which is how #102 quotes them; so is a body that is
+    not JSON at all. In both of those the text is kept alongside, redacted,
+    so the next reader can see what was really sent.
     """
+    text = body
     if isinstance(parsed, dict):
-        return parsed, None
+        inner = parsed.get("env")
+        if len(parsed) == 1 and isinstance(inner, str):
+            text = inner
+        else:
+            return redact_fields(parsed), None
     fields: dict[str, Any] = {}
-    for line in body.splitlines():
-        text = line.strip()
-        if not text or text.startswith("#") or "=" not in text:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
-        key, _, value = text.partition("=")
+        key, _, value = stripped.partition("=")
         fields[key.strip()] = _number_or_text(value.strip())
     if not fields:
         raise SystemExit(
             f"the response is neither a JSON object nor KEY=VALUE lines:\n{body[:400]}"
         )
-    return fields, body
+    return redact_fields(fields), redact_body(text)
+
+
+def redact_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """``fields`` with every credential's value replaced by :data:`REDACTED`."""
+    return {key: (REDACTED if is_secret(key) else value) for key, value in fields.items()}
+
+
+def redact_body(body: str) -> str:
+    """``body`` with every ``KEY=VALUE`` line whose key is a credential blanked.
+
+    Line by line rather than by searching for the values themselves: a value
+    that failed to parse as a line is a value we would otherwise write out,
+    and the parse above and this have to agree about what a line is.
+    """
+    lines = []
+    for line in body.splitlines():
+        key, sep, _ = line.partition("=")
+        lines.append(f"{key}{sep}{REDACTED}" if sep and is_secret(key.strip()) else line)
+    return "\n".join(lines) + ("\n" if body.endswith("\n") else "")
 
 
 def _number_or_text(value: str) -> Any:
@@ -204,6 +265,12 @@ def main(argv: list[str] | None = None) -> int:
     # Parse before overwriting: a record that whiteout.site refuses is a
     # record that would turn the gate red the moment it landed, and the
     # useful moment to hear about it is here, with the arena still reachable.
+    #
+    # Checked against the `whiteout` beside this script, not whichever one an
+    # editable install happens to point at. The two are the same on a normal
+    # checkout and differ on a worktree, and the checkout this writes the
+    # fixture into is the one whose checks have to pass.
+    sys.path.insert(0, str(REPO_ROOT))
     from whiteout.site import SiteError, parse_site
 
     try:
