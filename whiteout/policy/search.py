@@ -177,6 +177,27 @@ class SearchPolicy:
         """
         return self._retasks
 
+    def covered_fraction(self, now: float) -> float:
+        """Share of channel segments looked at recently enough to still count.
+
+        Freshness decays over
+        :attr:`~whiteout.policy.params.SearchParams.stale_horizon_s`, so this
+        is the share whose staleness has not yet saturated. It is **the
+        coverage this policy acts on** and not the scorer's coverage axis;
+        naming it ``covered_fraction`` matches the episode log's field, and
+        the log records what the coordinator believed rather than what the
+        sponsor scored.
+        """
+        if not self._segments:
+            return 0.0
+        horizon = self._params.stale_horizon_s
+        fresh = sum(
+            1
+            for segment in self._segments
+            if self._coverage.staleness(segment.index, now, horizon) < 1.0
+        )
+        return fresh / len(self._segments)
+
     def assignment_of(self, asset_id: str) -> int | None:
         """Which segment an asset is working, or ``None``."""
         held = self._assigned.get(asset_id)
