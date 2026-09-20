@@ -175,7 +175,8 @@ def test_the_viewer_renders_with_the_basemap_absent() -> None:
     source = (VIZ / "viewer.js").read_text(encoding="utf-8")
     guard = source.split("function projectBasemap(")[1].split("function projectShore(")[0]
     assert "if (!data || !data.shores || !state.origin) { return null; }" in guard
-    assert "if (!map) { return false; }" in source.split("function drawBasemap(")[1]
+    drawn = source.split("function drawBasemap(")[1]
+    assert 'if (!map || state.phase !== "ready") { return false; }' in drawn
     markup = (VIZ / "index.html").read_text(encoding="utf-8")
     assert re.search(r'<script src="basemap\.js" defer></script>', markup), (
         "the page does not load the basemap"
@@ -195,3 +196,48 @@ def test_the_basemap_credits_its_source_in_the_page() -> None:
     assert 'id="field-credit"' in markup
     css = (VIZ / "viewer.css").read_text(encoding="utf-8")
     assert ".field-credit" in css, "the credit has no position on the field"
+
+
+def test_the_basemap_obeys_the_same_phase_gate_the_content_does() -> None:
+    """A failed load must not leave the last episode's coastline on screen.
+
+    ``loadText`` and ``loadUrl`` both clear ``state.records`` on failure and
+    neither clears ``state.basemap``, so the gate in ``drawBasemap`` is what
+    stops the "episode log is malformed" card sitting over the previous
+    episode's land, at the previous episode's zoom, still credited.
+
+    This is a source assertion and does not drive the page: it pins the
+    guard against a silent removal, and is not evidence that the error state
+    renders correctly. Driving the viewer is `test_viz_shell.py`'s job and
+    neither file does it for this path yet.
+    """
+    source = (VIZ / "viewer.js").read_text(encoding="utf-8")
+    drawn = source.split("function drawBasemap(")[1].split("function ")[0]
+    assert 'state.phase !== "ready"' in drawn, (
+        "drawBasemap no longer gates on the phase, so a stale coastline can "
+        "outlive the episode that produced it"
+    )
+    content = source.split("function drawContent(")[1].split("function ")[0]
+    assert 'state.phase !== "ready"' in content, (
+        "the gate this one is matched to has moved; re-check both"
+    )
+
+
+def test_the_canvas_labels_over_land_clear_AA() -> None:
+    """Both bottom corners sit over the land tone, so both take ``--n-300``.
+
+    ``--n-400`` is the tertiary colour the canvas uses for labels over the
+    bare frame, where it measures 4.93:1. Over the land blend it is 4.25:1,
+    under AA. The credit line was raised for this reason when the basemap
+    landed; the scale bar is the opposite corner of the same ground.
+
+    A source assertion, not a contrast measurement: it pins the token, not
+    the ratio.
+    """
+    source = (VIZ / "viewer.js").read_text(encoding="utf-8")
+    bar = source.split("function drawScaleBar(")[1].split("function ")[0]
+    assert 'token("--n-300")' in bar, "the scale-bar label is back under AA over land"
+    assert 'token("--n-400")' not in bar
+    css = (VIZ / "viewer.css").read_text(encoding="utf-8")
+    credit = css.split(".field-credit {")[1].split("}")[0]
+    assert "--n-300" in credit, "the credit line is back under AA over land"

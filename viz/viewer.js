@@ -758,7 +758,13 @@
    * is something to credit. */
   function drawBasemap(ctx, box, cx, cy, scale) {
     var map = state.basemap;
-    if (!map) { return false; }
+    /* The phase gate is `drawContent`'s, for its reason: the empty, loading
+     * and error states get the frame alone, which is the instrument at rest.
+     * A failed load clears `state.records` and not `state.basemap`, so
+     * without this the "episode log is malformed" card sits over the last
+     * episode's coastline, at the last episode's zoom, still credited. Land
+     * is content, not chrome, however far under the other layers it sits. */
+    if (!map || state.phase !== "ready") { return false; }
 
     var water = new global.Path2D();
     var index;
@@ -884,7 +890,12 @@
     ctx.moveTo(x0 + half, y - tick); ctx.lineTo(x0 + half, y + half);
     ctx.lineTo(x0 + width + half, y + half); ctx.lineTo(x0 + width + half, y - tick);
     ctx.stroke();
-    ctx.fillStyle = token("--n-400");
+    /* --n-300, not the tertiary --n-400 the other canvas labels use, for the
+     * same reason `.field-credit` takes it: this label is in the opposite
+     * bottom corner over the same land tone, where --n-400 measures 4.25:1
+     * against rgb(19,27,37) and falls under AA. Over the bare frame it was
+     * 4.93:1 and passed, so the land is what moved it. */
+    ctx.fillStyle = token("--n-300");
     ctx.font = canvasFont("--t-12", "--font-mono");
     ctx.textBaseline = "alphabetic";
     ctx.fillText(metres(step), x0 + width + size("--s-2"), y + half);
