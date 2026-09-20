@@ -530,3 +530,48 @@ def test_backlog_draft_is_deleted() -> None:
         check=True,
     )
     assert tracked.stdout.strip() == ""
+
+
+def test_the_smoke_score_check_refuses_words_where_a_number_is_owed() -> None:
+    """R1-M2: accepting any non-numeric string proved almost nothing.
+
+    A regression that puts an axis back to a constant word — a stub, or
+    energy plumbing that stops reaching the scorer — must fail the gate, not
+    pass it as an honest absence. ``coverage`` and ``search_efficiency`` are
+    on every record of any run the gate makes, so words there are a
+    regression by construction.
+    """
+    gate = _load_gate()
+
+    def printed(**axes: str) -> str:
+        return "\n".join(f"{axis}: {axes[axis]}" for axis in gate.AXES)
+
+    real = printed(
+        coverage="1.0000",
+        detection_speed="not detected",
+        tracking_duration="not detected",
+        search_efficiency="0.9833",
+        accuracy="not measured (no truth in log)",
+    )
+    assert gate._score_failure(real) is None
+
+    stubbed = printed(
+        coverage="0.0000",
+        detection_speed="not detected",
+        tracking_duration="not detected",
+        search_efficiency="no energy recorded",
+        accuracy="not measured (no truth in log)",
+    )
+    assert gate._score_failure(stubbed) is not None
+
+    invented = printed(
+        coverage="1.0000",
+        detection_speed="not detected",
+        tracking_duration="pending",
+        search_efficiency="0.9833",
+        accuracy="not measured (no truth in log)",
+    )
+    failure = gate._score_failure(invented)
+    assert failure is not None and "pending" in failure
+
+    assert gate._score_failure(real.replace("1.0000", "nan")) is not None

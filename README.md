@@ -171,10 +171,15 @@ Every number above is reproducible from this checkout.
 The parts below are written down because a reader will find them anyway, and
 finding them unannounced is worse.
 
-**The scorer is a stub.** `whiteout/cli.py`'s `score` prints four zeroes and
-does not read the log. Our own scoring model was cut when the sponsor published
-seven criteria of their own; the numbers that matter are theirs, computed from
-what we post to their API.
+**The scorer is ours, and nothing optimises against it.** `whiteout score`
+reads the episode log and derives five of the sponsor's seven criteria —
+coverage, detection speed, tracking duration, search efficiency and accuracy —
+naming under each number the field it came from, and saying in words where the
+log cannot answer rather than printing a zero. Autonomy and collaboration are
+not axes: they are read off behaviour and the explanation. It is an
+instrument we read, not an objective anything is tuned against, and the
+numbers that matter remain the sponsor's, computed from what we post to their
+API.
 
 **The detector has never been measured on compressed imagery.** Its noise
 estimator is calibrated on uncompressed frames, and the arena publishes MJPEG.
