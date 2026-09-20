@@ -57,9 +57,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from whiteout.belief.field import BeliefField
+from whiteout.belief.field import BeliefError, BeliefField
 from whiteout.belief.geometry import DEFAULT_STRAIT, StraitGeometry
 from whiteout.belief.grid import ChannelBeliefGrid
+from whiteout.belief.negative import (
+    CLASS_CAMERAS,
+    DEFAULT_SWEEP,
+    SweepParams,
+    non_detection_likelihood,
+)
 from whiteout.geo import GeoPoint
 from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole, SearchParams, SearchPolicy
 from whiteout.tracks.maintain import Sighting, TrackHold
@@ -72,6 +78,7 @@ from whiteout.types import (
     WorldObservation,
 )
 from whiteout.vision.camera import CAMERAS, VisionError
+from whiteout.vision.projection import CameraPose, ProjectionError
 from whiteout.vision.standoff import standoff_point, standoff_range_m
 
 __all__ = [
@@ -179,6 +186,8 @@ class Coordinator:
         detection_sigma_m: float = DEFAULT_DETECTION_SIGMA_M,
         hold_asset: str = DEFAULT_HOLD_ASSET,
         hold_camera: str = "quadcopter",
+        ground_alt_m: float = 0.0,
+        sweep: SweepParams = DEFAULT_SWEEP,
     ) -> None:
         self._geometry = geometry
         self._policy = SearchPolicy(roles, geometry, params)
@@ -188,6 +197,8 @@ class Coordinator:
         self._detection_sigma_m = float(detection_sigma_m)
         self._hold_asset = hold_asset
         self._hold_camera = hold_camera
+        self._ground_alt_m = float(ground_alt_m)
+        self._sweep = sweep
         self._last_t: float | None = None
         self._ticks = 0
 
@@ -230,6 +241,11 @@ class Coordinator:
             )
             if self._hold is not None:
                 self._hold.sight(sighting)
+        # Non-detections, #13. Every asset that looked and did not report is
+        # evidence about the water it was looking at, and it is applied after
+        # the sightings so that an asset which *did* see something is not also
+        # asked to argue the vessel is not there.
+        self._erode(observation, {sighting.asset_id for sighting in seen})
 
         posted = False
         held_lat: float | None = None
@@ -276,6 +292,48 @@ class Coordinator:
         if not callable(refusals):
             return ()
         return tuple(refusals())
+
+    def _erode(self, observation: WorldObservation, saw_something: set[str]) -> None:
+        """Fold every asset's non-detection into the field, #13.
+
+        An asset contributes when it reported no sighting this tick **and**
+        its pose carries the attitude a footprint needs. A pose with no pitch
+        is skipped rather than assumed level: ``Pose.pitch`` is ``None``
+        precisely when the transport does not know it, and treating unknown
+        as level would point the camera at the horizon and erode a band of
+        water nobody looked at — a confident wrong answer, from a default.
+
+        Failures are swallowed per asset, deliberately. A camera below the
+        water plane or a likelihood that leaves no mass is a reason to ignore
+        *that* sweep, not to end the episode: the alternative is one bad pose
+        at tick 300 taking down a run that cannot be repeated.
+        """
+        for pose in observation.poses:
+            if pose.asset_id in saw_something:
+                continue
+            if pose.pitch is None or pose.roll is None:
+                continue
+            camera = CAMERAS.get(CLASS_CAMERAS.get(pose.cls, ""))
+            if camera is None:
+                continue
+            try:
+                self._belief.update_likelihood(
+                    non_detection_likelihood(
+                        camera,
+                        CameraPose(
+                            lat_deg=pose.lat,
+                            lon_deg=pose.lon,
+                            alt_m=pose.z,
+                            yaw_deg=pose.heading,
+                            pitch_deg=pose.pitch,
+                            roll_deg=pose.roll,
+                        ),
+                        ground_alt_m=self._ground_alt_m,
+                        params=self._sweep,
+                    )
+                )
+            except (BeliefError, VisionError, ProjectionError):
+                continue
 
     def _hold_point(self, lat_deg: float, lon_deg: float, poses: dict[str, Pose]) -> GeoPoint:
         """Where the holding asset should sit to keep the contact in frame.

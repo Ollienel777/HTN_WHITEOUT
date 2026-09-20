@@ -36,42 +36,23 @@ so a conflict in it has no correct manual resolution: take either side, run the
 command above, and commit what comes out. #117 and this file's own history are
 both examples.
 
-## Where the episode stops being interesting, measured
+## What the episode shows
 
-The fleet reaches steady state early, and the honest numbers are these:
+The belief field is worked, not decorative. Every tick, each asset that looked
+and saw nothing erodes the water it could have seen, in proportion to how well
+it could have seen it (#13):
 
-| quantity | behaviour |
-|---|---|
-| `covered_fraction` | 0.12 at tick 0, **1.0 by tick 57**, and 1.0 for the remaining 343 |
-| `entropy` | one value, `6.745236`, for every tick of the episode |
-| quadcopter altitude | climbs 40 m → 120 m over the first 27 s, then holds |
-| re-taskings | roughly two per tick, at a **constant rate**, start to finish |
+| quantity | tick 0 | tick 400 |
+|---|---|---|
+| `entropy` | 6.7429 | **5.4582** |
+| `peak_p` | 0.00122 | **0.00785** (6.4x) |
+| distinct `entropy` values across the file | — | **400** |
+| quadcopter altitude | 40 m | 120 m, commanded, reached at t=27 s |
 
-So a before/after comparing tick 0 with tick 400 overstates it: almost all of
-the visible change happens in the first minute.
-
-**Making the episode longer does not fix this, and it was worth checking.** The
-obvious suspicion is that `SearchParams.stale_horizon_s` is 240 s against a
-200 s episode, so a segment can never go stale and be re-swept. A 1200-tick
-probe — 600 s, two and a half times the horizon — says otherwise: `entropy` is
-still constant to six decimal places, `covered_fraction` sits at 1.0 from tick
-57 with one brief dip to 0.96, and the re-tasking rate never changes. The
-horizon is not the binding constraint.
-
-## What is actually missing
-
-**Nothing erodes the belief field.** There is no sighting source behind the
-kinematic transport, and the negative-information update (#13) is not merged.
-A field nobody has looked away from is a fixed point of diffusion, so it stays
-uniform however long the run is — and with the field flat, the policy's
-staleness model is the only thing left varying, and it saturates at tick 57.
-
-That is the gap between an episode that shows a fleet moving and one that
-shows a fleet *thinking*. The sweeps are visible; the reason for them is not.
-Anyone regenerating this after #13 lands should expect these numbers to change,
-should expect the back half to stop being flat, and should revisit whether 400
-ticks is still the right length — at that point a longer run probably does earn
-its bytes.
+Before #13 that table read `6.745236` in both columns and **one** distinct
+value across the file. The fleet flew the same sweeps; they just meant
+nothing. A 1200-tick probe at the time showed the same flat digest, so length
+was never the missing piece — erosion was.
 
 ## Size
 

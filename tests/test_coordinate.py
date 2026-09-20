@@ -11,12 +11,14 @@ import importlib
 import inspect
 import pathlib
 import types
+from dataclasses import replace
 
 import pytest
 
 import whiteout
 from whiteout.belief.geometry import DEFAULT_STRAIT, ChannelPoint
 from whiteout.coordinate import Coordinator, NoSightings, TickOutcome
+from whiteout.geo import ARENA_ORIGIN
 from whiteout.policy import AssetRole
 from whiteout.tracks.client import TrackPoster, TracksClient
 from whiteout.tracks.maintain import Sighting, TrackHold
@@ -452,3 +454,63 @@ def test_a_hold_without_the_holding_asset_s_pose_falls_back_to_the_contact(hold_
     )
     outcome = coordinator.tick(without_quad)
     assert "quadcopter" not in {i.asset_id for i in outcome.intent.intents}
+
+
+def test_a_searching_fleet_erodes_the_belief_field() -> None:
+    """#13, joined up: sweeps that see nothing must change the field.
+
+    Before this, the field was a fixed point of its own diffusion. The
+    committed demo episode ran 400 ticks with **one** distinct entropy value,
+    and a 1200-tick probe showed the same — the fleet flew sweeps and the
+    sweeps meant nothing. That is the failure this asserts against, and it is
+    asserted at the loop level rather than on the likelihood because both
+    halves were individually correct the whole time it was happening.
+    """
+    from whiteout.transport.kinematic import FLEET as KINEMATIC_FLEET
+    from whiteout.transport.kinematic import KinematicTransport
+
+    transport = KinematicTransport(seed=7)
+    transport.connect()
+    coordinator = Coordinator(tuple(AssetRole(a.asset_id, a.cls) for a in KINEMATIC_FLEET))
+    entropies = []
+    for _ in range(80):
+        outcome = coordinator.tick(transport.observe())
+        transport.command(outcome.intent)
+        entropies.append(outcome.digest.entropy)
+    transport.close()
+
+    assert len(set(entropies)) > 1, "the field never moved across 80 ticks"
+    assert entropies[-1] < entropies[0], "searching made the field less certain"
+    assert coordinator.belief.mass() == pytest.approx(1.0)
+
+
+def test_an_asset_with_no_attitude_is_skipped_rather_than_assumed_level() -> None:
+    """A pose that does not know its pitch cannot be turned into a footprint.
+
+    Treating ``None`` as level would point the camera at the horizon and
+    erode a band of water nobody looked at — a confident wrong answer
+    produced by a default, which is the exact shape #101 added the optional
+    angles to prevent.
+    """
+    roles = (AssetRole("quadcopter", "quad"),)
+    blind = Coordinator(roles)
+    sighted = Coordinator(roles)
+    without = Pose(
+        asset_id="quadcopter",
+        cls="quad",
+        t=0.0,
+        lat=ARENA_ORIGIN.lat_deg,
+        lon=ARENA_ORIGIN.lon_deg,
+        z=120.0,
+        heading=90.0,
+        speed=0.0,
+        energy_used=0.0,
+    )
+    with_angles = replace(without, pitch=0.0, roll=0.0)
+
+    blind.tick(WorldObservation(t=0.0, poses=(without,), reports=()))
+    sighted.tick(WorldObservation(t=0.0, poses=(with_angles,), reports=()))
+
+    assert blind.belief.entropy() > sighted.belief.entropy(), (
+        "a pose with no attitude eroded the field anyway"
+    )
