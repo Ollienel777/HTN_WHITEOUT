@@ -392,6 +392,16 @@ body[data-state="loading"] .panel-count { visibility: hidden; }
   padding: var(--s-2) 0;
 }
 
+/* A fix the tick's cameras refused, and why. Amber rather than red: the
+ * refusal itself is correct behaviour — the fix was not trustworthy — and what
+ * the reader needs to notice is that a camera is contributing nothing. */
+.panel-note {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--warn);
+  padding: var(--s-2) 0 0;
+  border-top: var(--w-hairline) solid var(--n-850);
+}
+
 /* ── fleet rows ────────────────────────────────────────────────────── */
 
 .fleet-row + .fleet-row { margin-top: var(--s-1); }
@@ -460,7 +470,7 @@ body[data-state="loading"] .panel-count { visibility: hidden; }
 
 .contact-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--s-2);
   height: var(--h-row);
@@ -489,6 +499,31 @@ body[data-state="loading"] .panel-count { visibility: hidden; }
 .contact-row[data-state="tracked"] .contact-state,
 .contact-row[data-state="handed_off"] .contact-state { color: var(--ok); }
 .contact-row[data-state="lost"] .contact-state { color: var(--danger); }
+
+/* Whether the fix and the attitude behind this contact were one instant. It is
+ * a qualification on the position in the same row, so it sits beside it rather
+ * than in the inspector, and it is tertiary type: the finding is the words, and
+ * a row that reads "in sync" must not shout. Semantic colour only — amber for
+ * a skew nobody measured, red for one that was measured and is out of bounds or
+ * for an attitude that never arrived.
+ *
+ * Our own vision path refuses the two red states rather than contacting on
+ * them, so in a log this build wrote they arrive on the refusal note below
+ * instead. They are styled anyway because the viewer opens any valid episode
+ * log, including one another build wrote, and the data model permits a contact
+ * to carry either. */
+.contact-sync {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--n-400);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-row[data-sync="synchronised"] .contact-sync { color: var(--n-400); }
+.contact-row[data-sync="telemetry_missing"] .contact-sync { color: var(--warn); }
+.contact-row[data-sync="telemetry_stale"] .contact-sync,
+.contact-row[data-sync="attitude_missing"] .contact-sync { color: var(--danger); }
 
 .contact-confidence {
   font: 400 var(--t-12) var(--font-mono);

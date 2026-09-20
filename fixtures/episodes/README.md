@@ -25,6 +25,17 @@ determinism step depends on that staying true.
 arena adapter drives. The coordinator tasks the fleet every tick, the aircraft
 fly toward what they were told, and the towers stand where they were sited.
 
+Schema 5 (#117), so every pose carries `pitch`, `roll` and `measured_t`. This
+transport reports no measurement time by default — its fixes are computed, not
+received — so `measured_t` is `null` throughout, which is the honest answer
+rather than a zero-age fix nobody took. Pass `--pose-age` to exercise the
+staleness path.
+
+**Regenerate it, never hand-merge it.** It is 400 records of generated output,
+so a conflict in it has no correct manual resolution: take either side, run the
+command above, and commit what comes out. #117 and this file's own history are
+both examples.
+
 ## Where the episode stops being interesting, measured
 
 The fleet reaches steady state early, and the honest numbers are these:

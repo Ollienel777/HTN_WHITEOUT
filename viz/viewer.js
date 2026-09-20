@@ -32,7 +32,7 @@
   /* Kept in step with whiteout.log.SCHEMA_VERSION by a test: the viewer must
    * reject a log this build cannot read, with the same version in the message
    * the Python reader would have printed. */
-  var SCHEMA_VERSION = 4;
+  var SCHEMA_VERSION = 5;
 
   /* Relative, so it resolves the same from `whiteout serve` and from file://
    * (where the fetch is blocked, and the file picker takes over). */
@@ -47,7 +47,7 @@
 
   var RECORD_FIELDS = [
     "schema_version", "t", "observation", "intent", "belief_digest",
-    "contacts", "truth"
+    "contacts", "truth", "refusals"
   ];
 
   /* The em dash the shell shows wherever the episode log does not carry a
@@ -386,6 +386,54 @@
     renderInspector(record);
   }
 
+  /* How a contact's fix and the attitude it was projected with stood in time
+   * (`whiteout.types.PoseSync`). A row says it in three or four words, because
+   * the alternative it replaces is saying nothing: a position assembled out of
+   * two instants a quarter-second apart is 5.5 m wrong on the fixed-wing, with
+   * every field populated and nothing to look at.
+   *
+   * `synchronised` is spelt "in sync" and not left blank. A blank cell reads as
+   * "no data", which is what a *null* sync is, and those two must not look
+   * alike: one says the pair was checked and stood together, the other says
+   * nobody checked. The em dash is the shell's word for the second. */
+  var SYNC_LABELS = {
+    synchronised: "in sync",
+    telemetry_missing: "no fix time",
+    attitude_missing: "no attitude"
+  };
+
+  function syncLabel(sync) {
+    if (!sync || typeof sync !== "object") { return UNKNOWN; }
+    /* The stale row is the only one that carries a number, because it is the
+     * only state where the skew is both known and out of bounds — the size of
+     * the error is the finding. */
+    if (sync.status === "telemetry_stale") {
+      return "skew " + fixed(sync.skew_s, 2) + " s";
+    }
+    return SYNC_LABELS[sync.status] || UNKNOWN;
+  }
+
+  function syncKind(sync) {
+    if (!sync || typeof sync !== "object") { return "unrecorded"; }
+    return String(sync.status);
+  }
+
+  /* What the tick's cameras declined to turn into a fix. A refused sighting
+   * leaves no contact, so without this line the rail cannot tell "nobody can
+   * see the vessel" from "two cameras saw something and we would not stand
+   * behind where it was" — and the second is the one the operator can act on. */
+  function refusedLine(record) {
+    var refusals = record && Array.isArray(record.refusals) ? record.refusals : [];
+    if (!refusals.length) { return ""; }
+    var reasons = [];
+    refusals.forEach(function (refusal) {
+      var label = syncLabel(refusal ? refusal.sync : null);
+      if (reasons.indexOf(label) === -1) { reasons.push(label); }
+    });
+    var fixes = refusals.length === 1 ? "1 fix" : refusals.length + " fixes";
+    return fixes + " refused — " + reasons.join(", ");
+  }
+
   function renderContacts(record) {
     var contacts = record ? record.contacts : [];
     text(el.contactCount, record ? String(contacts.length) : UNKNOWN);
@@ -394,11 +442,16 @@
     contacts.forEach(function (contact) {
       var row = el.tplContact.content.firstElementChild.cloneNode(true);
       row.setAttribute("data-state", String(contact.state));
+      row.setAttribute("data-sync", syncKind(contact.sync));
       text(row.querySelector("[data-contact-id]"), String(contact.contact_id));
+      text(row.querySelector("[data-contact-sync]"), syncLabel(contact.sync));
       text(row.querySelector("[data-contact-state]"), String(contact.state).replace("_", " "));
       text(row.querySelector("[data-contact-confidence]"), fixed(contact.confidence, 2));
       el.contactList.appendChild(row);
     });
+    var refused = refusedLine(record);
+    el.contactRefused.hidden = refused === "";
+    text(el.contactRefused, refused);
   }
 
   function taskFor(record, assetId) {
@@ -708,6 +761,7 @@
     el.contactList = doc.getElementById("contact-list");
     el.contactEmpty = doc.querySelector("[data-empty='contacts']");
     el.contactCount = doc.querySelector("[data-count='contacts']");
+    el.contactRefused = doc.querySelector("[data-refused]");
     el.fleetList = doc.getElementById("fleet-list");
     el.fleetEmpty = doc.querySelector("[data-empty='fleet']");
     el.fleetCount = doc.querySelector("[data-count='fleet']");

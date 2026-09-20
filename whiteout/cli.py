@@ -31,7 +31,14 @@ from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_
 from whiteout.tracks.client import TrackPoster
 from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
-from whiteout.types import BeliefDigest, Contact, EpisodeRecord, FleetIntent, Truth
+from whiteout.types import (
+    BeliefDigest,
+    Contact,
+    EpisodeRecord,
+    FleetIntent,
+    SightingRefusal,
+    Truth,
+)
 
 #: Ordered scoring axes. The sponsor scores on exactly these four.
 AXES: tuple[str, str, str, str] = (
@@ -150,12 +157,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                     intent = FleetIntent(t=observation.t, intents=())
                     digest = _placeholder_digest(observation.t)
                     contacts: tuple[Contact, ...] = ()
+                    refusals: tuple[SightingRefusal, ...] = ()
                 else:
                     outcome = coordinator.tick(observation)
-                    intent, digest, contacts = (
+                    intent, digest, contacts, refusals = (
                         outcome.intent,
                         outcome.digest,
                         outcome.contacts,
+                        outcome.refusals,
                     )
                 if not args.dry_run:
                     transport.command(intent)
@@ -168,6 +177,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         belief_digest=digest,
                         contacts=contacts,
                         truth=Truth(t=observation.t, targets=()),
+                        refusals=refusals,
                     )
                 )
         finally:

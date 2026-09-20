@@ -7,15 +7,22 @@ track's state changes what the fleet is told to do.
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import pathlib
+import types
+
 import pytest
 
+import whiteout
 from whiteout.belief.geometry import DEFAULT_STRAIT, ChannelPoint
 from whiteout.coordinate import Coordinator, NoSightings, TickOutcome
 from whiteout.policy import AssetRole
 from whiteout.tracks.client import TrackPoster, TracksClient
 from whiteout.tracks.maintain import Sighting, TrackHold
 from whiteout.tracks.stub import StubTracksServer
-from whiteout.types import Pose, WorldObservation
+from whiteout.types import Pose, PoseSync, SightingRefusal, WorldObservation
+from whiteout.vision.motion import MotionGate
 
 FLEET = (
     AssetRole("quadcopter", "quad"),
@@ -53,14 +60,15 @@ def _observation(t: float) -> WorldObservation:
 class _SawItAt:
     """A sighting source that reports the vessel at fixed ticks."""
 
-    def __init__(self, ticks: set[float], s_m: float = MID) -> None:
+    def __init__(self, ticks: set[float], s_m: float = MID, sync: PoseSync | None = None) -> None:
         self.ticks = ticks
         self.lat, self.lon = _at(s_m)
+        self.sync = sync
 
     def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
         if observation.t not in self.ticks:
             return ()
-        return (Sighting(observation.t, self.lat, self.lon, "tower-1"),)
+        return (Sighting(observation.t, self.lat, self.lon, "tower-1", sync=self.sync),)
 
 
 @pytest.fixture
@@ -190,6 +198,123 @@ def test_a_contact_is_recorded_for_the_log(hold_and_stub) -> None:
     assert contact.state == "tracked"
     assert contact.assigned_asset_id == "tower-1"
     assert contact.classification == "vessel"
+    assert contact.sync is None, "a source that established nothing invents nothing"
+
+
+def test_what_the_source_refused_reaches_the_outcome() -> None:
+    """A refusal that stops at the sighting source is a refusal nobody can see.
+
+    The coordinator is the only path from a camera to the episode log, so a
+    source that declined a fix reports it here or not at all.
+    """
+
+    class _RefusedEverything:
+        def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
+            return ()
+
+        def refusals(self) -> tuple[SightingRefusal, ...]:
+            return (
+                SightingRefusal(
+                    asset_id="fixed-wing",
+                    t=1.0,
+                    sync=PoseSync(status="telemetry_stale", skew_s=0.4),
+                ),
+            )
+
+    outcome = Coordinator(FLEET, sightings=_RefusedEverything()).tick(_observation(1.0))
+    (refusal,) = outcome.refusals
+    assert refusal.asset_id == "fixed-wing"
+    assert refusal.sync.status == "telemetry_stale"
+
+
+def test_a_source_that_refuses_nothing_reports_nothing() -> None:
+    outcome = Coordinator(FLEET, sightings=NoSightings()).tick(_observation(1.0))
+    assert outcome.refusals == ()
+
+
+def test_a_source_predating_the_method_still_runs() -> None:
+    """The `getattr` is tolerance for a hand-written double, not a contract.
+
+    Shipped sources are held to `SightingSource` by the test below; a one-method
+    double in somebody's test must not crash the loop.
+    """
+
+    class _OldStyle:
+        def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
+            return ()
+
+    assert Coordinator(FLEET, sightings=_OldStyle()).tick(_observation(1.0)).refusals == ()
+
+
+def test_a_wrapped_source_s_refusals_survive_the_wrapper() -> None:
+    """The composition the camera path is actually headed for.
+
+    `MotionGate` exists so arena ice stops reading as a hull, so the real source
+    is `MotionGate(VisionSightings(...))`. A gate that answered only `sightings`
+    would swallow every refusal, `EpisodeRecord.refusals` would be empty for the
+    whole run, and a camera dark for a known reason would read as an empty sea —
+    with nothing failing anywhere.
+    """
+    refusal = SightingRefusal(
+        asset_id="fixed-wing", t=1.0, sync=PoseSync(status="telemetry_stale", skew_s=0.4)
+    )
+
+    class _RefusedEverything:
+        def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
+            return ()
+
+        def refusals(self) -> tuple[SightingRefusal, ...]:
+            return (refusal,)
+
+    gated = MotionGate(source=_RefusedEverything())
+    assert gated.sightings(_observation(1.0)) == ()
+    assert gated.refusals() == (refusal,), "the gate swallowed the refusal"
+    outcome = Coordinator(FLEET, sightings=gated).tick(_observation(1.0))
+    assert outcome.refusals == (refusal,), "the refusal did not survive the run loop"
+
+
+def test_every_shipped_sighting_source_answers_both_halves() -> None:
+    """A new decorator that forgets `refusals` fails here, not silently in a log.
+
+    The coordinator discovers the method on the object, which is what let
+    `MotionGate` drop refusals with no symptom. This is the signal that shape
+    otherwise lacks: anything in `whiteout/` that reports sightings must also
+    say what it refused, even if the answer is always empty.
+    """
+    package = pathlib.Path(whiteout.__file__).parent
+    sources: list[type] = []
+    for path in sorted(package.rglob("*.py")):
+        name = ".".join(path.relative_to(package.parent).with_suffix("").parts)
+        module = importlib.import_module(name)
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj.__module__ != module.__name__ or obj in sources:
+                continue
+            # Protocols describe a shape rather than implement one, and
+            # `motion.Sightable` is deliberately the narrower of the two: the
+            # gate wraps anything that reports sightings and forwards whatever
+            # it can. The rule is for the classes that *are* sources.
+            if getattr(obj, "_is_protocol", False):
+                continue
+            if isinstance(getattr(obj, "sightings", None), types.FunctionType):
+                sources.append(obj)
+    assert sources, "no sighting sources found — this guard has stopped guarding"
+    missing = [obj.__name__ for obj in sources if not callable(getattr(obj, "refusals", None))]
+    assert not missing, f"{', '.join(missing)} reports sightings but cannot say what it refused"
+
+
+def test_a_contact_carries_its_last_fix_s_synchronisation(hold_and_stub) -> None:
+    """The contact's position *is* the last sighting's, so its caveat is too.
+
+    Without this the log would show a lat/lon with every field populated and no
+    way to see that the frame and the attitude behind it were a quarter-second
+    apart — 5.5 m at the fixed-wing's cruise.
+    """
+    hold, _ = hold_and_stub
+    sync = PoseSync(status="telemetry_missing", skew_s=None)
+    coordinator = Coordinator(FLEET, hold=hold, sightings=_SawItAt({2.0}, sync=sync))
+    coordinator.tick(_observation(1.0))
+    (contact,) = coordinator.tick(_observation(2.0)).contacts
+    assert contact.sync == sync
 
 
 # -- the two state changes that move assets ---------------------------------
