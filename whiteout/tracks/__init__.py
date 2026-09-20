@@ -16,13 +16,16 @@ from whiteout.tracks.client import (
     TracksError,
     endpoint_from_env,
 )
+from whiteout.tracks.maintain import Sighting, TrackHold
 from whiteout.tracks.stub import StubTracksServer, open_stub_tracks_server
 
 __all__ = [
     "ENDPOINT_ENV",
+    "Sighting",
     "StubTracksServer",
     "TrackAck",
     "TrackFix",
+    "TrackHold",
     "TrackPoster",
     "TrackRecord",
     "TracksClient",
