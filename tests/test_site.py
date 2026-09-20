@@ -18,17 +18,18 @@ records built here.
 ellipsoid guard walks this file and fails any literal in
 ``[1e5, 1e8]``, which is where real EPSG:3413 coordinates live: the site sits
 about 1.6e6 m from the grid's origin on each axis. The synthetic bounds below
-are therefore small numbers in the right *shape* — the parser checks ordering
-and arity, and has no opinion about magnitude — and the real ones stay in the
-JSON, which the guard does not walk.
+are therefore the site's real *span*, which is a four-figure number, around a
+centre of zero, which is not the site's — the real corners stay in the JSON,
+which the guard does not walk.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import socket
-import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -36,6 +37,7 @@ import pytest
 import whiteout.site
 from whiteout.belief.geometry import SITE_CENTRE_LAT, SITE_CENTRE_LON, SITE_EXTENT_M
 from whiteout.site import (
+    BOUNDS_EXTENT_TOLERANCE,
     CONVERGENCE_TOLERANCE_DEG,
     GRID_CENTRAL_MERIDIAN_DEG,
     SITE_FIXTURE,
@@ -50,31 +52,42 @@ CENTRE_LAT = 71.991960
 CENTRE_LON = -94.822428
 EXTENT_M = 6500.0
 
-#: A bounds3413 in the right shape and the wrong place: see the module
-#: docstring on why a realistic one cannot be written in a test file.
-BOUNDS: list[float] = [-2.0, -1.0, 2.0, 1.0]
+#: Half the site's span in EPSG:3413 grid metres, as the arena reports it.
+#: Grid metres, so 0.483% under half of ``SITE_EXTENT`` -- the order of the
+#: polar stereographic scale factor at 72 deg N against a 70 deg N standard
+#: parallel, though not equal to it; see ``whiteout/site.py``. Carrying the
+#: real span here is what keeps
+#: :data:`whiteout.site.BOUNDS_EXTENT_TOLERANCE` honest rather than nominal.
+HALF_SPAN_M = 3234.311145986
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+#: A bounds3413 in the right shape and the wrong place: the site's real span
+#: around a centre of zero, which is not the site's centre. See the module
+#: docstring on why the real corners cannot be written in a test file.
+BOUNDS: list[float] = [-HALF_SPAN_M, -HALF_SPAN_M, HALF_SPAN_M, HALF_SPAN_M]
 
 
-def _script() -> Any:
-    """``scripts/arena_site.py`` as a module.
+#: The fetching script, which is not a module of the package and is not
+#: importable as one. Loaded by path the way ``tests/test_gate_config.py``
+#: loads the gate, so that the redaction it does can be tested rather than
+#: trusted.
+ARENA_SITE = Path(__file__).resolve().parents[1] / "scripts" / "arena_site.py"
 
-    The idiom is ``tests/test_gate_config.py``'s: ``scripts/`` is not a
-    package and is excluded from the wheel, so a script is loaded from its
-    path rather than imported.
-    """
-    spec = importlib.util.spec_from_file_location(
-        "whiteout_arena_site", REPO_ROOT / "scripts" / "arena_site.py"
-    )
+
+def _arena_site() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("arena_site", ARENA_SITE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-arena_site = _script()
+def load_site_record() -> dict[str, Any]:
+    """The committed record as raw JSON, for checks on the file itself."""
+    loaded: dict[str, Any] = json.loads(SITE_FIXTURE.read_text(encoding="utf-8"))
+    return loaded
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def a_record(site: dict[str, Any] | None = None, **env: Any) -> dict[str, Any]:
@@ -180,11 +193,13 @@ def test_a_record_that_is_not_json_names_the_file(tmp_path: Path) -> None:
 
 
 def test_an_unrecorded_site_endpoint_is_not_an_error() -> None:
-    """A ``null`` response means "never called", and that is the honest state.
+    """A ``null`` response means "never called", and that is an honest state.
 
-    It is also the state the committed file ships in. The centre still comes
-    from ``/api/env``; the two 3413 fields report as ``None`` rather than as
-    a plausible number nobody measured.
+    It is the state the committed file shipped in before the tunnel existed,
+    and the state it would return to for a site nobody has asked yet —
+    ``competition.lock`` pins three. The centre still comes from ``/api/env``;
+    the two 3413 fields report as ``None`` rather than as a plausible number
+    nobody measured.
     """
     site = parse_site(a_record(site=None))
     assert site.convergence_deg is None
@@ -407,8 +422,8 @@ def test_the_record_ships_inside_the_package() -> None:
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [
-        ("10.99.0.1", "http://10.99.0.1:8090"),
-        ("10.99.0.1:8090", "http://10.99.0.1:8090"),
+        ("10.99.4.1", "http://10.99.4.1:8090"),
+        ("10.99.4.1:8090", "http://10.99.4.1:8090"),
         ("http://arena.local", "http://arena.local:8090"),
         ("http://arena.local:9000", "http://arena.local:9000"),
         # The colon-counting version appended the port to the *path* and asked
@@ -418,7 +433,7 @@ def test_the_record_ships_inside_the_package() -> None:
     ],
 )
 def test_the_endpoint_is_split_rather_than_counted(endpoint: str, expected: str) -> None:
-    assert arena_site.base_url(endpoint) == expected
+    assert _arena_site().base_url(endpoint) == expected
 
 
 def test_one_endpoint_failing_does_not_discard_the_other(
@@ -426,20 +441,22 @@ def test_one_endpoint_failing_does_not_discard_the_other(
 ) -> None:
     """A 404 on ``/api/site`` must not throw away a good ``/api/env`` answer.
 
-    ``/api/site`` has never been called, so a 404 on it is a live possibility
-    — and one of the two reasons to run the script at all is to upgrade the
-    ``/api/env`` half from #102's transcription to a fetch. The failed half is
+    A run where one endpoint fails is an ordinary outcome — the fetch that
+    recorded this file found ``/api/site`` answering a shape nothing here
+    expected — and the other half's answer is worth keeping. The failed half is
     recorded the way the record already spells "never fetched", with the error
     in its provenance, and the run reports the failure to its caller.
     """
 
+    module = _arena_site()
+
     def answer(url: str) -> tuple[Any, str]:
         if url.endswith("/api/site"):
-            raise arena_site.FetchError("HTTP Error 404: Not Found")
+            raise module.FetchError("HTTP Error 404: Not Found")
         return None, f"SITE_LAT={CENTRE_LAT}\nSITE_LON={CENTRE_LON}\nSITE_EXTENT={EXTENT_M}\n"
 
-    monkeypatch.setattr(arena_site, "fetch", answer)
-    built, failures = arena_site.record("127.0.0.1")
+    monkeypatch.setattr(module, "fetch", answer)
+    built, failures = module.record("127.0.0.1")
 
     assert failures and "404" in failures[0]
     assert built["records"]["site"]["response"] is None
@@ -450,3 +467,151 @@ def test_one_endpoint_failing_does_not_discard_the_other(
     assert (site.centre_lat_deg, site.extent_m) == (CENTRE_LAT, EXTENT_M)
     assert site.convergence_deg is None
     assert built["records"]["env"]["provenance"]["host"] == "http://127.0.0.1:8090"
+
+
+# --- what the arena actually answered --------------------------------------
+#
+# Everything above was written before `/api/site` had ever been called. These
+# were written after, against the SIM-5 arena at 10.99.4.1, and two of them
+# are here because the guesses above were wrong: the bounds arrive as an
+# object rather than a list, and `/api/env` arrives wrapped in a one-key
+# envelope rather than as the bare `KEY=VALUE` text #102 quotes.
+
+
+def test_the_committed_record_holds_a_fetched_site_endpoint() -> None:
+    """The half that was ``null`` when this file was written is recorded now.
+
+    ``host`` being set is what separates a fetch from a transcription: the
+    ``/api/env`` half carried ``None`` there for as long as it was copied out
+    of PR #102 rather than asked for.
+    """
+    site = load_site()
+    assert site.site is not None
+    assert site.site.host is not None and site.site.at is not None
+    assert site.convergence_deg is not None
+    assert site.bounds3413 is not None
+
+
+def test_the_recorded_convergence_is_the_projections_own() -> None:
+    """EPSG:3413 confirmed, which is the premise ``projection.py`` rests on.
+
+    Not equal to the identity and not expected to be: the arena computes its
+    convergence some other way, and the 0.0176 deg between them is 1 m across
+    the site's half-extent. What the check is for is telling this grid apart
+    from a different one, and it does.
+    """
+    site = load_site()
+    assert site.convergence_deg is not None
+    identity = expected_convergence_deg(site.centre_lon_deg)
+    assert abs(abs(site.convergence_deg) - abs(identity)) < CONVERGENCE_TOLERANCE_DEG
+    assert site.convergence_deg != identity
+
+
+def test_the_committed_record_carries_no_credentials() -> None:
+    """``/api/env`` returns the organisers' whole ``.env``. This repository is public.
+
+    The fixture holds that file, so the guard belongs on the fixture and not
+    only on the script that writes it: a hand-edit is exactly the way a token
+    would arrive here.
+    """
+    module = _arena_site()
+    env = load_site_record()["records"]["env"]
+    for key, value in env["response"].items():
+        if module.is_secret(key):
+            assert value == module.REDACTED, f"{key} is not redacted"
+    text = SITE_FIXTURE.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        key, sep, rest = line.partition("=")
+        if sep and module.is_secret(key.strip().strip('" ')):
+            assert module.REDACTED in rest, f"a credential survives in the body: {key}"
+
+
+def test_bounds_may_be_the_object_the_arena_sends() -> None:
+    """``{xmin, ymin, xmax, ymax}``, which is what ``/api/site`` returns."""
+    corners = dict(zip(("xmin", "ymin", "xmax", "ymax"), BOUNDS, strict=True))
+    site = parse_site(a_record(site=a_site_response(bounds3413=corners)))
+    assert site.bounds3413 == tuple(BOUNDS)
+
+
+def test_bounds_may_be_the_object_spelled_the_other_way() -> None:
+    corners = dict(zip(("min_x", "min_y", "max_x", "max_y"), BOUNDS, strict=True))
+    assert parse_site(a_record(site=a_site_response(bounds3413=corners))).bounds3413 == tuple(
+        BOUNDS
+    )
+
+
+def test_a_bounds_object_missing_a_corner_says_which() -> None:
+    corners = dict(zip(("xmin", "ymin", "xmax"), BOUNDS, strict=False))
+    with pytest.raises(SiteError) as caught:
+        parse_site(a_record(site=a_site_response(bounds3413=corners)))
+    assert "ymax" in str(caught.value)
+
+
+def test_bounds_that_are_not_square_are_refused() -> None:
+    """The arena renders a square site, and the box it reports is square."""
+    oblong = [-HALF_SPAN_M, -HALF_SPAN_M, HALF_SPAN_M, HALF_SPAN_M / 2.0]
+    with pytest.raises(SiteError, match="not square"):
+        parse_site(a_record(site=a_site_response(bounds3413=oblong)))
+
+
+def test_bounds_that_do_not_span_the_extent_are_refused() -> None:
+    """A box agreeing on the centre and disagreeing on the size is two sites."""
+    half = HALF_SPAN_M / 2.0
+    with pytest.raises(SiteError, match="not this site's"):
+        parse_site(a_record(site=a_site_response(bounds3413=[-half, -half, half, half])))
+
+
+def test_the_grid_to_ground_scale_factor_is_inside_the_bound_and_not_at_it() -> None:
+    """The one number that bound exists to tolerate, measured rather than assumed.
+
+    ``BOUNDS`` is the real span, so this asserts on what the arena reported:
+    grid metres run 0.483% short of ground metres here. If that ever sat near
+    the tolerance the tolerance would be wrong, so this fails while there is
+    still room rather than after the bound has quietly become a fit.
+    """
+    off = abs(2.0 * HALF_SPAN_M - EXTENT_M) / EXTENT_M
+    assert 0.004 < off < 0.006
+    assert off < BOUNDS_EXTENT_TOLERANCE / 3.0
+
+
+# --- the fetching script, which the gate never runs ------------------------
+
+
+def test_the_env_envelope_is_opened_and_its_lines_parsed() -> None:
+    """``/api/env`` answers ``{"env": "<the whole .env>"}``, not KEY=VALUE text.
+
+    This is the shape that made the first attempt at the record unusable: the
+    envelope parses as a JSON object, so it was taken as the fields
+    themselves, and the one field recorded was called ``env``.
+    """
+    module = _arena_site()
+    body = json.dumps({"env": "# a comment\nSITE_LAT=71.99196\nSITE_EXTENT=6500\n"})
+    fields, kept = module.as_fields(json.loads(body), body)
+    assert fields == {"SITE_LAT": 71.99196, "SITE_EXTENT": 6500}
+    assert kept is not None and "SITE_LAT=71.99196" in kept
+
+
+def test_a_credential_is_redacted_in_the_fields_and_in_the_body() -> None:
+    module = _arena_site()
+    body = json.dumps({"env": "SITE_LAT=71.99196\nMAPBOX_TOKEN=pk.a-real-one\n"})
+    fields, kept = module.as_fields(json.loads(body), body)
+    assert fields["MAPBOX_TOKEN"] == module.REDACTED
+    assert fields["SITE_LAT"] == 71.99196
+    assert kept is not None
+    assert "pk.a-real-one" not in kept
+    assert "MAPBOX_TOKEN=" in kept
+
+
+def test_a_plain_json_object_is_still_taken_as_it_stands() -> None:
+    module = _arena_site()
+    fields, kept = module.as_fields({"SITE_LAT": CENTRE_LAT}, "{}")
+    assert fields == {"SITE_LAT": CENTRE_LAT}
+    assert kept is None
+
+
+def test_the_script_refuses_to_guess_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in once. The other half, ``--write``, is not exercised here: it fetches."""
+    monkeypatch.delenv("WHITEOUT_ARENA_ENDPOINT", raising=False)
+    module = _arena_site()
+    with pytest.raises(SystemExit):
+        module.main([])

@@ -8,30 +8,82 @@
     "Each record holds the response as the arena sent it, under 'response', with",
     "a note beside it saying where that answer came from. A record whose",
     "'response' is null has never been fetched: leave it null rather than",
-    "filling it in from a slide, which is what PR #102 exists to undo."
+    "filling it in from a slide, which is what PR #102 exists to undo.",
+    "One exception to 'as the arena sent it': /api/env returns the organisers'",
+    "whole .env, credentials included, and this repository is public. Any key",
+    "that looks like a credential has its value replaced with a note saying so.",
+    "The key stays visible; the secret never lands here."
   ],
   "records": {
     "env": {
       "provenance": {
-        "request": "GET http://<arena>:8090/api/env",
-        "host": null,
-        "at": "2026-09-19",
-        "note": "Transcribed from PR #102, which read /api/env off the live arena and corrected DEFAULT_STRAIT with it. Corroborated by assets/terrain_fort_ross/model.sdf, <size>6500 6500 252.109</size>. Not fetched by scripts/arena_site.py, so 'host' is unknown and 'at' is the date of that PR rather than of a request."
+        "request": "GET http://10.99.4.1:8090/api/env",
+        "host": "http://10.99.4.1:8090",
+        "at": "2026-09-20T03:29:54+00:00",
+        "note": "Fetched by scripts/arena_site.py from a live arena at 2026-09-20T03:29:54+00:00."
       },
       "response": {
-        "SITE_LAT": 71.991960,
+        "SITE_NAME": "fort_ross",
+        "SITE_LAT": 71.99196,
         "SITE_LON": -94.822428,
-        "SITE_EXTENT": 6500.0
-      }
+        "SITE_EXTENT": 6500,
+        "SITE_GRID": 1025,
+        "IMAGERY_MONTHS": "6,7,8",
+        "IMAGERY_CLOUD": 5,
+        "IMAGERY_DETAIL": 1,
+        "IMAGERY_DETAIL_STRENGTH": 0.55,
+        "IMAGERY_SIZE": 4096,
+        "ASSET_1": "copter,quadcopter,71.995807,-94.839300",
+        "ASSET_2": "tower,tower-1,71.980671,-94.853711",
+        "ASSET_3": "plane,fixed-wing,71.998195,-94.841967,>71.997790,-94.846245",
+        "ASSET_5": "tower,tower-2,72.011778,-94.804721",
+        "SITL_VEHICLES": "copter rover plane antennatracker",
+        "CAMERAS": "live",
+        "SHADOWS": 0,
+        "PHYSICS_RATE": 250,
+        "LOOP_RATE": 150,
+        "SPEEDUP": 1,
+        "GZWEB_PORT": 8080,
+        "CONTROL_PORT": 8090,
+        "IMAGERY_SOURCE": "mapbox",
+        "SHIP": 1,
+        "SHIP_MOVING": 1,
+        "SHIP_SPEED": 3.0,
+        "SHIP_START": "random",
+        "FOG": 0,
+        "FOG_DENSITY": 0.0008,
+        "FOG_COLOUR": "0.80 0.84 0.88",
+        "FOG_TYPE": "exp2",
+        "MAPBOX_TOKEN": "<redacted by scripts/arena_site.py>",
+        "CONTROL_BIND": "0.0.0.0",
+        "GZWEB_ASSET_MAX_AGE": 300,
+        "REGISTRY": "513676987015.dkr.ecr.ca-central-1.amazonaws.com/ddc2-arctic-sim/"
+      },
+      "body": "# Copy to .env and edit. Everything downstream keys off these.\n\n# --- Site --------------------------------------------\n# Any land above 60\u00b0N works: terrain comes from ArcticDEM, \n# imagery from Sentinel-2. Both are fetched on demand for \n# these coordinates.\nSITE_NAME=fort_ross\nSITE_LAT=71.991960\nSITE_LON=-94.822428\n\n# Square footprint in metres of real ground, and heightmap\n# resolution. SITE_GRID must be 2^n+1: 513, 1025, 2049. \n# 1025 over 6500 m is ~6.3 m/sample.\nSITE_EXTENT=6500\nSITE_GRID=1025\n\n# --- Imagery --------------------------------------------\n# Polar night has no light, so only summer months \n# yield usable scenes.\nIMAGERY_MONTHS=6,7,8\nIMAGERY_CLOUD=5\n\n# Sentinel-2 is 10 m, so a 6.5 km site holds only ~650 px \n# of real optical detail. ArcticDEM publishes a 2 m mosaic\n# \u2014 5x finer \u2014 and its high-frequency hillshade is mixed \n# in to add genuine micro-relief the imagery cannot resolve.\nIMAGERY_DETAIL=1\nIMAGERY_DETAIL_STRENGTH=0.55\n\n# Texture resolution. 4096 is worth it with detail on; drop \n# to 2048 for a much smaller download if gzweb is slow to \n# load a site.\nIMAGERY_SIZE=4096\n\n# --- Fleet ------------------------------------------------\n# One line per asset you control: ASSET_N=type,name,lat,lon\n#   type   copter | plane | boat | rover | tower\n#   name   MUST be one of the roles declared in\n#          docker-compose.yml: quadcopter, fixed-wing, boat,\n#          tower-1, tower-2\n#   lat,lon  right-click in the sim and copy \"lat,lon\".\n#            Prefix with xy: for world metres. Leave blank\n#            to auto-place on suitable ground.\n#\n# Each role has its own container and its own IP, so every\n# asset answers on ArduPilot's stock ports at its address:\n#   quadcopter 10.23.0.100   host tcp 5760  udp 14550\n#   fixed-wing 10.23.0.101   host tcp 5770  udp 14560\n#   boat       10.23.0.102   host tcp 5780  udp 14570\n#   tower-1    10.23.0.103   host tcp 5790  udp 14580\n#   tower-2    10.23.0.104   host tcp 5800  udp 14590\n# The address follows the ROLE, not the ASSET_N number, so\n# reordering these lines never moves an asset's endpoint.\n# A role with no line here runs an idle container.\n#\n# Towers are ArduPilot AntennaTracker instances: pan and tilt\n# are SERVO1/SERVO2, driven over MAVLink like any other vehicle.\n#\n# The target vessel is NOT here \u2014 it is what teams have to\n# find, so it stays under SHIP_* below with no MAVLink endpoint.\nASSET_1=copter,quadcopter,71.995807,-94.839300\nASSET_2=tower,tower-1,71.980671,-94.853711\nASSET_3=plane,fixed-wing,71.998195,-94.841967,>71.997790,-94.846245\nASSET_5=tower,tower-2,72.011778,-94.804721\n\n# --- Vehicle --------------------------------------------\n\n# Firmwares compiled into the SITL image. Each adds build \n# time; trim if youonly fly one type.\nSITL_VEHICLES=copter rover plane antennatracker\n\n# --- Performance ------------------------------------------\n# Gazebo step rate AND ArduPilot's SCHED_LOOP_RATE; the \n# two must match or SITL reports \"Main loop slow\" and refuses \n# to arm. 250 suits a laptop. Raise both (400 is ArduCopter's \n# default) if your machine keeps up.\n# --- Rendering ------------------------------------------\n# There is no GPU in the container, so every camera is\n# rasterised on the CPU by llvmpipe. Each live camera costs\n# roughly a core. CAMERAS=0 leaves the sensors asleep until\n#   live      always rendering (~1 core each)\n#   ondemand  asleep until a feed is opened\n#   off       no stream at all; the panel button greys out\nCAMERAS=live\n# Ogre re-renders the scene per light per frame for shadows.\nSHADOWS=0\n\nPHYSICS_RATE=250\n\n# ArduPilot SCHED_LOOP_RATE. MUST be below PHYSICS_RATE, never equal: the FDM\n# exchange is a synchronous round trip, so SITL always lands under the world\n# rate. Equal values give \"PreArm: Main loop slow\" and nothing arms.\nLOOP_RATE=150\nSPEEDUP=1\n\n# --- Ports -------------------------------------------------\nGZWEB_PORT=8080\nCONTROL_PORT=8090\n\n# --- Rebuild switches ---------------------------------------\n# FORCE_TERRAIN=1   re-download and rebuild terrain even if the \n# world exists GZWEB_REDEPLOY=1  re-run gzweb asset conversion \n# on next start\nIMAGERY_SOURCE=mapbox\n\n# --- Target: Ship --------------------------------------------\n\n# Target vessel: SHIP places one, SHIP_MOVING sends it along \n# a planned course.\nSHIP=1\nSHIP_MOVING=1\nSHIP_SPEED=3.0\n# fixed  = always the same start (reproducible)\n# random = seeded random start; for a moving vessel this is \n#          a point along the already-validated course, so the \n#          track never crosses land either way.\nSHIP_START=random\n\n# --- Weather --------------------------------------------\n# Fog is rendered by Gazebo into CAMERA SENSORS, so it genuinely \n# degrades what a drone sees \u2014 not just the human view. Visibility \n# is roughly 3/density metres:\n#   0.0008 -> ~3.7 km (light haze)   \n#   0.0015 -> ~2 km   0.005 -> ~600 m (thick)\nFOG=0\nFOG_DENSITY=0.0008\nFOG_COLOUR=0.80 0.84 0.88\nFOG_TYPE=exp2\n# Mapbox token \u2014 .env is gitignored.\nMAPBOX_TOKEN=<redacted by scripts/arena_site.py>\nCONTROL_BIND=0.0.0.0\nGZWEB_ASSET_MAX_AGE=300\n\n# --- Registry ---------------------------------------------------------------\n# Pull the built images from ECR instead of rebuilding them here. Unset (as on a\n# developer machine) the same compose files build locally under these exact\n# names, so this is the only line that differs. See infra registry.tf.\n\nREGISTRY=513676987015.dkr.ecr.ca-central-1.amazonaws.com/ddc2-arctic-sim/\n"
     },
     "site": {
       "provenance": {
-        "request": "GET http://<arena>:8090/api/site",
-        "host": null,
-        "at": null,
-        "note": "Never called. The arena is not reachable from CI and was not reachable from the session that added this file, so the site centre, bounds3413 and convergence_deg are unrecorded rather than guessed. Fill this in with `python scripts/arena_site.py --endpoint <host> --write` from a machine that can reach the arena; whiteout/site.py checks the answer against the env record's centre and against the polar stereographic identity when it arrives."
+        "request": "GET http://10.99.4.1:8090/api/site",
+        "host": "http://10.99.4.1:8090",
+        "at": "2026-09-20T03:29:54+00:00",
+        "note": "Fetched by scripts/arena_site.py from a live arena at 2026-09-20T03:29:54+00:00."
       },
-      "response": null
+      "response": {
+        "ok": true,
+        "name": "fort_ross",
+        "bounds3413": {
+          "xmin": -1505608.044159686,
+          "ymin": -1271830.812646156,
+          "xmax": -1499139.421867714,
+          "ymax": -1265362.190354184
+        },
+        "centre": {
+          "lat": 71.99196,
+          "lon": -94.822428
+        },
+        "extent_m": 6500.0,
+        "convergence_deg": -49.80479318596525
+      }
     }
   }
 }

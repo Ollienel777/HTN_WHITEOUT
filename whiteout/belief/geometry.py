@@ -346,14 +346,16 @@ class StraitGeometry:
 #: ``competition.lock`` pins three.
 #:
 #: **What #112 changed about that, and what it did not.** The site's own
-#: parameters are now a recorded answer rather than a transcription:
-#: ``whiteout/data/site.json`` and :mod:`whiteout.site`, including
-#: ``GET :8090/api/site``'s ``bounds3413`` and ``convergence_deg`` for
-#: whoever next holds the arena. The convergence is **not** a correction to
-#: anything — see :mod:`whiteout.vision.projection`, "Grid North, true North,
-#: and why ``convergence_deg`` is not a bias here" — so none of the vertices
-#: below moved with it. The 470 m the centreline sits off the vessel's track
-#: is still open, and still wants the heightmap.
+#: parameters are a recorded answer now rather than a transcription:
+#: ``whiteout/data/site.json`` and :mod:`whiteout.site` hold what
+#: ``GET :8090/api/env`` and ``GET :8090/api/site`` answered on the SIM-5
+#: arena on 2026-09-20, ``bounds3413`` and ``convergence_deg`` included. The
+#: convergence is **not** a correction to anything — see
+#: :mod:`whiteout.vision.projection`, "Grid North, true North, and why
+#: ``convergence_deg`` is not a bias here" — so none of the vertices below
+#: moved with it, and the recorded answer confirms the grid that argument is
+#: about. The 470 m the centreline sits off the vessel's track is still open,
+#: and still wants the heightmap.
 
 #: The rendered site's centre, from ``GET :8090/api/env`` (``SITE_LAT`` and
 #: ``SITE_LON``). Everything the arena simulates is within

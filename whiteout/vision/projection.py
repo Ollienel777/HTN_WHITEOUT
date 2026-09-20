@@ -63,9 +63,11 @@ angle between **grid North** — the northing axis of EPSG:3413, the polar
 stereographic grid the arena tiles its terrain in — and **true North**. At this
 site it is about **49.8°**, because for the polar aspect of a stereographic
 projection the convergence is exactly :math:`\\lambda - \\lambda_0`, and
-EPSG:3413's central meridian is 45° W against a site at 94.82° W.
-:mod:`whiteout.site` records the arena's answer and checks it against that
-identity.
+EPSG:3413's central meridian is 45° W against a site at 94.82° W. The arena
+was asked and answered **-49.80479°**, against the identity's -49.822428°;
+:mod:`whiteout.site` holds that answer and checks it, and the 0.0176° between
+the two is discussed there. So the grid this section reasons about is the grid
+the arena is actually using, which is the premise everything below rests on.
 
 **It corrects nothing in this module, and nothing anywhere else in the
 build.** This is written down rather than left implied because 49.8° is not a
@@ -128,14 +130,23 @@ false alarms landing "one to three kilometres away, on the channel's ice":
 still in the channel, which is where a camera with a true-North yaw puts them
 and is not where a 49.8° rotation would.
 
-**The one-minute check, for whoever next has the arena.** Fly any asset a
-straight leg and compare its ``ATTITUDE.yaw`` against the course over ground
-that :func:`whiteout.geo.bearing_deg` gives between two consecutive
+**The one-minute check, still outstanding.** Fly any asset a straight leg and
+compare its ``ATTITUDE.yaw`` against the course over ground that
+:func:`whiteout.geo.bearing_deg` gives between two consecutive
 ``GLOBAL_POSITION_INT`` fixes on that leg. Agreement to a few degrees is a
 true-North yaw; a constant offset near 49.8° would mean the arena hands out a
 grid-referenced heading and every paragraph above needs re-deriving. Nothing
 in the repository asserts this, because it needs a live arena and a moving
 asset, and an assertion nobody can run is worse than a procedure somebody can.
+
+It was attempted on the tunnel that recorded the fixture and could not be
+completed: ``GET :8090/api/status`` answered ``{"state": "idle"}``, the
+quadcopter's and the fixed-wing's MAVLink ports refused a connection, and a
+stationary asset has no course over ground to compare a yaw against. So this
+paragraph is a procedure and not yet a result. It wants an arena with the sim
+*running*, which is the only thing the argument above still lacks — and the
+argument does not rest on it: it rests on which frames this code enters, and
+that is readable here.
 
 **The convergence that does exist here, and where it is zero.** A local
 tangent plane has a meridian convergence of its own: true North at a point
