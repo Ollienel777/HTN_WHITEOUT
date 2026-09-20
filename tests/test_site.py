@@ -3,7 +3,7 @@
 Issue #112. Two jobs here.
 
 The first is to keep ``whiteout/belief/geometry.py``'s site constants tied to
-``fixtures/arena/site.json``. They are the same three numbers in two places,
+``whiteout/data/site.json``. They are the same three numbers in two places,
 and PR #102 is what a site constant with no live source costs — so the record
 is the source and :func:`test_the_geometry_constants_are_the_recorded_ones`
 is what makes it one.
@@ -25,12 +25,15 @@ JSON, which the guard does not walk.
 
 from __future__ import annotations
 
+import importlib.util
 import socket
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import whiteout.site
 from whiteout.belief.geometry import SITE_CENTRE_LAT, SITE_CENTRE_LON, SITE_EXTENT_M
 from whiteout.site import (
     CONVERGENCE_TOLERANCE_DEG,
@@ -50,6 +53,28 @@ EXTENT_M = 6500.0
 #: A bounds3413 in the right shape and the wrong place: see the module
 #: docstring on why a realistic one cannot be written in a test file.
 BOUNDS: list[float] = [-2.0, -1.0, 2.0, 1.0]
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _script() -> Any:
+    """``scripts/arena_site.py`` as a module.
+
+    The idiom is ``tests/test_gate_config.py``'s: ``scripts/`` is not a
+    package and is excluded from the wheel, so a script is loaded from its
+    path rather than imported.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "whiteout_arena_site", REPO_ROOT / "scripts" / "arena_site.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+arena_site = _script()
 
 
 def a_record(site: dict[str, Any] | None = None, **env: Any) -> dict[str, Any]:
@@ -98,9 +123,20 @@ def test_the_geometry_constants_are_the_recorded_ones() -> None:
 
     This is the point of the record. The constants stay literals in
     ``geometry.py`` -- it is imported everywhere and must not read a file at
-    import time, and the fixture is not in the wheel -- so this is what stops
-    the two drifting apart, which is the failure PR #102 spent twenty hours
-    inside.
+    import time -- so this is what stops the two drifting apart, which is the
+    failure PR #102 spent twenty hours inside.
+
+    **Exact equality, deliberately.** Those three are a transcription of the
+    record, and a transcription is either right or it is not; a tolerance here
+    would let real drift accumulate under it. The looser
+    :data:`~whiteout.site.CENTRE_AGREEMENT_M` answers a different question --
+    "are these two endpoints describing the same site?" -- and
+    :func:`test_a_coarsely_quoted_site_centre_does_not_move_the_parameters` is
+    what keeps the loose bound from feeding this strict one.
+
+    When this does fail, the record won: edit the literals, and re-measure
+    what is derived from them. ``scripts/arena_site.py`` prints the same
+    instruction at the moment of the fetch.
     """
     site = load_site()
     assert SITE_CENTRE_LAT == site.centre_lat_deg
@@ -164,14 +200,33 @@ def test_a_recorded_site_endpoint_supplies_the_grid_fields() -> None:
     assert site.site is not None and site.site.request.endswith("/api/site")
 
 
-def test_the_site_endpoints_centre_wins_where_the_two_overlap() -> None:
-    """``/api/site`` is the site's own description, so it is preferred.
+def test_a_coarsely_quoted_site_centre_does_not_move_the_parameters() -> None:
+    """The regression for the bug this module's design nearly shipped.
 
-    Preferred, not merged: the check below is what makes that safe.
+    ``/api/site`` answering ``71.9920`` where ``/api/env`` says ``71.991960``
+    is an ordinary rounding: 4.4 m, far inside :data:`CENTRE_AGREEMENT_M`,
+    which exists to tolerate exactly that. An earlier revision *preferred*
+    ``/api/site``'s centre where the two overlapped, so this entirely
+    legitimate answer would have moved ``centre_lat_deg`` off
+    ``SITE_CENTRE_LAT`` — and
+    :func:`test_the_geometry_constants_are_the_recorded_ones`, which compares
+    exactly, would have gone red on the documented ``--write`` at the venue,
+    with no stated answer for what to do about it.
+
+    So the centre is ``/api/env``'s, always. ``/api/site``'s is corroboration,
+    and its measured separation is reported rather than substituted.
     """
-    nudged = CENTRE_LAT + 0.0001
-    site = parse_site(a_record(site=a_site_response(centre={"lat": nudged, "lon": CENTRE_LON})))
-    assert site.centre_lat_deg == nudged
+    coarse = round(CENTRE_LAT, 4)
+    assert coarse != CENTRE_LAT
+    site = parse_site(a_record(site=a_site_response(centre={"lat": coarse, "lon": CENTRE_LON})))
+    assert site.centre_lat_deg == CENTRE_LAT == SITE_CENTRE_LAT
+    assert site.centre_agreement_m == pytest.approx(4.4, abs=0.5)
+
+
+def test_the_agreement_is_reported_and_not_merely_asserted() -> None:
+    """A record that passes at 4 m and one that passes at 45 m are different records."""
+    assert parse_site(a_record(site=a_site_response())).centre_agreement_m == pytest.approx(0.0)
+    assert parse_site(a_record(site=None)).centre_agreement_m is None
 
 
 def test_two_centres_that_disagree_are_refused() -> None:
@@ -179,6 +234,27 @@ def test_two_centres_that_disagree_are_refused() -> None:
     far = {"lat": CENTRE_LAT + 0.02, "lon": CENTRE_LON}
     with pytest.raises(SiteError, match="do not pick one"):
         parse_site(a_record(site=a_site_response(centre=far)))
+
+
+@pytest.mark.parametrize("where", ["env", "site"])
+def test_a_swapped_position_is_refused_as_a_site_error(where: str) -> None:
+    """The mix-up ``GeoPoint`` exists to catch, raised as this module's own type.
+
+    ``GeoPoint`` refuses ``lat=-94.82`` with :class:`~whiteout.geo.GeoError`,
+    which is not a :class:`SiteError`: it would escape ``load_site``'s
+    documented ``:raises``, and it would slip past ``arena_site.py``'s
+    ``except SiteError`` and reach the operator as a traceback instead of the
+    refusal message that was designed for them. Both halves of the record are
+    checked, so a swapped ``/api/env`` pair is refused even when ``/api/site``
+    has never been recorded.
+    """
+    if where == "env":
+        record = a_record(site=None, SITE_LAT=CENTRE_LON, SITE_LON=CENTRE_LAT)
+    else:
+        swapped = {"lat": CENTRE_LON, "lon": CENTRE_LAT}
+        record = a_record(site=a_site_response(centre=swapped))
+    with pytest.raises(SiteError, match="is not a position"):
+        parse_site(record)
 
 
 # --- the convergence check -------------------------------------------------
@@ -231,12 +307,37 @@ def test_an_unknown_response_shape_names_what_it_did_see() -> None:
 
 
 def test_a_centre_may_be_a_pair_or_a_nested_object() -> None:
-    site = parse_site(a_record(site=a_site_response(centre=[CENTRE_LAT, CENTRE_LON])))
-    assert (site.centre_lat_deg, site.centre_lon_deg) == (CENTRE_LAT, CENTRE_LON)
+    """Two shapes, not two spellings: both are ordinary ways to send a centre.
+
+    The *key* has one accepted spelling plus ``center``, which is the same
+    word. The invented variants an earlier revision accepted are gone — see
+    the comment above the readers in ``whiteout/site.py``.
+    """
+    assert parse_site(a_record(site=a_site_response(centre=[CENTRE_LAT, CENTRE_LON]))).site
     flat = a_site_response()
     del flat["centre"]
     flat["lat"], flat["lon"] = CENTRE_LAT, CENTRE_LON
-    assert parse_site(a_record(site=flat)).centre_lon_deg == CENTRE_LON
+    assert parse_site(a_record(site=flat)).centre_agreement_m == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("accepted", "invented"),
+    [("convergence_deg", "grid_convergence_deg"), ("bounds3413", "bounds_3413")],
+)
+def test_an_invented_spelling_is_not_quietly_accepted(accepted: str, invented: str) -> None:
+    """A name nobody has seen an answer use fails loudly rather than being guessed at.
+
+    An earlier revision accepted all three of these on the theory that the
+    fetch should not fail at the venue for a key name. That was imagination,
+    and it bought nothing: the failure names every key the response did have,
+    the raw body is kept in the record either way, and widening the list from
+    a real answer is a one-line change.
+    """
+    response = a_site_response()
+    response[invented] = response.pop(accepted)
+    with pytest.raises(SiteError) as caught:
+        parse_site(a_record(site=response))
+    assert invented in str(caught.value)
 
 
 def test_env_fields_may_arrive_as_the_text_that_key_value_lines_parse_to() -> None:
@@ -279,7 +380,73 @@ def test_an_env_record_with_no_response_is_refused() -> None:
         parse_site(record)
 
 
-def test_the_fixture_path_points_into_the_repository() -> None:
+def test_the_record_ships_inside_the_package() -> None:
+    """``load_site()`` must mean the same thing in a wheel as in a checkout.
+
+    The record lives beside ``whiteout/site.py`` rather than in ``fixtures/``,
+    which ``pyproject.toml`` excludes from the wheel, and
+    ``[tool.setuptools.package-data]`` is what carries it there. This asserts
+    both halves: the file is where the module looks, and the packaging still
+    claims it.
+    """
     assert SITE_FIXTURE.name == "site.json"
-    assert SITE_FIXTURE.parent.name == "arena"
     assert SITE_FIXTURE.is_file()
+    assert SITE_FIXTURE.parent == Path(whiteout.site.__file__).resolve().parent / "data"
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "[tool.setuptools.package-data]" in pyproject
+    assert 'whiteout = ["data/*.json"]' in pyproject
+
+
+# --- the fetch script ------------------------------------------------------
+#
+# Only the two behaviours that are decisions rather than plumbing. The rest of
+# the script needs an arena, and a test that mocks an arena end to end would be
+# asserting the mock.
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("10.99.0.1", "http://10.99.0.1:8090"),
+        ("10.99.0.1:8090", "http://10.99.0.1:8090"),
+        ("http://arena.local", "http://arena.local:8090"),
+        ("http://arena.local:9000", "http://arena.local:9000"),
+        # The colon-counting version appended the port to the *path* and asked
+        # for `/api:8090`. A host with a path in front of it is what somebody
+        # pastes out of a browser.
+        ("http://arena.local/api", "http://arena.local:8090"),
+    ],
+)
+def test_the_endpoint_is_split_rather_than_counted(endpoint: str, expected: str) -> None:
+    assert arena_site.base_url(endpoint) == expected
+
+
+def test_one_endpoint_failing_does_not_discard_the_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 on ``/api/site`` must not throw away a good ``/api/env`` answer.
+
+    ``/api/site`` has never been called, so a 404 on it is a live possibility
+    — and one of the two reasons to run the script at all is to upgrade the
+    ``/api/env`` half from #102's transcription to a fetch. The failed half is
+    recorded the way the record already spells "never fetched", with the error
+    in its provenance, and the run reports the failure to its caller.
+    """
+
+    def answer(url: str) -> tuple[Any, str]:
+        if url.endswith("/api/site"):
+            raise arena_site.FetchError("HTTP Error 404: Not Found")
+        return None, f"SITE_LAT={CENTRE_LAT}\nSITE_LON={CENTRE_LON}\nSITE_EXTENT={EXTENT_M}\n"
+
+    monkeypatch.setattr(arena_site, "fetch", answer)
+    built, failures = arena_site.record("127.0.0.1")
+
+    assert failures and "404" in failures[0]
+    assert built["records"]["site"]["response"] is None
+    assert "404" in built["records"]["site"]["provenance"]["note"]
+    # And what survives is a record whiteout.site accepts, with the env half
+    # now a fetch rather than a transcription.
+    site = parse_site(built)
+    assert (site.centre_lat_deg, site.extent_m) == (CENTRE_LAT, EXTENT_M)
+    assert site.convergence_deg is None
+    assert built["records"]["env"]["provenance"]["host"] == "http://127.0.0.1:8090"

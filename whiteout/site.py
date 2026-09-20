@@ -15,18 +15,25 @@ nothing here guesses one.
 The fixture, and why the fetch is not in the product
 -----------------------------------------------------
 
-``fixtures/arena/site.json`` is the record. :func:`load_site` reads it and
+``whiteout/data/site.json`` is the record. :func:`load_site` reads it and
 never opens a socket; ``scripts/arena_site.py`` is the only thing that talks
 to the arena, it refuses to run without an endpoint named on the command line,
-and it overwrites the fixture only when asked with ``--write``. That split is
+and it overwrites the record only when asked with ``--write``. That split is
 the whole design, and it has two reasons:
 
 * **CI cannot reach the arena.** A module that fetched on import would make
   the gate depend on a WireGuard tunnel to a laptop in a venue.
 * **A fetched number with no record is a number nobody can check.** The
-  fixture carries the raw response and the provenance beside it, so the next
+  record carries the raw response and the provenance beside it, so the next
   person can see what was asked, of which host, and when — which is exactly
   what ``DEFAULT_STRAIT``'s centreline still cannot show.
+
+It sits inside the package rather than in ``fixtures/`` because it is this
+module's data and not a test's: ``pyproject.toml`` excludes ``fixtures*`` from
+the wheel, so a record kept there would make :func:`load_site` a function that
+cannot work as documented anywhere but a source checkout. ``fixtures/`` holds
+what the tests feed the product — episodes, frames, weights — and this is the
+product's own reference data.
 
 Two endpoints, and what each is good for
 -----------------------------------------
@@ -45,10 +52,39 @@ Two endpoints, and what each is good for
     :class:`SiteParameters` reports ``convergence_deg`` and ``bounds3413`` as
     ``None`` until somebody runs the script against a live arena.
 
-When both are recorded they overlap on the centre, and that overlap is
-checked: :func:`parse_site` refuses a fixture whose two centres disagree by
-more than :data:`CENTRE_AGREEMENT_M`. Two answers to the same question that
-are allowed to differ are how #102 happened.
+Which centre wins, and the two questions that are not the same question
+-------------------------------------------------------------------------
+
+**``/api/env``'s centre is the site centre, always**, even when ``/api/site``
+has been recorded and quotes one too. ``/api/site``'s is *corroboration*: it is
+checked against ``/api/env``'s and then reported as
+:attr:`SiteParameters.centre_agreement_m`, the measured separation, rather
+than substituted for it.
+
+That was not the first design, and the reason it is this one is worth stating,
+because two plausible-looking bounds here are answers to different questions.
+
+*Is this the same site?* — :data:`CENTRE_AGREEMENT_M`, 50 m. Two endpoints of
+one arena describing one site; a kilometre apart means one of the records is
+of a different site or a different run, and picking either would be guessing.
+Fifty metres is deliberately loose, because an endpoint is free to quote a
+centre to four decimal places and four decimal places of latitude is 11 m.
+
+*Is ``geometry.py``'s copy still the record's?* —
+``tests/test_site.py::test_the_geometry_constants_are_the_recorded_ones``,
+exact equality. Those three literals are a transcription of this record, and a
+transcription is either right or it is not; a tolerance there would let real
+drift accumulate under it, which is the failure this whole module exists to
+stop.
+
+Letting the looser bound feed the stricter check is how those two collapse
+into one. If ``/api/site``'s coarser centre were preferred, an entirely
+legitimate ``--write`` — the arena answering 71.9920 where ``/api/env`` says
+71.991960, 4.4 m apart and well inside the corroboration bound — would move
+:data:`whiteout.belief.geometry.SITE_CENTRE_LAT`'s counterpart and turn the
+gate red for a rounding. So it is not preferred, and
+:func:`test_a_coarsely_quoted_site_centre_does_not_move_the_parameters
+<tests.test_site>` is the regression.
 
 What ``convergence_deg`` is for, and what it is not for
 --------------------------------------------------------
@@ -88,7 +124,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from whiteout.geo import GeoPoint, geodetic_to_local
+from whiteout.geo import GeoError, GeoPoint, geodetic_to_local
 
 __all__ = [
     "CENTRE_AGREEMENT_M",
@@ -103,12 +139,11 @@ __all__ = [
     "parse_site",
 ]
 
-#: The committed record, relative to the repository root. It is not packaged
-#: into the wheel — ``pyproject.toml`` excludes ``fixtures*`` — because
-#: nothing in the run loop reads it: it is a source for geometry and for the
-#: tests that pin geometry, and a caller outside the source tree passes its
-#: own path to :func:`load_site`.
-SITE_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "arena" / "site.json"
+#: The committed record, beside this module and inside the package, so that
+#: :func:`load_site` works the same from a source checkout and from an
+#: installed wheel. ``pyproject.toml``'s ``package-data`` is what puts it in
+#: the wheel, and ``tests/test_site.py`` checks that it is still there.
+SITE_FIXTURE = Path(__file__).resolve().parent / "data" / "site.json"
 
 #: EPSG:3413's central meridian, degrees East. NSIDC Sea Ice Polar
 #: Stereographic North: latitude of true scale 70° N, central meridian 45° W.
@@ -120,9 +155,11 @@ GRID_CENTRAL_MERIDIAN_DEG = -45.0
 CONVERGENCE_TOLERANCE_DEG = 0.5
 
 #: How far ``/api/env``'s site centre and ``/api/site``'s may sit apart,
-#: metres, before :func:`parse_site` refuses the fixture. One arena, one
-#: site, one centre; a kilometre of disagreement is a bug in the record and
-#: not a rounding.
+#: metres, before :func:`parse_site` refuses the record. One arena, one site,
+#: one centre; a kilometre of disagreement is a bug in the record and not a
+#: rounding. **It is a corroboration bound and not a precision one** — it is
+#: loose on purpose, and nothing derived from the centre is allowed to move
+#: within it. See the module docstring, "Which centre wins".
 CENTRE_AGREEMENT_M = 50.0
 
 
@@ -150,10 +187,14 @@ class Provenance:
 class SiteParameters:
     """The site the arena renders, as the arena describes it.
 
-    :param centre_lat_deg: site centre, degrees North.
-    :param centre_lon_deg: site centre, degrees East.
+    :param centre_lat_deg: site centre, degrees North, from ``/api/env``.
+    :param centre_lon_deg: site centre, degrees East, from ``/api/env``.
     :param extent_m: the site's square extent, metres. The whole of the
         world: there is no terrain, no water and no vessel outside it.
+    :param centre_agreement_m: how far ``/api/site``'s centre sits from the
+        two above, metres, or ``None`` when ``/api/site`` has not been
+        recorded. Reported rather than acted on: see the module docstring on
+        why the centre is never taken from ``/api/site``.
     :param convergence_deg: grid North against true North, degrees, or
         ``None`` when ``/api/site`` has not been recorded. **Not a correction
         to apply** — see the module docstring.
@@ -169,6 +210,7 @@ class SiteParameters:
     centre_lat_deg: float
     centre_lon_deg: float
     extent_m: float
+    centre_agreement_m: float | None
     convergence_deg: float | None
     bounds3413: tuple[float, float, float, float] | None
     env: Provenance
@@ -234,32 +276,33 @@ def parse_site(data: Mapping[str, Any], *, where: str = "<record>") -> SiteParam
 
     if env_raw is None:
         raise SiteError(f"{where}: the env record has no response, and the centre comes from it")
-    env_lat = _number(_pick(env_raw, "SITE_LAT", "site_lat", "lat"), f"{env_where}: SITE_LAT")
-    env_lon = _number(_pick(env_raw, "SITE_LON", "site_lon", "lon"), f"{env_where}: SITE_LON")
-    extent_m = _number(
-        _pick(env_raw, "SITE_EXTENT", "site_extent", "extent"), f"{env_where}: SITE_EXTENT"
-    )
+    env_lat = _number(_pick(env_raw, "SITE_LAT", "lat"), f"{env_where}: SITE_LAT")
+    env_lon = _number(_pick(env_raw, "SITE_LON", "lon"), f"{env_where}: SITE_LON")
+    extent_m = _number(_pick(env_raw, "SITE_EXTENT", "extent"), f"{env_where}: SITE_EXTENT")
     if extent_m <= 0.0:
         raise SiteError(f"{env_where}: SITE_EXTENT must be positive, got {extent_m!r}")
+    # Validated here and not only where the two centres are compared, so that a
+    # swapped pair -- `lat=-94.82`, the mix-up the whole build guards against --
+    # is refused even when `/api/site` has never been recorded.
+    centre = _place(env_lat, env_lon, f"{env_where}: SITE_LAT/SITE_LON")
 
-    centre_lat, centre_lon = env_lat, env_lon
+    agreement_m: float | None = None
     convergence_deg: float | None = None
     bounds: tuple[float, float, float, float] | None = None
 
     if site_raw is not None:
-        site_lat, site_lon = _centre(site_raw, site_where)
-        _agree(env_lat, env_lon, site_lat, site_lon, where)
-        # `/api/site` is the site endpoint's own answer about the site, so it
-        # wins where the two overlap. The check above is what makes that a
-        # preference rather than a second frame.
-        centre_lat, centre_lon = site_lat, site_lon
-        convergence_deg = _convergence(site_raw, centre_lon, site_where)
+        # Corroboration only. `/api/env`'s centre is the site centre, and
+        # `/api/site`'s is measured against it and then reported: see the
+        # module docstring, "Which centre wins".
+        agreement_m = _agreement_m(centre, _centre(site_raw, site_where), where)
+        convergence_deg = _convergence(site_raw, env_lon, site_where)
         bounds = _bounds(site_raw, site_where)
 
     return SiteParameters(
-        centre_lat_deg=centre_lat,
-        centre_lon_deg=centre_lon,
+        centre_lat_deg=env_lat,
+        centre_lon_deg=env_lon,
         extent_m=extent_m,
+        centre_agreement_m=agreement_m,
         convergence_deg=convergence_deg,
         bounds3413=bounds,
         env=_provenance(records, "env", where),
@@ -267,16 +310,23 @@ def parse_site(data: Mapping[str, Any], *, where: str = "<record>") -> SiteParam
     )
 
 
-# -- the tolerant readers ---------------------------------------------------
+# -- the readers ------------------------------------------------------------
 #
-# Every reader below takes the response **as the arena sent it** and looks for
-# the field under the spellings it might have used. That tolerance is
-# deliberate and it is bounded: `/api/site` has never been called, so its exact
-# key names are not known here, and the choice is between guessing one spelling
-# and failing silently on another, or accepting the obvious few and failing
-# loudly on everything else. These fail loudly, naming the keys they did see,
-# and the raw response is kept in the fixture so the next reader can widen the
-# list from evidence instead of from imagination.
+# Every reader below takes the response **as the arena sent it**, and each
+# field has **one accepted spelling**, with two exceptions that are not
+# guesses: `centre`/`center`, which is one word with two spellings, and the
+# shape of the centre, which may be a nested object or a pair because both are
+# ordinary ways to send one.
+#
+# An earlier revision accepted a handful of invented variants -- `bounds_3413`,
+# `grid_convergence_deg`, `site_lat` -- on the theory that the fetch should not
+# fail at the venue for a name nobody had seen. That was imagination rather
+# than evidence, which is what this module's own docstring warns against, and
+# it bought nothing: a miss fails loudly here, naming every key the response
+# did have, the raw body is kept in the record either way, and widening the
+# list afterwards is a one-line change made from the evidence in front of you.
+# (Half of them were dead anyway: `_maybe` folds case, so `SITE_LAT` and
+# `site_lat` were always the same lookup.)
 
 
 def _record(
@@ -310,36 +360,38 @@ def _provenance(records: Mapping[str, Any], name: str, where: str) -> Provenance
     return Provenance(request=request, host=host, at=at, note=note)
 
 
-def _centre(response: Mapping[str, Any], where: str) -> tuple[float, float]:
-    """The site centre out of an ``/api/site`` response, however it spells it."""
+def _centre(response: Mapping[str, Any], where: str) -> GeoPoint:
+    """The site centre out of an ``/api/site`` response."""
     nested = _maybe(response, "centre", "center")
     if isinstance(nested, Mapping):
-        return (
-            _number(_pick(nested, "lat", "latitude"), f"{where}: centre.lat"),
-            _number(_pick(nested, "lon", "lng", "longitude"), f"{where}: centre.lon"),
+        return _place(
+            _number(_pick(nested, "lat"), f"{where}: centre.lat"),
+            _number(_pick(nested, "lon"), f"{where}: centre.lon"),
+            f"{where}: centre",
         )
     if isinstance(nested, list | tuple):
         if len(nested) != 2:
             raise SiteError(f"{where}: centre is a list of {len(nested)}, expected [lat, lon]")
-        return (
+        return _place(
             _number(nested[0], f"{where}: centre[0]"),
             _number(nested[1], f"{where}: centre[1]"),
+            f"{where}: centre",
         )
-    lat = _maybe(response, "lat", "latitude", "site_lat")
-    lon = _maybe(response, "lon", "lng", "longitude", "site_lon")
+    lat = _maybe(response, "lat")
+    lon = _maybe(response, "lon")
     if lat is None or lon is None:
         raise SiteError(
             f"{where}: no site centre. Looked for 'centre' or 'center' holding a "
             f"[lat, lon] or a {{lat, lon}}, and for a flat lat/lon pair; the response "
             f"has: {_keys(response)}"
         )
-    return _number(lat, f"{where}: lat"), _number(lon, f"{where}: lon")
+    return _place(_number(lat, f"{where}: lat"), _number(lon, f"{where}: lon"), f"{where}: lat/lon")
 
 
 def _convergence(response: Mapping[str, Any], lon_deg: float, where: str) -> float:
     """The recorded convergence, checked against the projection's own identity."""
     value = _number(
-        _pick(response, "convergence_deg", "convergence", "grid_convergence_deg"),
+        _pick(response, "convergence_deg"),
         f"{where}: convergence_deg",
     )
     expected = expected_convergence_deg(lon_deg)
@@ -356,7 +408,7 @@ def _convergence(response: Mapping[str, Any], lon_deg: float, where: str) -> flo
 
 
 def _bounds(response: Mapping[str, Any], where: str) -> tuple[float, float, float, float]:
-    raw = _pick(response, "bounds3413", "bounds_3413", "bounds")
+    raw = _pick(response, "bounds3413")
     if not isinstance(raw, list | tuple):
         raise SiteError(f"{where}: bounds3413 is {type(raw).__name__}, expected four numbers")
     if len(raw) != 4:
@@ -371,17 +423,40 @@ def _bounds(response: Mapping[str, Any], where: str) -> tuple[float, float, floa
     return min_x, min_y, max_x, max_y
 
 
-def _agree(env_lat: float, env_lon: float, site_lat: float, site_lon: float, where: str) -> None:
-    """Refuse a record whose two endpoints disagree about where the site is."""
-    offset = geodetic_to_local(GeoPoint(env_lat, env_lon), GeoPoint(site_lat, site_lon))
+def _place(lat_deg: float, lon_deg: float, where: str) -> GeoPoint:
+    """A :class:`~whiteout.geo.GeoPoint`, with its refusal spelled as a :class:`SiteError`.
+
+    :class:`~whiteout.geo.GeoPoint` raises :class:`~whiteout.geo.GeoError` on a
+    position outside geodetic range — a swapped pair at this site reads
+    ``lat=-94.82``, which is not a latitude. That refusal is wanted; its *type*
+    is not, because it would escape this module's documented
+    ``:raises SiteError:`` and slip straight past ``arena_site.py``'s
+    ``except SiteError``, turning the designed refusal message into a
+    traceback at the moment somebody is standing in front of the arena.
+    """
+    try:
+        return GeoPoint(lat_deg, lon_deg)
+    except GeoError as exc:
+        raise SiteError(f"{where} is not a position: {exc}") from exc
+
+
+def _agreement_m(env: GeoPoint, site: GeoPoint, where: str) -> float:
+    """How far the two recorded centres sit apart, refusing a record they disagree in.
+
+    The answer is returned rather than only asserted: a record that passes at
+    4 m and one that passes at 45 m are different records, and
+    :attr:`SiteParameters.centre_agreement_m` is where that shows.
+    """
+    offset = geodetic_to_local(env, site)
     apart_m = math.hypot(offset.east_m, offset.north_m)
     if apart_m > CENTRE_AGREEMENT_M:
         raise SiteError(
-            f"{where}: /api/env puts the site centre at ({env_lat}, {env_lon}) and /api/site "
-            f"at ({site_lat}, {site_lon}), {apart_m:.0f} m apart against a "
+            f"{where}: /api/env puts the site centre at ({env.lat_deg}, {env.lon_deg}) and "
+            f"/api/site at ({site.lat_deg}, {site.lon_deg}), {apart_m:.0f} m apart against a "
             f"{CENTRE_AGREEMENT_M:.0f} m bound. One of the two records is of a different site "
             f"or a different run; do not pick one"
         )
+    return apart_m
 
 
 def _pick(mapping: Mapping[str, Any], *names: str) -> Any:
