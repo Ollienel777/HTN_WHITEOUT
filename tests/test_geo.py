@@ -303,6 +303,17 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "whiteout/vision/camera.py",
         "whiteout/vision/projection.py",
         "whiteout/vision/scene.py",
+        # One `atan2`, and it is not geodesy. #71 flies the fake fleet toward
+        # its commanded waypoint, and a moving asset has to report which way
+        # it is pointing. Both endpoints reach `whiteout.geo` first, so the
+        # call takes an East and a North *in metres* off the tangent plane
+        # that module returned and gives a bearing in radians: no latitude
+        # enters it, and no scale leaves it. The check that this stays true
+        # is not this list -- it is that the ellipsoid guard and the
+        # conversion-name guard both walk this file with no allowlist at all,
+        # so a second converter here still has to spell a constant or name
+        # itself, and both of those are still refused.
+        "whiteout/transport/kinematic.py",
         # Camera-field trigonometry, not latitude trigonometry: it turns a
         # field of view and a height into a depression angle and a ground
         # range, and does its one frame conversion through whiteout.geo like
