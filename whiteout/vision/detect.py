@@ -181,6 +181,59 @@ class DetectorParams:
         fog compresses, so it holds the bargain the module makes: a degraded
         frame yields ``None``. The default sits below the hull's contrast
         through thin fog and above what a floe's shadow on open water reaches.
+
+        **The default is 12 and not 4, and #90 is why.** The arena publishes
+        JPEG, and at 4 the detector reported a vessel on more than half the
+        empty frames of a quantised corpus. Swept over three seeds, 24 frames
+        per camera, ``scripts/score_detector.py --synthetic``:
+
+        .. code-block:: text
+
+            seed   counts        uncompressed            quality 75
+                             recall      fp          recall      fp
+            11        4       0.583     0.021         0.312     0.521
+            11       12       0.500     0.000         0.438     0.104
+            23        4       0.646     0.000         0.312     0.521
+            23       12       0.542     0.000         0.542     0.250
+            47        4       0.604     0.042         0.354     0.542
+            47       12       0.479     0.000         0.375     0.062
+
+        On the compressed corpus 12 **dominates** 4 on every seed — more
+        detections *and* between two and eight times fewer false alarms — and
+        costs about a tenth of the recall on frames that will never reach us,
+        since the arena does not serve uncompressed. A false positive posts a
+        lat/lon, and *accuracy* is scored, so that is the direction to err in.
+
+        **12 beats 4; it is not the optimum, and the neighbourhood is steep.**
+        The table above compares two points, so here is the curve around the
+        one shipped — same corpus, quality 75, recall / fp per empty frame:
+
+        .. code-block:: text
+
+            counts        seed 11         seed 23         seed 47
+                 4     0.312 / 0.521   0.312 / 0.521   0.354 / 0.542
+                10     0.667 / 0.271   0.792 / 0.312   0.708 / 0.271
+                11     0.583 / 0.167   0.750 / 0.333   0.625 / 0.125
+                12     0.438 / 0.104   0.542 / 0.250   0.375 / 0.062
+                13     0.208 / 0.042   0.229 / 0.229   0.188 / 0.062
+
+        One count lower buys 0.15 to 0.25 of recall for 0.06 to 0.08 more
+        false alarms, on every seed; one count higher roughly halves recall
+        again. So **this is a cliff edge and not a plateau**, and the value is
+        chosen for the false-positive side of that trade rather than found by
+        search. Deliberately not tuned finer: the corpus is a stand-in codec,
+        and an operating point fitted to three synthetic seeds to the nearest
+        count would be over-fitting a transform the arena does not run.
+
+        **Two things this number is not.** It is not tuned against Dominion
+        Dynamics' encoder, only against ``scripts/jpeg_quantisation.py``,
+        which has no chroma and no entropy coding. And it is not a monotone
+        knob: raising this floor deletes rivals before ``runner_up`` is read
+        (:func:`detect_vessel`), so a tighter gate can *raise* the detection
+        rate — 4 to 10 does exactly that on every seed in the table. Part of
+        the gain above is that interaction rather than a stricter detector,
+        which is why #90 stays open and why real frames (#63) settle it and
+        this does not.
     :param min_sigma: floor under the per-row robust scale, 8-bit counts. A
         row that is genuinely flat would otherwise divide by nearly zero and
         turn sensor quantisation into a detection. It is a floor and not an
@@ -214,7 +267,7 @@ class DetectorParams:
     max_centre_ice: float = 0.15
     max_surround_ice: float = 0.10
     min_depth_sigma: float = 3.6
-    min_depth_counts: float = 4.0
+    min_depth_counts: float = 12.0
     min_sigma: float = 0.75
     min_peak_sigma: float = 11.0
     confident_sigma: float = 26.0
