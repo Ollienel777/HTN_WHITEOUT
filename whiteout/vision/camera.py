@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 __all__ = [
@@ -125,6 +125,44 @@ class CameraModel:
     def cy(self) -> float:
         """Principal point, vertical: the exact centre of the frame."""
         return self.height / 2.0
+
+    def at_frame_size(self, width: int, height: int) -> CameraModel:
+        """The same optics, sampled onto a different raster.
+
+        The arena does not serve the resolutions ``ARENA.md`` §4 publishes.
+        Measured off the live cameras on 2026-09-20: the quadcopter gimbal
+        streams 960x720 where the deck says 640x480, and the fixed-wing and
+        both towers stream 1280x720 where it says 640x360. Every one of those
+        is a pure upscale — **the aspect ratio is unchanged** — so the field
+        of view is still the published one and only the sampling differs.
+
+        That matters because everything derived here scales linearly with the
+        raster at a fixed field of view: ``fx``, ``fy``, ``cx`` and ``cy`` are
+        all proportional to ``width`` or ``height``. A camera at twice the
+        pixels is the same camera, and a pixel at the frame edge is still
+        exactly ``hfov_deg / 2`` off the boresight.
+
+        **A change of aspect ratio is refused**, because then the published
+        pair of fields of view no longer describes the frame: one axis has
+        been cropped or stretched, the focal lengths stop agreeing, and every
+        projection off that frame would be quietly wrong rather than loudly
+        broken. Silence is the wrong failure here — ``ARENA.md`` §5 scores
+        accuracy, and a confidently wrong lat/lon costs more than no lat/lon.
+        """
+        if width <= 0 or height <= 0:
+            raise VisionError(f"{self.name}: frame size must be positive, got {width!r}x{height!r}")
+        want = self.width / self.height
+        got = width / height
+        if abs(want - got) > 1e-3 * want:
+            raise VisionError(
+                f"{self.name}: {width}x{height} has aspect {got:.4f}, but this camera's "
+                f"{self.width}x{self.height} has {want:.4f}. A pure rescale keeps the "
+                f"published fields of view; a change of aspect means one axis was cropped "
+                f"or stretched and {self.hfov_deg}/{self.vfov_deg} no longer describe it"
+            )
+        if (width, height) == (self.width, self.height):
+            return self
+        return replace(self, width=width, height=height)
 
     def normalised(self, px: float, py: float) -> tuple[float, float]:
         """Return the pixel as a direction in the camera frame at ``z = 1``.
