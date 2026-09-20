@@ -82,6 +82,7 @@
     extent: 1000,            /* metres of half-width the field frames */
     origin: null,            /* the drawing frame's origin, as {lat, lon} */
     field: null,             /* the belief grid's layout, decoded once */
+    basemap: null,           /* the shores, projected once — null when absent */
     fixes: {},               /* contact id -> the t its position last moved */
     failure: null            /* { line, reason } */
   };
@@ -212,6 +213,7 @@
     }
     state.failure = null;
     measureExtent();
+    state.basemap = projectBasemap();
     state.field = decodeField(state.records);
     state.fixes = measureFixAges(state.records);
     state.index = 0;
@@ -685,6 +687,105 @@
     return value >= 1000 ? (value / 1000) + " km" : value + " m";
   }
 
+  /* ── the basemap ─────────────────────────────────────────────────── */
+
+  /* How much of `--terrain-hi` the land carries over the land tone. Land has
+   * to be a different *tone* from water, because that difference is the whole
+   * of what a basemap says; `--terrain-lo` alone is a shade off the page and
+   * says nothing. A third of the way to `--terrain-hi` is the darkest value
+   * that still reads at the demo viewport, and it stays far below the belief
+   * ramp's floor, which is where DESIGN.md wants terrain.
+   *
+   * **It is flat on purpose.** A first revision graded the tone up toward the
+   * shoreline to suggest rock rising out of the water. On screen that is a
+   * halo around the belief field — indistinguishable from the bloom DESIGN.md
+   * forbids, and unearned besides: there is no heightmap here, so any relief
+   * would be invented. Flat land, one tone, no shading. */
+  var LAND_TONE = 0.34;
+
+  /* `viz/basemap.js`'s two shores, in the drawing frame's metres.
+   *
+   * Projected once per load, like the belief grid's corners, and through the
+   * same `toLocal` the field's every other position goes through — which is
+   * what makes the coastline land on the water cells rather than near them.
+   * The shores themselves are `whiteout.belief.geometry.DEFAULT_STRAIT`'s
+   * ribbon boundary, sampled by `scripts/make_basemap.py`, and that ribbon is
+   * what the belief grid masks its water with.
+   *
+   * `null` whenever there is nothing to draw: the file absent (a `file://`
+   * page missing its sibling, a deploy that dropped it), the global missing
+   * its shores, or no origin to project about. The field then draws exactly
+   * as it did before this layer existed — the dark ground is the fallback,
+   * not an error. */
+  function projectBasemap() {
+    var data = global.WHITEOUT_BASEMAP;
+    if (!data || !data.shores || !state.origin) { return null; }
+    var left = projectShore(data.shores.left);
+    var right = projectShore(data.shores.right);
+    if (left.length < 2 || right.length < 2) { return null; }
+    return { credit: String(data.credit || ""), left: left, right: right };
+  }
+
+  function projectShore(points) {
+    var out = [];
+    if (!Array.isArray(points)) { return out; }
+    points.forEach(function (point) {
+      var lat = Number(point[0]);
+      var lon = Number(point[1]);
+      if (!isFinite(lat) || !isFinite(lon)) { return; }
+      var local = toLocal(state.origin, lat, lon);
+      out.push([local.east, local.north]);
+    });
+    return out;
+  }
+
+  /* Land, as everything the channel is not.
+   *
+   * The water is one closed ring — the left shore out, the right shore back —
+   * and the land is the canvas with that ring punched out of it, in one
+   * even-odd fill. The ring closes across each mouth because the model does
+   * too: `StraitGeometry.is_water` is false past either end of the
+   * centreline, so belief there is identically zero and the viewer must not
+   * suggest otherwise.
+   *
+   * It is the bottom layer and it stays the dimmest thing on the field: the
+   * land tone never reaches `--terrain-hi` (DESIGN.md, "Do not make the map
+   * prettier at the cost of legibility"). The shoreline itself is not
+   * stroked here — `drawOutline` already draws it from the belief mask, and
+   * two shorelines in two places is how they come to disagree.
+   *
+   * Returns whether it drew, so the credit line can be shown only when there
+   * is something to credit. */
+  function drawBasemap(ctx, box, cx, cy, scale) {
+    var map = state.basemap;
+    if (!map) { return false; }
+
+    var water = new global.Path2D();
+    var index;
+    for (index = 0; index < map.left.length; index += 1) {
+      var out = map.left[index];
+      var x = cx + out[0] * scale;
+      var y = cy - out[1] * scale;
+      if (index === 0) { water.moveTo(x, y); } else { water.lineTo(x, y); }
+    }
+    for (index = map.right.length - 1; index >= 0; index -= 1) {
+      var back = map.right[index];
+      water.lineTo(cx + back[0] * scale, cy - back[1] * scale);
+    }
+    water.closePath();
+
+    var land = new global.Path2D();
+    land.rect(0, 0, box.width, box.height);
+    land.addPath(water);
+    ctx.fillStyle = token("--terrain-lo");
+    ctx.fill(land, "evenodd");
+    ctx.globalAlpha = LAND_TONE;
+    ctx.fillStyle = token("--terrain-hi");
+    ctx.fill(land, "evenodd");
+    ctx.globalAlpha = 1;
+    return true;
+  }
+
   function drawField() {
     var canvas = el.canvas;
     var ratio = global.devicePixelRatio || 1;
@@ -706,6 +807,14 @@
     var cx = box.width / 2;
     var cy = box.height / 2;
     var step = gridStep(span);
+
+    /* The land goes under the graticule: the grid is chrome over the world,
+     * not a fence in front of it. */
+    var grounded = drawBasemap(ctx, box, cx, cy, scale);
+    if (el.credit) {
+      text(el.credit, grounded ? (state.basemap.credit || "") : "");
+      el.credit.hidden = !grounded;
+    }
 
     /* The grid covers what the canvas can show, not the extent square, or the
      * field is left with an unruled band down each side. */
@@ -1291,6 +1400,7 @@
   function wire() {
     el.dialRow = doc.getElementById("dial-row");
     el.canvas = doc.getElementById("field-canvas");
+    el.credit = doc.getElementById("field-credit");
     el.fileInput = doc.getElementById("file-input");
     el.play = doc.getElementById("play");
     el.stepBack = doc.getElementById("step-back");
