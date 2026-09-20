@@ -181,6 +181,37 @@ class DetectorParams:
         fog compresses, so it holds the bargain the module makes: a degraded
         frame yields ``None``. The default sits below the hull's contrast
         through thin fog and above what a floe's shadow on open water reaches.
+
+        **The default is 12 and not 4, and #90 is why.** The arena publishes
+        JPEG, and at 4 the detector reported a vessel on more than half the
+        empty frames of a quantised corpus. Swept over three seeds, 24 frames
+        per camera, ``scripts/score_detector.py --synthetic``:
+
+        .. code-block:: text
+
+            seed   counts        uncompressed            quality 75
+                             recall      fp          recall      fp
+            11        4       0.583     0.021         0.312     0.521
+            11       12       0.500     0.000         0.438     0.104
+            23        4       0.646     0.000         0.312     0.521
+            23       12       0.542     0.000         0.542     0.250
+            47        4       0.604     0.042         0.354     0.542
+            47       12       0.479     0.000         0.375     0.062
+
+        On the compressed corpus 12 **dominates** 4 on every seed — more
+        detections *and* between two and eight times fewer false alarms — and
+        costs about a tenth of the recall on frames that will never reach us,
+        since the arena does not serve uncompressed. A false positive posts a
+        lat/lon, and *accuracy* is scored, so that is the direction to err in.
+
+        **Two things this number is not.** It is not tuned against Dominion
+        Dynamics' encoder, only against ``scripts/jpeg_quantisation.py``,
+        which has no chroma and no entropy coding. And it is not a monotone
+        knob: raising this floor deletes rivals before ``runner_up`` is read
+        (:func:`detect_vessel`), so a tighter gate can *raise* the detection
+        rate — 4 to 10 does exactly that on seed 11. Part of the gain above is
+        that interaction rather than a stricter detector, which is why #90
+        stays open and why real frames (#63) settle it and this does not.
     :param min_sigma: floor under the per-row robust scale, 8-bit counts. A
         row that is genuinely flat would otherwise divide by nearly zero and
         turn sensor quantisation into a detection. It is a floor and not an
@@ -214,7 +245,7 @@ class DetectorParams:
     max_centre_ice: float = 0.15
     max_surround_ice: float = 0.10
     min_depth_sigma: float = 3.6
-    min_depth_counts: float = 4.0
+    min_depth_counts: float = 12.0
     min_sigma: float = 0.75
     min_peak_sigma: float = 11.0
     confident_sigma: float = 26.0

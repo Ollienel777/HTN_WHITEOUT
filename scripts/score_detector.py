@@ -413,6 +413,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "It shows that a number measured uncompressed does not survive compression. It\n"
             "does not say what the arena's own numbers are."
         )
+    else:
+        # #90: without this line the headline false-positive rate reads as a
+        # statement about the detector, and it is a statement about
+        # *uncompressed* frames. The arena serves JPEG, and the same corpus
+        # quantised moved the rate on every seed measured.
+        print(
+            "THESE FRAMES ARE UNCOMPRESSED, and the arena publishes JPEG. Every rate below\n"
+            "is a number about frames the run will never see. Re-run with --jpeg 75 for the\n"
+            "same corpus through a stand-in codec; issue #90 has what that does."
+        )
     print("=" * 72)
 
     tally = score(frames, params)

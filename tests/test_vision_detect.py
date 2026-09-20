@@ -341,15 +341,29 @@ def test_the_counts_floor_does_not_cost_a_hull_that_is_really_there() -> None:
     Same noiseless frame, contrast walked up: the gate refuses what is below
     it and passes what is above, rather than refusing everything once it is
     switched on.
+
+    The ladder is written **relative to the parameter** rather than as four
+    fixed numbers. #90 raised the floor from 4 counts to 12, and a ladder of
+    constants failed for the one reason a guard must never fail for: it was
+    bracketing a value the code no longer held, so it reported a blindfold
+    where there was a working gate. Against the parameter it keeps asking the
+    question it was written to ask, at whatever the floor becomes next.
     """
+    floor = DEFAULT_PARAMS.min_depth_counts
+    ladder = (floor * 0.5, floor * 0.75, floor * 1.25, floor * 1.5)
     outcomes = {
         contrast: detect_on(
             replace(NO_NOISE, vessel_contrast=contrast), 5, vessel_px=(320.0, 260.0)
         )[0]
         is not None
-        for contrast in (3.0, 4.0, 6.0, 8.0)
+        for contrast in ladder
     }
-    assert outcomes == {3.0: False, 4.0: False, 6.0: True, 8.0: True}, outcomes
+    assert outcomes == {
+        ladder[0]: False,
+        ladder[1]: False,
+        ladder[2]: True,
+        ladder[3]: True,
+    }, outcomes
 
 
 def test_confidence_rises_with_contrast() -> None:
