@@ -175,32 +175,44 @@ def test_demo_episode_names_a_source_for_every_axis() -> None:
     assert "truth" in sources["accuracy"]
 
 
-def test_demo_episode_reports_the_axes_it_cannot_answer_for_in_words() -> None:
+def test_an_episode_with_no_contact_reports_that_in_words() -> None:
     """Never ``0.0000`` for an axis nobody measured.
 
-    ``demo.jsonl`` carries no contacts, so detection speed has nothing to
-    time; no log carries truth, so accuracy has nothing to compare against.
+    Held against a **synthetic** contact-free log rather than against
+    ``demo.jsonl``. It used to be the fixture, which was contact-free because
+    the kinematic fleet had nothing to find; the shadow vessel gave it
+    something, and this property — an absence is not a measured zero (R1-M1) —
+    is about the scorer and not about that fixture. Binding it to the fixture
+    made a test of the scorer fail when the demo got better.
     """
-    axes = score_episode(read_episode_log(DEMO)).by_axis()
+    records = [_record(tick, covered=0.5, energy=float(tick)) for tick in range(4)]
+    axes = score_episode(records).by_axis()
     assert axes["detection_speed"].value is None
     assert axes["detection_speed"].rendered() == "not detected"
     assert axes["tracking_duration"].value is None
     assert axes["tracking_duration"].rendered() == "not detected"
-    assert axes["accuracy"].value is None
-    assert axes["accuracy"].rendered() == "not measured (no truth in log)"
+    assert "no record of 4 carries a contact" in axes["tracking_duration"].derivation
 
 
-def test_demo_episode_does_not_report_a_tracking_duration_it_never_measured() -> None:
-    """No contact anywhere is an absence, not a measured zero (R1-M1).
+def test_the_demo_episode_now_answers_for_detection_and_tracking() -> None:
+    """The committed fixture finds the vessel, and the scorer says so.
 
-    ``detection_speed`` and ``tracking_duration`` read the same absence, so
-    they say the same thing about it: the demo log carries no contact, so
-    there was never anything to hold and neither axis prints ``0.0000``.
+    The inverse of the test above, and the one that guards the demo: a
+    ``demo.jsonl`` that went back to reporting "not detected" would mean the
+    fleet had stopped finding anything, which is exactly the state this
+    fixture spent a day and a half in without anything failing.
     """
     axes = score_episode(read_episode_log(DEMO)).by_axis()
-    assert axes["tracking_duration"].value is None
-    assert axes["tracking_duration"].rendered() == "not detected"
-    assert "no record of 400 carries a contact" in axes["tracking_duration"].derivation
+    assert axes["detection_speed"].value is not None
+    assert axes["tracking_duration"].value is not None
+    assert axes["tracking_duration"].value > 0.0
+
+
+def test_no_episode_log_can_answer_for_accuracy_yet() -> None:
+    """The arena publishes no ground truth, so nothing does. ``SPEC.md`` §4."""
+    axes = score_episode(read_episode_log(DEMO)).by_axis()
+    assert axes["accuracy"].value is None
+    assert axes["accuracy"].rendered() == "not measured (no truth in log)"
 
 
 # --- the axes, one at a time -------------------------------------------------
