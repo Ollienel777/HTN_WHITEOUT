@@ -177,13 +177,33 @@ python scripts/truth_probe.py --host 10.99.4.1 --seconds 60 \
   --compare http://10.99.4.1:8010 --track "Sierra One"
 ```
 
-`score` prints the five axes this repository computes: coverage, detection
-speed, tracking duration, search efficiency and accuracy. They are five of the
-seven the sponsor judges on (`ARENA.md` §5), scored by our own instrument and
-not by the sponsor's — autonomy and collaboration are not axes at all, because
-they are read off the fleet's behaviour and the explanation rather than off a
-log. Treat the numbers as our own instrument, not as a prediction of the
-result.
+`score` prints five axes: coverage, detection speed, tracking duration, search
+efficiency and accuracy. They are five of the seven the sponsor judges on
+(`ARENA.md` §5) — autonomy and collaboration are not axes at all, because they
+are read off the fleet's behaviour and the explanation rather than off a log.
+Treat the numbers as our own instrument, not as a prediction of the result.
+
+**On a judged log, expect three numbers and two lines of words**, and that is
+not a regression:
+
+- **`search_efficiency` prints `no energy recorded`.**
+  `ArenaTransport._pose` reports `energy_used=0.0` on every pose on every tick
+  (`whiteout/transport/arena.py:395`), so the episode carries no spend to
+  weigh coverage against. It waits on the transport reporting real energy,
+  not on the scorer.
+- **`accuracy` prints `not measured (no truth in log)`.** Nothing populates
+  `Truth.targets` during a run, so no log carries truth. `truth_probe` below
+  is the live comparison, and it is deliberately not an input to the log.
+
+The total is then weighted over the axes the log answered for, and says so in
+its parenthetical.
+
+A **kinematic** log answers for fewer still — two, `coverage` and
+`search_efficiency` — because nothing gives that transport a sighting source,
+so it carries no contacts and `detection_speed` and `tracking_duration` are
+words too. The committed `fixtures/episodes/demo.jsonl` scores exactly that.
+An arena log is the one that can answer for the detection axes, because it is
+the one with cameras behind it.
 
 `truth_probe` reads the arena's ground truth from gzweb and diffs it against
 what we posted. It is a **measurement instrument, not an input**: nothing under

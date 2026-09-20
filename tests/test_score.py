@@ -336,6 +336,39 @@ def test_search_efficiency_says_so_when_no_energy_was_spent() -> None:
     assert axis.rendered() == "no energy recorded"
 
 
+def test_a_judged_arena_log_answers_for_three_of_the_five_axes() -> None:
+    """What `docs/arena.md` §4 tells an operator to expect on arena day.
+
+    `ArenaTransport._pose` reports `energy_used=0.0` on every pose on every
+    tick (`whiteout/transport/arena.py:395`), and nothing populates
+    `Truth.targets` during a run. So a judged log carries no spend and no
+    truth, and two axes print words by construction rather than by accident.
+
+    This pins the shape the runbook promises. An operator who reads two lines
+    of words mid-event and takes them for a regression has lost time to a
+    thing that was never broken, so the page has to be right and this is what
+    keeps it right.
+    """
+    records = [
+        _record(
+            tick,
+            covered=min(1.0, 0.1 * (tick + 1)),
+            energy=0.0,
+            contacts=(_contact(tick),) if 4 <= tick <= 7 else (),
+        )
+        for tick in range(12)
+    ]
+    by_axis = score_episode(records).by_axis()
+
+    numeric = {name for name, axis in by_axis.items() if axis.value is not None}
+    worded = {name for name, axis in by_axis.items() if axis.value is None}
+    assert numeric == {"coverage", "detection_speed", "tracking_duration"}
+    assert worded == {"search_efficiency", "accuracy"}
+
+    assert by_axis["search_efficiency"].rendered() == "no energy recorded"
+    assert "truth" in by_axis["accuracy"].derivation
+
+
 def test_accuracy_is_never_a_number() -> None:
     """Truth in the log changes nothing: the comparison itself is #26's."""
     axis = score_episode(_episode(detect_at=2)).by_axis()["accuracy"]
