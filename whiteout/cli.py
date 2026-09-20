@@ -182,6 +182,20 @@ def _report_cameras(camera: VisionSightings) -> None:
     read either, so an entirely blind fleet exited 0 with nothing on stderr —
     the same output as a correct run over empty water.
 
+    **A stopped feed is asked about with
+    :attr:`~whiteout.vision.sightings.CameraFeed.draining`, not with
+    ``error``.** An MJPEG server that closes the connection ends the stream
+    without raising, so ``error`` stays ``None`` and ``frames_seen`` stays at
+    whatever it reached — which is the "died at tick 40" case above, the one
+    this function exists for, and the one ``error`` alone cannot see. It is
+    the same distinction
+    :meth:`~whiteout.vision.sightings.VisionSightings.sightings` draws when it
+    stops trusting a feed's last frame; reporting on a weaker test than the
+    one the run loop acts on would mean a camera the fleet had already given
+    up on still counted as healthy here. This runs before ``camera.close()``,
+    so ``draining`` still answers about the run rather than about the
+    shutdown.
+
     On stderr, because on the arena that is what the operator is watching, and
     printed even when every feed is healthy: a line saying four cameras
     delivered frames is how "no contacts" gets to mean "no vessel".
@@ -195,8 +209,25 @@ def _report_cameras(camera: VisionSightings) -> None:
             )
         elif feed.frames_seen == 0:
             print(f"run: camera {feed.asset_id} delivered no frames", file=sys.stderr)
+        elif not feed.draining:
+            print(
+                f"run: camera {feed.asset_id} stopped after {feed.frames_seen} frames: "
+                f"the stream ended",
+                file=sys.stderr,
+            )
     seen = sum(1 for feed in camera.feeds if feed.frames_seen > 0)
-    print(f"run: {seen} of {len(camera.feeds)} cameras delivered frames", file=sys.stderr)
+    live = sum(1 for feed in camera.feeds if feed.draining)
+    # Both numbers, because they answer different questions and the episode
+    # is scored on the second: `seen` says the fleet was wired up, `live` says
+    # it was still watching when the run ended. Four cameras that delivered
+    # frames and one still streaming is a fleet that went blind, and the
+    # summary line is where an operator would otherwise read "4 of 4" and
+    # stop looking.
+    print(
+        f"run: {seen} of {len(camera.feeds)} cameras delivered frames, "
+        f"{live} still streaming at the end",
+        file=sys.stderr,
+    )
 
 
 def _arena_poster(dry_run: bool = False) -> TrackPoster | None:

@@ -455,6 +455,39 @@ def test_a_camera_that_will_not_open_does_not_end_the_run(
     validate_episode_log(out)
 
 
+def test_a_camera_whose_stream_ends_cleanly_is_reported_as_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The case `error` cannot see, and the one the report exists for.
+
+    An MJPEG server that closes the connection ends the stream without
+    raising anything, so the feed records no error and keeps the frame count
+    it reached. `CameraFeed` already knows the difference — it sets `_ended`
+    in a `finally` for exactly this — and `VisionSightings.sightings` already
+    acts on it. Reporting on `error` alone meant a camera that died at tick 40
+    printed nothing and was counted among the healthy, which is the "no
+    contacts" ambiguity this whole function was added to remove: the operator
+    read the same summary a correct run over empty water prints.
+    """
+    ended = _StubFeed("quadcopter", draining=False)
+    ended.frames_seen = 40
+    alive = _StubFeed("tower-1")
+    monkeypatch.setattr(cli, "arena_feeds", lambda host, *a, **k: (ended, alive))
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 0
+    err = capsys.readouterr().err
+    assert "camera quadcopter stopped after 40 frames" in err, (
+        "a stream that ended cleanly is still reported as healthy"
+    )
+    assert "1 still streaming at the end" in err, (
+        "the summary counts a stopped camera among the live ones"
+    )
+    validate_episode_log(out)
+
+
 # -- what is never posted ----------------------------------------------------
 
 
