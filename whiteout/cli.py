@@ -8,8 +8,9 @@ the gate's smoke and determinism steps to exercise the real command lines from
 one tick at a time and writes a real, validated episode log; the belief
 digest, the contacts and the truth on each record are placeholders, because
 the belief field, the estimator and the sim land with their own tickets, and
-the episode loop that fills them is issue #25. ``score`` reports four finite
-zeros. ``serve`` hands the source tree out to a browser so that the viewer in
+the episode loop that fills them is issue #25. ``score`` reads that log back
+and reports the axes :mod:`whiteout.score` can derive from it, in words where
+it cannot derive one. ``serve`` hands the source tree out to a browser so that the viewer in
 ``viz/`` can read an episode log beside it, on ``PORT`` or an ephemeral port
 (``SPEC.md`` §6). The other subcommands are stubs that refuse loudly.
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Sequence
@@ -25,8 +27,9 @@ from pathlib import Path
 
 from whiteout.coordinate import DEFAULT_TRACK_NAME, Coordinator, SightingSource
 from whiteout.geo import ARENA_ORIGIN
-from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
+from whiteout.log import SCHEMA_VERSION, EpisodeLogError, read_episode_log, write_episode_log
 from whiteout.policy import AssetRole
+from whiteout.score import AXES, ScoreError, score_episode, unscorable_criteria
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
 from whiteout.tracks.client import TrackPoster, TracksClient, TracksError, endpoint_from_env
 from whiteout.tracks.maintain import TrackHold
@@ -44,14 +47,6 @@ from whiteout.types import (
 from whiteout.vision.camera import VisionError
 from whiteout.vision.motion import MotionGate
 from whiteout.vision.sightings import VisionSightings, arena_feeds
-
-#: Ordered scoring axes. The sponsor scores on exactly these four.
-AXES: tuple[str, str, str, str] = (
-    "coverage",
-    "collaboration",
-    "efficiency",
-    "tracking_accuracy",
-)
 
 _NOT_YET = "not implemented yet"
 
@@ -395,12 +390,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_score(args: argparse.Namespace) -> int:
-    """Print the four scoring axes for an episode log."""
+    """Print the scoring axes for an episode log.
+
+    Each axis prints on its own line as ``axis: value``, where the value is
+    either a number or the words that stand in for one, followed by an
+    indented line naming the field it was derived from — so the number is
+    falsifiable by anyone holding the log. The closing line says which of
+    ``ARENA.md`` §5's seven criteria are not axes here, and why.
+    """
     log = Path(args.log)
     if not log.is_file():
         print(f"score: no such episode log: {log}", file=sys.stderr)
         return 1
-    weights = {axis: 0.25 for axis in AXES}
+    weights = {axis: 1.0 / len(AXES) for axis in AXES}
     if args.weights is not None:
         weights_path = Path(args.weights)
         if not weights_path.is_file():
@@ -423,12 +425,41 @@ def cmd_score(args: argparse.Namespace) -> int:
         except (TypeError, ValueError) as exc:
             print(f"score: weights file has a non-numeric axis: {exc}", file=sys.stderr)
             return 1
-    records = sum(1 for line in log.read_text(encoding="utf-8").splitlines() if line)
-    scores = {axis: 0.0 for axis in AXES}
-    total = sum(weights[axis] * scores[axis] for axis in AXES)
-    for axis in AXES:
-        print(f"{axis}: {scores[axis]:.4f}")
-    print(f"total: {total:.4f} ({records} records)")
+        # A weight is a share, so it is finite and not negative. Without this,
+        # a sweep that emits a negative weight prints ``total: 0.0000`` and a
+        # ``NaN`` weight — which bare JSON accepts as a token — prints
+        # ``total: nan``: a fake number on the one line a judge reads.
+        for name, weight in weights.items():
+            if not math.isfinite(weight):
+                print(f"score: weights file has a non-finite weight for {name}", file=sys.stderr)
+                return 1
+            if weight < 0.0:
+                print(
+                    f"score: weights file has a negative weight for {name}: {weight}",
+                    file=sys.stderr,
+                )
+                return 1
+    try:
+        records = read_episode_log(log)
+    except EpisodeLogError as exc:
+        print(f"score: {exc}", file=sys.stderr)
+        return 1
+    try:
+        scored = score_episode(records)
+    except ScoreError as exc:
+        print(f"score: {exc}", file=sys.stderr)
+        return 1
+    for axis in scored.axes:
+        print(f"{axis.axis}: {axis.rendered()}")
+        print(f"    {axis.derivation}")
+    total = scored.weighted_total(weights)
+    measured = len(scored.measured())
+    print(
+        f"total: {total:.4f} "
+        f"(weighted over the {measured} of {len(AXES)} axes this log answers for, "
+        f"{scored.records} records)"
+    )
+    print(unscorable_criteria())
     return 0
 
 

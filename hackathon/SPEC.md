@@ -128,7 +128,7 @@ How each clause is met visibly:
 | running ArduPilot and MAVLink | **Primary:** `sitl` transport against real ArduPilot — `sim_vehicle.py --count N --auto-sysid --mcast` inside the Docker image D46 builds, `pymavlink`, GUIDED mode, `SET_POSITION_TARGET_GLOBAL_INT`. **Fallback if D46 fails:** the MAVLink half only — `pymavlink`-encoded `SET_POSITION_TARGET_GLOBAL_INT` / `GLOBAL_POSITION_INT` over a socket, proved by the `pymavlink` loopback D46's overrun path stands and records, with the README stating plainly that the ArduPilot half was not exercised. There is no honest fallback that exercises ArduPilot itself without ArduPilot. | Beat 6 |
 | detect, classify, track | Contact lifecycle machine with an explicit classify step | Beat 4 |
 | shared intelligence / distributed thinking | One shared belief state, auction allocation across classes, explicit cueing and handoff | Beats 3, 4 |
-| coverage, collaboration, efficiency, tracking accuracy | Our reimplementation of all four with weights as parameters; the coordinator optimises them directly | Beats 2, 5, 7 |
+| coverage, collaboration, efficiency, tracking accuracy | Our own scorer over the episode log, with weights as parameters, read as an instrument rather than optimised against (§5). §5's axis list is the authority on which criteria it covers: coverage, detection speed, tracking duration, search efficiency and accuracy. Collaboration is read off the fleet's behaviour and the explanation, not off a log, so it is not an axis. | Beats 2, 5, 7 |
 | contested terrain | Terrain occlusion in the sensor model; sensor dropout and comms-degradation options in the sim | Beat 3 |
 
 ### Solana: Best Badge Hack — **out of scope**
@@ -206,30 +206,33 @@ It is a `Protocol`, not an ABC.
 | **Transport** | `whiteout/transport/` | The one interface and its implementations. Adapters only: no belief, no policy, no scoring ever lives here. |
 | **Vision** | `whiteout/vision/` | **New, and the hard part.** Read camera frames, detect the vessel, and project a pixel to a lat/lon using the asset's pose and its published FOV. |
 | **Tracks** | `whiteout/tracks/` | **New.** The client for the sponsor's `/api/tracks`, and the track-maintenance loop that keeps posting once the vessel is held. **The only artifact the judges read.** |
+| **Scorer** | `whiteout/score/` | Our model of coverage, detection speed, tracking duration, search efficiency and accuracy — five of `ARENA.md` §5's seven criteria; autonomy and collaboration are read off behaviour and the explanation, not off a log. **Weights are parameters.** Consumes an episode log; pure function of it. A read-only instrument, not an objective: nothing optimises against it. Accuracy waits on `Truth.targets` being populated during an arena run, and `search_efficiency` waits on `ArenaTransport` reporting a real `energy_used` — on a judged log both print words today. The full model is #26. |
 | **Belief** | `whiteout/belief/` | The decaying field **over the water of the strait**, and the **negative-information** update keyed on real camera footprints. |
 | **Policy** | `whiteout/policy/` | Allocation, information-gain routing, tower placement, the contact lifecycle machine, re-tasking hysteresis, and the **frontier-coverage fallback**. |
 | **Viz** | `viz/` | The run viewer. Static HTML + canvas. Zero build step. Debugging tool *and* presentation material. |
-| **CLI** | `whiteout/cli.py` | `run` and `serve` work. `score` returns zeros without reading the log and `replay` prints *not implemented yet* — both are stubs, and the table said so for neither. |
+| **CLI** | `whiteout/cli.py` | `run`, `score` and `serve` work. `score` reads the episode log back and prints the axes above, or the words that stand in for an axis the log cannot answer for (#130). `replay` prints *not implemented yet* and is still a stub, which the table used to say for neither. |
 
 **Gone, and why.** `whiteout/sim/` — ArcticSim supplies terrain, vehicles,
 sensing and the target; we were building a second, worse copy.
 `whiteout/tune/` — the sweep needed a fast simulator and a faithful scorer,
 and has neither.
 
-`whiteout/score/` **does not exist, and there is no scorer.** An earlier
-revision of this paragraph said it survived as a development instrument for
-comparing two policies, rebuilt against the seven real criteria. None of that
-is true and it is an expensive thing to believe. What exists is `cmd_score` in
-`whiteout/cli.py`, which sets `scores = {axis: 0.0 for axis in AXES}` without
-reading the log at all, over the **original four** axes and not the sponsor's
-seven. It returns zeros for every episode and can therefore compare nothing.
+`whiteout/score/` **exists, and is an instrument rather than an objective.**
+An earlier revision of this paragraph said it survived as a development
+instrument for comparing two policies, rebuilt against the seven real
+criteria; a later one said it did not exist at all. Both were true when
+written and neither is now. What exists as of #130 is a pure function of the
+episode log that derives the five axes above and says in words where the log
+cannot answer — no longer `scores = {axis: 0.0 for axis in AXES}` over the
+original four without reading the log.
 
-That is not a gap to be filled; it follows from §10's risk table, which
+What has not changed is what it is *for*. It follows from §10's risk table, which
 already records that the arbiter is gone. The sponsor scores what we POST to
-their API, from data we have no ground truth for, so a scorer of our own would
-be a number we invented grading a run we cannot check. **Nothing in this build
+their API, from data we have no ground truth for, so a score of our own is a
+number we computed about a run we cannot check. **Nothing in this build
 optimises against a scored objective**, and the demo's evidence is the belief
-field's own measured behaviour rather than a score.
+field's own measured behaviour rather than a score. The axes are read as what
+they say they are derived from, one line each, and no further.
 
 ### The data model
 
@@ -392,7 +395,7 @@ It runs, in order, failing fast:
 | typecheck | `mypy whiteout` |
 | test | `pytest -q -m "not slow"` — **the `-m "not slow"` is required**: bare `pytest -q` collects `slow`-marked tests, and the one such test is a wall-clock throughput assertion (D9) that is a coin flip on shared runners and in parallel worktrees. `slow` tests run in the tuner (D23), never in the gate. |
 | build | `python -m build --wheel --no-isolation` (proves the package is installable, and it is what the submission links). **`--no-isolation` is required**: the default fetches the build backend from PyPI on every invocation, which breaks §4's no-egress rule and spends venue wifi on every gate run. |
-| smoke | `python -m whiteout.cli run --seed 7 --ticks 400 --out artifacts/smoke.jsonl` (no transport flag exists; `WHITEOUT_TRANSPORT` unset selects `kinematic`, per §7 and D3) then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print four finite scores |
+| smoke | `python -m whiteout.cli run --seed 7 --ticks 400 --out artifacts/smoke.jsonl` (no transport flag exists; `WHITEOUT_TRANSPORT` unset selects `kinematic`, per §7 and D3) then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print a line for every axis in `whiteout.score.AXES`, each one either a finite number or the words saying why this log cannot answer for it (#130); `coverage` is always a number |
 | determinism | second smoke run at the same seed; logs must be byte-identical |
 
 The gate must:
@@ -599,7 +602,7 @@ ground truth (there is none).
 | **Eleven SITL instances plus a renderer do not fit on one laptop.** Our own analysis put the cut at six, and six was untested. | medium | The kinematic sim exists so this never blocks anything. SITL is validation; the *recorded log* is the deliverable. Spike: time four instances early, before committing to six. | **Spike S1**, D21 |
 | **SITL cannot be obtained at all.** It is not installed, and Windows 11 has no native ArduPilot SITL. | medium | **D46** acquires it as a Docker image (Docker 29.4.1 is installed and working) in a one-hour timebox, as a loop action needing no account, key or purchase. On overrun D46 closes as "unobtainable", no M1 ticket is blocked, the §3 MAVLink-only fallback for the ArduPilot clause applies, and **beat 6 falls back to that same claim shown as the `pymavlink` loopback D46's overrun path stands and records** (§2), all of it stated as such in the README. | **D46** |
 | **The overnight sweep does not finish, or finds nothing.** | medium | The sweep is checkpointed and resumable; partial results are a valid report. The sim's speed target (≥100× real time on the kinematic transport) is a **measured number, reported in D9 and re-measured by the tuner**, not an aspiration — so we learn at hour 6 rather than hour 26. It is **not** a wall-clock assertion inside the gate: the gate runs on shared CI runners and from parallel worktrees (§6), where a fixed throughput threshold is a coin flip and a red gate on an unrelated PR is a PR that cannot settle. The assertion lives behind `-m slow`, excluded from the gate per §6. | D9, D23 |
-| **Teaching to the test reads as gaming.** | low | It is not, and the README says so plainly: the four axes are the sponsor's own published criteria, the weights are parameters, and the ablation table shows which mechanism earned which points. Optimising a published objective is engineering. | D33 |
+| **Teaching to the test reads as gaming.** | low | It is not, and the README says so plainly: the axes are the sponsor's own published criteria, the weights are parameters, and the ablation table shows which mechanism earned which points. Optimising a published objective is engineering. | D33 |
 | **The flow-network cut view is over-engineered.** It is the most interesting idea and therefore the most likely to eat a day. | medium | Timeboxed. `networkx` min-cut on a coarse graph, posting stations as the cut edges' midpoints. If it is not producing sane cuts in four hours, it becomes an overlay-only feature and the policy ignores it. | D13 |
 | **We accidentally read ground truth in the coordinator.** | medium | A test asserts the coordinator module never imports the truth field, plus a runtime guard in the transport. | D5 |
 
@@ -631,7 +634,7 @@ start without an answer, and both are `needs-decision` until 14:30Z.
 |---|---|---|
 | Q1 | **Do you provide the harness and simulator, or do we stand up ArduPilot SITL ourselves? What interface — plain MAVLink over a socket, or a hosted service with its own schema?** | **D32** (`arena` transport adapter) — `needs-decision` |
 | Q2 | **Is the target adversarial (evades) or scripted? Does "contested" mean an active adversary, comms denial, or terrain and weather?** | **D31** (policy-mode filter) — `needs-decision`. If the answer is "adversarial", D31 comes off the cut list immediately and is re-prioritised. |
-| Q3 | **The relative weights on the four axes.** Highest-value single answer available. | Nothing. Weights are parameters (`fixtures/weights/`), the sweep is re-scored from cached episodes, and retuning takes minutes. This is why they are parameters. |
+| Q3 | **The relative weights on the scorer's axes.** Highest-value single answer available. | Nothing. Weights are parameters (`fixtures/weights/`), the sweep is re-scored from cached episodes, and retuning takes minutes. This is why they are parameters. |
 | Q4 | **Is comms between agents free, or is bandwidth modelled?** If modelled, the shared belief map becomes a much harder and more interesting problem. | Nothing. D30 builds a comms-degradation *option* in the sim speculatively; it is on the cut list until answered. |
 | Q5 | **Continuous leaderboard across the weekend, or one judged run Sunday?** Decides whether we iterate against the scorer or polish one run. | Nothing structural. It changes the hour-24 triage, not the build. |
 
