@@ -40,14 +40,33 @@ so comparing two sites assumes you know the ground elevation at both. Read it
 off gzweb by clicking the point; that is the one input this script cannot
 supply, and the one the answer is second-most sensitive to.
 
+What review corrected
+---------------------
+
+Both worth keeping, because both are the kind of error that reads as a result.
+
+**It did not score the placement we already have.** The siting in
+``whiteout/transport/kinematic.py``'s ``_TOWER_STATIONS`` beats anything this
+script generates with a setback, and the first version recommended
+coordinates 190 m away and 3.6 points worse without mentioning it. See
+:func:`incumbent`.
+
+**It held the camera level.** Tilt is commanded — ``servo set 2`` — and a
+level tower is blind inside ``h / tan(vfov/2)``, which grows with height. So
+the height column was confounded: sweeping tilt takes the 226.5 m site from
+18.7% to 26.1% and the 116.8 m one from 14.5% to 15.8%. ``--level``
+reproduces the old behaviour, deliberately kept.
+
 Usage
 -----
 
 ::
 
-    python scripts/tower_siting.py                    # today's siting vs the bank
+    python scripts/tower_siting.py                    # the three-way comparison
     python scripts/tower_siting.py --survey           # candidates along the channel
-    python scripts/tower_siting.py --at 72.0029 -94.8778 116.7
+    python scripts/tower_siting.py --at 72.0016 -94.8812 116.8
+    python scripts/tower_siting.py --inland 0         # what the setback costs
+    python scripts/tower_siting.py --level            # the confounded version
 """
 
 from __future__ import annotations
@@ -72,21 +91,61 @@ from whiteout.belief.negative import (  # noqa: E402
 from whiteout.vision.camera import CAMERAS  # noqa: E402
 from whiteout.vision.projection import CameraPose  # noqa: E402
 
-#: The stock `.env.example` siting, and the heights the live arena reported
-#: for them at connect (#63). This is what the run uses today.
+#: The stock `.env.example` siting, and the heights #108 measured off gzweb.
+#: This is what the run uses today.
 AS_SITED: tuple[tuple[str, float, float, float], ...] = (
-    ("tower-1", 71.980671, -94.853711, 116.7),
+    ("tower-1", 71.980671, -94.853711, 116.8),
     ("tower-2", 72.011778, -94.804721, 226.5),
 )
 
-#: How far inland of the water's edge a candidate site is placed. A tower on
-#: the waterline is a tower in the sea the first time the channel model is off
-#: by a little, and the coverage cost of 150 m is under a percentage point.
+#: How far inland of the water's edge a generated candidate sits, and it is
+#: **not free**: measured, 150 m costs 2.9 points of coverage at 116.8 m and
+#: 1.8 at 226.5 m. An earlier version of this comment claimed "under a
+#: percentage point" without checking, and that setback is the entire reason
+#: the generated sites lose to :func:`incumbent` below.
+#:
+#: Kept as a default rather than deleted, because the alternative is siting a
+#: mast exactly on a waterline our own channel model draws from seven
+#: vertices. ``--inland 0`` makes the trade visible.
 INLAND_M = 150.0
 
 #: Bearings the sweep samples. Ten degrees against a 60° horizontal field
 #: oversamples by six, which is enough that a cell cannot fall between looks.
 SWEEP_STEP_DEG = 10
+
+#: Tilts the sweep samples, degrees, negative pointing down at the water.
+#:
+#: **A tower is not a fixed camera.** ``servo set 2`` drives tilt over
+#: :data:`whiteout.vision.tower.TOWER_PAN_TILT`'s range, and
+#: ``whiteout/vision/tower.py`` already models it. The first version of this
+#: script pinned pitch at zero, which blinds a tower inside ``h / tan(vfov/2)``
+#: — 358 m at 116.8 m of height and **695 m at 226.5 m** — and so charged the
+#: taller mast for a near field it can simply tilt down into. That understated
+#: the 226.5 m bank site by 6.8 points, and because the penalty grows with
+#: height it understated the value of height itself.
+SWEEP_TILTS_DEG: tuple[float, ...] = (0.0, -5.0, -10.0, -20.0, -35.0, -55.0, -80.0)
+
+
+def incumbent() -> tuple[tuple[str, float, float, float], ...]:
+    """The siting already committed in ``whiteout/transport/kinematic.py``.
+
+    Chosen in #118 by a rule of thumb — 18% and 82% along the channel, on the
+    water's edge, alternating banks — and it **beats** anything this script
+    generates with a setback.
+
+    It is here because the first version of this script did not have it, and
+    so recommended a siting 190 m away and 3.6 points worse than one already
+    in the tree. A script that compares placements has to compare the
+    placement we already have. Imported rather than copied, so the two cannot
+    drift apart.
+    """
+    from whiteout.transport.kinematic import _TOWER_STATIONS
+
+    heights = [height for _, _, _, height in AS_SITED]
+    return tuple(
+        (f"tower-{index + 1}", lat, lon, height)
+        for index, ((lat, lon, _), height) in enumerate(zip(_TOWER_STATIONS, heights, strict=True))
+    )
 
 
 def water_cells(geometry: StraitGeometry) -> list[tuple[float, float]]:
@@ -113,29 +172,38 @@ def swept(
     cells: list[tuple[float, float]],
     *,
     threshold: float,
+    tilts: tuple[float, ...] = SWEEP_TILTS_DEG,
     params: SweepParams = DEFAULT_SWEEP,
 ) -> set[int]:
-    """Indices of the cells this tower could detect a vessel in, if it pans."""
+    """Cells this tower could detect a vessel in, sweeping pan **and tilt**.
+
+    Both, because both are commanded: ``servo set 1`` is pan and ``servo set
+    2`` is tilt. Sweeping yaw alone holds the camera level and blinds the
+    tower inside ``h / tan(vfov/2)`` — 695 m from the taller mast — which is
+    a large piece of channel it can reach by tilting down, charged against it
+    for nothing. See :data:`SWEEP_TILTS_DEG`.
+    """
     camera = CAMERAS["tower"]
     seen: set[int] = set()
     for bearing in range(0, 360, SWEEP_STEP_DEG):
-        likelihood = non_detection_likelihood(
-            camera,
-            CameraPose(
-                lat_deg=lat_deg,
-                lon_deg=lon_deg,
-                alt_m=height_m,
-                yaw_deg=float(bearing),
-                pitch_deg=0.0,
-                roll_deg=0.0,
-            ),
-            params=params,
-        )
-        for index, (cell_lat, cell_lon) in enumerate(cells):
-            if index in seen:
-                continue
-            if 1.0 - likelihood(cell_lat, cell_lon) > threshold:
-                seen.add(index)
+        for tilt in tilts:
+            likelihood = non_detection_likelihood(
+                camera,
+                CameraPose(
+                    lat_deg=lat_deg,
+                    lon_deg=lon_deg,
+                    alt_m=height_m,
+                    yaw_deg=float(bearing),
+                    pitch_deg=float(tilt),
+                    roll_deg=0.0,
+                ),
+                params=params,
+            )
+            for index, (cell_lat, cell_lon) in enumerate(cells):
+                if index in seen:
+                    continue
+                if 1.0 - likelihood(cell_lat, cell_lon) > threshold:
+                    seen.add(index)
     return seen
 
 
@@ -153,9 +221,12 @@ def _report(
     roster: tuple[tuple[str, float, float, float], ...],
     cells: list[tuple[float, float]],
     threshold: float,
-) -> None:
+    tilts: tuple[float, ...],
+) -> float:
     total = len(cells)
-    sets = [swept(lat, lon, alt, cells, threshold=threshold) for _, lat, lon, alt in roster]
+    sets = [
+        swept(lat, lon, alt, cells, threshold=threshold, tilts=tilts) for _, lat, lon, alt in roster
+    ]
     union: set[int] = set().union(*sets) if sets else set()
     overlap = set.intersection(*sets) if len(sets) > 1 else set()
     print(f"\n{label}")
@@ -164,6 +235,7 @@ def _report(
     share = len(union) / total
     both = len(overlap) / total
     print(f"  {'union':8s} {'':32s}{share:6.1%}   overlap {both:.1%}")
+    return share
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,7 +258,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="score candidate bank sites along the channel, both banks",
     )
+    parser.add_argument(
+        "--inland",
+        type=float,
+        default=INLAND_M,
+        help="metres beyond the water's edge a generated candidate sits",
+    )
+    parser.add_argument(
+        "--level",
+        action="store_true",
+        help="hold the camera level instead of sweeping tilt — what the first "
+        "version of this script did, kept so the error stays reproducible",
+    )
     args = parser.parse_args(argv)
+    if not 0.0 < args.threshold < 1.0:
+        # Unvalidated, a negative threshold counted every cell as covered,
+        # including ones no ray reaches, and printed 100% for a tower facing
+        # away from the channel.
+        parser.error(
+            f"--threshold is a detection probability and must lie in (0, 1), got {args.threshold!r}"
+        )
+    tilts = (0.0,) if args.level else SWEEP_TILTS_DEG
 
     geometry = DEFAULT_STRAIT
     cells = water_cells(geometry)
@@ -195,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.at is not None:
         lat, lon, height = args.at
-        seen = swept(lat, lon, height, cells, threshold=args.threshold)
+        seen = swept(lat, lon, height, cells, threshold=args.threshold, tilts=tilts)
         channel = geometry.to_channel(lat, lon)
         print(
             f"\n{lat:.6f},{lon:.6f} at {height:.1f} m: {len(seen) / len(cells):.1%}"
@@ -207,41 +299,46 @@ def main(argv: list[str] | None = None) -> int:
         print("\nCandidate bank sites, at each of the two heights the arena reports:")
         for along in (0.20, 0.35, 0.50, 0.65, 0.80):
             for bank, side in ((1, "N"), (-1, "S")):
-                lat, lon = bank_site(geometry, along, bank)
+                lat, lon = bank_site(geometry, along, bank, inland_m=args.inland)
                 for height in (AS_SITED[0][3], AS_SITED[1][3]):
-                    seen = swept(lat, lon, height, cells, threshold=args.threshold)
+                    seen = swept(lat, lon, height, cells, threshold=args.threshold, tilts=tilts)
                     print(
                         f"  s={along:.0%} {side} {height:6.1f} m  {len(seen) / len(cells):6.1%}"
                         f"   {lat:.6f},{lon:.6f}"
                     )
         return 0
 
-    _report("As sited today (stock .env.example):", AS_SITED, cells, args.threshold)
-
-    north = bank_site(geometry, 0.20, 1)
-    south = bank_site(geometry, 0.80, -1)
-    proposed = (
+    north = bank_site(geometry, 0.20, 1, inland_m=args.inland)
+    south = bank_site(geometry, 0.80, -1, inland_m=args.inland)
+    generated = (
         ("tower-1", north[0], north[1], AS_SITED[0][3]),
         ("tower-2", south[0], south[1], AS_SITED[1][3]),
     )
-    _report(
-        "On the channel bank, at the SAME heights (see the caveat below):",
-        proposed,
-        cells,
-        args.threshold,
-    )
+
+    scored = [
+        (label, roster, _report(label, roster, cells, args.threshold, tilts))
+        for label, roster in (
+            ("As sited today (stock .env.example):", AS_SITED),
+            ("_TOWER_STATIONS, already committed in kinematic.py:", incumbent()),
+            (f"Generated bank sites, {args.inland:.0f} m inland:", generated),
+        )
+    ]
+    best_label, best_roster, best_share = max(scored, key=lambda row: row[2])
+    print(f"\nBest of the three: {best_label.rstrip(':')} at {best_share:.1%}\n")
 
     print(
-        "\nThe heights above are carried over from where the towers stand now."
-        "\nThere is no terrain model here, so check the ground elevation at the"
-        "\nproposed points in gzweb before trusting the second table: reach"
-        "\nscales with height, and a site at sea level is worth far less than"
-        "\nthis says.\n"
+        "The heights are the ones the towers have where they stand now. There"
+        "\nis no terrain model here, so read the ground elevation at any"
+        "\nproposed point off gzweb and re-score it with --at before trusting a"
+        "\nrow: reach scales with height, and a site at sea level is worth far"
+        "\nless than this says.\n"
     )
-    for name, lat, lon, _ in proposed:
-        number = "2" if name == "tower-1" else "5"
-        print(f"  ASSET_{number}=tower,{name},{lat:.6f},{lon:.6f}")
-    print("\nNothing else in .env — DD warned the rest breaks the sim.")
+    if best_roster is AS_SITED:
+        print("  Nothing to change: the current siting already wins.")
+        return 0
+    for index, (name, lat, lon, _) in enumerate(best_roster):
+        print(f"  ASSET_{'2' if index == 0 else '5'}=tower,{name},{lat:.6f},{lon:.6f}")
+    print("\nNothing else in .env - DD warned the rest breaks the sim.")
     return 0
 
 
