@@ -323,6 +323,14 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "whiteout/vision/standoff.py",
         "tests/test_vision_projection.py",
         "tests/test_vision_standoff.py",
+        # #20 pins the viewer's camera footprint against
+        # whiteout.vision.projection, and the pitches it pins it at are
+        # written in degrees because that is how ARENA.md publishes them.
+        # The `radians` calls are on a camera's attitude and on a field of
+        # view; the one position in the file reaches whiteout.geo like every
+        # other caller. Same category as the two entries above it, and the
+        # file's own subject is a page rather than a frame.
+        "tests/test_viz_shell.py",
         "scripts/jpeg_quantisation.py",
         # A rotation between two map grids, not a latitude-to-scale step.
         # Gazebo's world axes are EPSG:3413 grid and grid north is not true
