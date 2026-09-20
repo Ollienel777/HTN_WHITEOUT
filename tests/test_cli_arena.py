@@ -89,15 +89,30 @@ class _Detection:
 class _ArenaShapedTransport:
     """A transport that rosters assets the way the arena does, over no network."""
 
-    def __init__(self, fail_at: str | None = None, fail_close: bool = False) -> None:
+    def __init__(
+        self,
+        fail_at: str | None = None,
+        fail_close: bool = False,
+        roster: tuple[tuple[str, str], ...] = (("quadcopter", "quad"), ("tower-1", "tower")),
+        refuses: frozenset[str] = frozenset(),
+    ) -> None:
         self._fail_close = fail_close
-        self.assets = (
-            type("AssetLink", (), {"asset_id": "quadcopter", "cls": "quad"})(),
-            type("AssetLink", (), {"asset_id": "tower-1", "cls": "tower"})(),
+        self.assets = tuple(
+            type("AssetLink", (), {"asset_id": asset_id, "cls": cls})() for asset_id, cls in roster
         )
         self.closes = 0
         self._t = 0.0
         self._fail_at = fail_at
+        self._refuses = refuses
+        #: Every (asset_id, altitude) this transport was asked to launch.
+        self.launched: list[tuple[str, float]] = []
+
+    def arm_and_launch(self, asset_id: str, altitude_m: float = 60.0) -> None:
+        from whiteout.transport import TransportError
+
+        if asset_id in self._refuses:
+            raise TransportError(f"{asset_id!r} would not arm")
+        self.launched.append((asset_id, altitude_m))
 
     def connect(self) -> None:
         return None
@@ -239,6 +254,146 @@ def test_a_run_that_fails_partway_still_closes_its_cameras(
     assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 1
     assert transport.closes == 1
     assert all(feed.closed == 1 for feed in feeds), "a camera thread outlived a failed run"
+
+
+# -- arming the fleet (issue #138) -------------------------------------------
+
+#: The arena's real roster: two aircraft and two towers.
+_FULL_ROSTER = (
+    ("quadcopter", "quad"),
+    ("fixed-wing", "fixedwing"),
+    ("tower-1", "tower"),
+    ("tower-2", "tower"),
+)
+
+
+def _fleet(monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> _ArenaShapedTransport:
+    """An arena run over the full four-asset roster."""
+    transport = _ArenaShapedTransport(roster=_FULL_ROSTER, **kwargs)  # type: ignore[arg-type]
+    monkeypatch.setenv("WHITEOUT_ARENA_ENDPOINT", "10.99.4.1")
+    monkeypatch.delenv("WHITEOUT_TRACKS_ENDPOINT", raising=False)
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "arena")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    return transport
+
+
+def test_arm_launches_the_aircraft_and_never_a_tower(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """``arm_and_launch`` refuses a tower, so the caller must not ask one.
+
+    Asserting on what was *asked* rather than on what succeeded is the point:
+    a caller that asked and swallowed the refusal would pass a test written
+    the other way round, and would print a fault it had caused itself.
+    """
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert [asset for asset, _ in transport.launched] == ["quadcopter", "fixed-wing"]
+
+
+def test_the_fleet_is_not_armed_unless_it_is_asked_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """Off by default. This moves real vehicles in a simulator others share."""
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
+
+
+def test_a_dry_run_arms_nothing_however_it_was_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """``--dry-run`` is the stronger word, and it wins over ``--arm``.
+
+    ``docs/arena.md`` sells the dry run as the cheapest honest check, one that
+    sends nothing. A dry run that armed four vehicles would be the opposite.
+    """
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--dry-run", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
+
+
+def test_one_asset_that_will_not_arm_does_not_end_the_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """An arena run is live and cannot be repeated; three assets beat none."""
+    transport = _fleet(monkeypatch, refuses=frozenset({"quadcopter"}))
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert [asset for asset, _ in transport.launched] == ["fixed-wing"]
+    validate_episode_log(out)
+
+
+def test_the_launch_altitude_is_the_one_the_policy_flies_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """A default that disagreed would have the first waypoint undo the climb."""
+    from whiteout.policy import DEFAULT_SEARCH_PARAMS
+
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert {altitude for _, altitude in transport.launched} == {DEFAULT_SEARCH_PARAMS.search_alt_m}
+
+
+def test_the_launch_altitude_is_a_parameter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--launch-alt", "45", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert {altitude for _, altitude in transport.launched} == {45.0}
+
+
+def test_a_kinematic_run_never_arms_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate runs the smoke episode on this path and compares bytes.
+
+    ``--arm`` is accepted there rather than refused, so that a script with the
+    flag in it does not fail on the fake; it simply has nothing to launch.
+    """
+    transport = _ArenaShapedTransport(roster=_FULL_ROSTER)
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "kinematic")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    out = tmp_path / "kinematic.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
 
 
 def test_a_transport_that_will_not_close_still_closes_the_cameras_and_the_poster(

@@ -121,45 +121,41 @@ Do that here, not on Sunday.
 
 ```sh
 WHITEOUT_TRANSPORT=arena WHITEOUT_ARENA_ENDPOINT=10.99.4.1 \
-  python -m whiteout.cli run --ticks 400 --out artifacts/judged.jsonl
+WHITEOUT_TRACKS_ENDPOINT=http://10.99.4.1:8010 \
+  python -m whiteout.cli run --arm --ticks 400 --out artifacts/judged.jsonl
 ```
 
-That connects to all four assets, ticks the coordinator, commands waypoints and
-writes the episode log.
+That connects to all four assets, **arms and launches the two aircraft**, opens
+every camera, ticks the coordinator, commands waypoints, holds whatever the
+cameras see and **submits it to the tracks API**, and writes the episode log.
 
-### What that command does not do yet
+### What has to be true before a vehicle moves
 
-Read this before the judged run, because each line is a human action that
-nothing in `whiteout run` performs:
+Three things, and all three are off by default. A run started without them
+observes, believes and decides, and touches nothing:
 
-- **It does not arm or launch anything.** `ArenaTransport.arm_and_launch`
-  exists and pipelines the arm and the takeoff (the arm holds about three
-  seconds — `ARENA.md` §3), but no CLI path calls it. Until one does, the
-  aircraft have to be launched by hand, by MAVProxy or from a REPL holding the
-  connected transport:
+| for this to happen | this must be true |
+|---|---|
+| waypoints reach the fleet | `WHITEOUT_TRANSPORT=arena`, and **no** `--dry-run` |
+| the aircraft arm and take off | **`--arm`**, and no `--dry-run` |
+| a fix reaches the judged endpoint | `WHITEOUT_TRACKS_ENDPOINT` is set, and no `--dry-run` |
 
-  ```python
-  # shapes from tests/test_transport_arena.py; not exercised from a machine
-  # without the arena
-  transport.arm_and_launch("quadcopter", altitude_m=60.0)
-  transport.arm_and_launch("fixed-wing")
-  transport.scan("tower-1")     # a tower is never armed: arm_and_launch
-  transport.scan("tower-2")     # refuses one, and `scan` is its fallback mode
-  ```
+`--arm` is opt-in because it moves real vehicles in a simulator the room
+shares. It takes off to `--launch-alt`, which defaults to the altitude the
+search policy flies at, so the first waypoint does not undo the climb.
+**Towers are never armed** — `arm_and_launch` refuses one and the caller does
+not ask. An asset that will not arm is reported by name and the run continues
+with the rest: an arena episode is live and cannot be repeated, so three
+assets searching beats none.
 
-- **It posts nothing to the tracks API.** `cmd_run` builds its coordinator with
-  no `TrackPoster`, so the hold that decides what to post is never created. The
-  client, the hold and the stub server are all tested and merged; the wire from
-  the run to them is missing. **A judged run made with this command scores
-  nothing**, whatever the log says.
+### What it still does not do
 
-- **It runs no vision.** No `SightingSource` is passed either, so the fleet
-  searches and the belief ages, but nothing ever sees the vessel. The camera
-  path (`VisionSightings`, `MotionGate`) is built and tested; it is not wired.
-
-Those three are one wiring ticket, and it is the only thing between this
-repository and a scored run. If you are reading this runbook to prepare the
-judged run, that wiring is the work — not the arena.
+- **It does not aim the towers on its own** beyond the waypoint-as-look-at
+  that `ArenaTransport.command` already turns into servo 1 and servo 2. If a
+  tower is doing nothing useful, `transport.scan("tower-1")` is the
+  do-nothing-clever fallback mode.
+- **The towers are sited wherever `.env` puts them.** `scripts/tower_siting.py`
+  measures what that costs; moving them is a human action and a rebuild.
 
 ### While it runs
 
@@ -168,6 +164,9 @@ judged run, that wiring is the work — not the arena.
 - The rail's contacts panel shows each contact's fix synchronisation, and a line
   counting fixes the camera path refused and why. An empty contacts panel with
   refusals counted means the cameras are working and the poses are not.
+- `curl http://10.99.4.1:8010/api/tracks` is the ground truth on whether
+  anything is being scored. A climbing `fixes` count under one name is the
+  whole chain working.
 
 ---
 

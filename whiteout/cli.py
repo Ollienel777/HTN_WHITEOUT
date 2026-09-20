@@ -26,7 +26,7 @@ from pathlib import Path
 from whiteout.coordinate import DEFAULT_TRACK_NAME, Coordinator, SightingSource
 from whiteout.geo import ARENA_ORIGIN
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
-from whiteout.policy import AssetRole
+from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
 from whiteout.tracks.client import TrackPoster, TracksClient, TracksError, endpoint_from_env
 from whiteout.tracks.maintain import TrackHold
@@ -195,6 +195,43 @@ def _arena_poster(dry_run: bool = False) -> TrackPoster | None:
     return TrackPoster(TracksClient(endpoint))
 
 
+def _arm_fleet(transport: object, altitude_m: float) -> None:
+    """Arm and launch every asset that can move, before the tick loop runs.
+
+    Issue #138. The coordinator commands GUIDED-mode waypoints, and a waypoint
+    to a disarmed vehicle is ignored — so without this a live arena run drives
+    only whatever a human had already launched by hand.
+
+    **Towers are never asked.** ``arm_and_launch`` refuses one, and a caller
+    that asked anyway would be reading a refusal it caused as a fault. They
+    are filtered here by class rather than caught below.
+
+    **One asset that will not arm does not end the episode.** An arena run is
+    live and cannot be repeated, so a refusal is reported by name and the run
+    continues with whatever did launch — three assets searching beats none.
+    """
+    launch = getattr(transport, "arm_and_launch", None)
+    if not callable(launch):
+        print("run: this transport launches nothing; --arm ignored", file=sys.stderr)
+        return
+    mobile = [asset for asset in getattr(transport, "assets", ()) or () if asset.cls != "tower"]
+    if not mobile:
+        print("run: no mobile assets in the roster; nothing to launch", file=sys.stderr)
+        return
+    launched: list[str] = []
+    for asset in mobile:
+        try:
+            launch(asset.asset_id, altitude_m=altitude_m)
+        except TransportError as exc:
+            print(f"run: {asset.asset_id} did not launch ({exc})", file=sys.stderr)
+        else:
+            launched.append(asset.asset_id)
+    if launched:
+        print(f"run: launched {', '.join(launched)} to {altitude_m:.0f} m")
+    else:
+        print("run: nothing launched; the fleet is still on the ground", file=sys.stderr)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Drive the selected transport for ``--ticks`` ticks and write its log."""
     seed = _resolve_seed(args.seed)
@@ -231,6 +268,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # and compares bytes; a camera or a poster on that path would
                 # put a network and a wall clock inside a run that has to be
                 # reproducible, so neither is ever built for it.
+                if args.arm:
+                    if args.dry_run:
+                        # The one combination worth saying out loud rather
+                        # than resolving silently: an operator who asked for
+                        # both has a wrong expectation about one of them.
+                        print("run: --dry-run; not arming the fleet")
+                    else:
+                        _arm_fleet(transport, args.launch_alt)
                 camera = _arena_camera()
                 poster = _arena_poster(dry_run=args.dry_run)
             sightings: SightingSource | None = None
@@ -401,6 +446,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "report every pose as a fix taken SECONDS before its tick "
             "(measured_t = t - SECONDS); omitted, no measurement time is reported"
+        ),
+    )
+    run.add_argument(
+        "--arm",
+        action="store_true",
+        help=(
+            "arm the mobile assets and take off before the run (arena only, "
+            "never under --dry-run). Off by default: this moves real vehicles "
+            "in a shared simulator"
+        ),
+    )
+    run.add_argument(
+        "--launch-alt",
+        type=float,
+        default=DEFAULT_SEARCH_PARAMS.search_alt_m,
+        metavar="METRES",
+        help=(
+            "altitude to take off to with --arm; defaults to the altitude the "
+            "search policy flies at, so the climb is not undone by the first waypoint"
         ),
     )
     run.set_defaults(func=cmd_run)
