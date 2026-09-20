@@ -17,8 +17,8 @@ from whiteout.policy import AssetRole, ParamsError, SearchParams, SearchPolicy
 from whiteout.types import Pose, WorldObservation
 
 FLEET = (
-    AssetRole("quadcopter", "copter"),
-    AssetRole("fixed-wing", "plane"),
+    AssetRole("quadcopter", "quad"),
+    AssetRole("fixed-wing", "fixedwing"),
     AssetRole("tower-1", "tower"),
     AssetRole("tower-2", "tower"),
 )

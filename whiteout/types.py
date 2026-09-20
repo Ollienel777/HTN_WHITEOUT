@@ -287,6 +287,29 @@ class Pose:
     ``energy_used`` is cumulative over the episode and is what the efficiency
     axis of the scorer consumes.
 
+    **Orientation is three angles, and two of them are optional.**
+    ``heading`` is the yaw every transport can report. ``pitch`` and ``roll``
+    are ``None`` when the transport does not know them, for the same reason
+    ``measured_t`` is: there is no number that would be honest. A default of
+    ``0.0`` reads as *level*, which is a measurement, and an adapter that
+    never set the field would report every asset as flying straight and level
+    — plausible, wrong, and invisible, which is the failure this module keeps
+    refusing.
+
+    They exist because a camera cannot be projected without them.
+    :class:`whiteout.vision.projection.CameraPose` takes yaw, pitch **and**
+    roll, so a ``Pose`` carrying only a heading cannot turn a detected pixel
+    into a lat/lon — and a lat/lon is the only thing the tracks API scores.
+    Issue #99. ``ATTITUDE`` carries all three for every asset in the arena,
+    towers included, so the adapter was discarding two thirds of what it read.
+
+    **This is the airframe's attitude, not a gimbal's.** The quadcopter
+    carries ``gimbal_small_2d``, and a gimballed camera is not necessarily
+    pointed where its airframe is. The arena sends no ``MOUNT_STATUS`` or
+    ``GIMBAL_DEVICE_ATTITUDE_STATUS``, so the airframe attitude is all there
+    is today; if a mount angle ever arrives it is a separate field or a
+    separate report, never a quiet redefinition of these.
+
     **``t`` is the tick this pose belongs to, not when the fix was taken.**
     A pose is part of a :class:`WorldObservation`, and an observation is a
     coherent snapshot: ``pose.t == observation.t``, which the transport
@@ -333,11 +356,22 @@ class Pose:
     speed: float
     energy_used: float
     measured_t: float | None = None
+    pitch: float | None = None
+    roll: float | None = None
 
     def __post_init__(self) -> None:
         _as_floats(self, "t", "lat", "lon", "z", "heading", "speed", "energy_used")
-        if self.measured_t is not None:
-            _as_floats(self, "measured_t")
+        for optional in ("measured_t", "pitch", "roll"):
+            if getattr(self, optional) is not None:
+                _as_floats(self, optional)
+        # Checked here and not only in from_dict. A class outside
+        # VEHICLE_CLASSES used to construct happily and fail on the way back
+        # in, so a transport could drive a whole episode, write every record,
+        # and produce a log nothing could read - discovered at replay, hours
+        # after the run that would have to be repeated. Refusing at
+        # construction puts the error on the line that caused it.
+        if self.cls not in VEHICLE_CLASSES:
+            raise RecordError(f"pose.cls: {self.cls!r} is not one of {', '.join(VEHICLE_CLASSES)}")
         _check_position(self, "pose")
 
     def to_dict(self) -> dict[str, Any]:
@@ -358,6 +392,8 @@ class Pose:
             speed=_float(data, where, "speed"),
             energy_used=_float(data, where, "energy_used"),
             measured_t=_optional_float(data, where, "measured_t"),
+            pitch=_optional_float(data, where, "pitch"),
+            roll=_optional_float(data, where, "roll"),
         )
 
 
