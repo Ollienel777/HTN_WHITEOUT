@@ -35,6 +35,7 @@ from whiteout.geo import (
     local_to_geodetic,
 )
 from whiteout.log import SCHEMA_VERSION, read_episode_log, validate_episode_log
+from whiteout.score import AXES as SCORE_AXES
 from whiteout.types import SYNC_STATUSES
 from whiteout.vision.camera import CAMERAS, CameraModel
 from whiteout.vision.projection import (
@@ -310,6 +311,36 @@ def test_the_viewer_reads_the_same_schema_version_as_the_python_reader() -> None
     declared = re.search(r"var SCHEMA_VERSION = (\d+);", js)
     assert declared is not None
     assert int(declared.group(1)) == SCHEMA_VERSION
+
+
+def test_the_viewer_shows_the_axes_the_scorer_can_answer_for() -> None:
+    """The dial row and ``whiteout score`` must name the same axes.
+
+    They drifted: the viewer kept the superseded four — ``coverage``,
+    ``collaboration``, ``efficiency``, ``tracking_accuracy`` — while the
+    scorer moved to the five an episode log can answer for. Two of them named
+    nothing the scorer computes, and one of those was **collaboration**,
+    which :func:`whiteout.score.unscorable_criteria` exists to say a log
+    cannot answer for at all. A dial for a number that can never arrive reads
+    as a broken instrument for the whole run, in front of the judges it is
+    wrong in front of.
+    """
+    js = _read("viewer.js")
+    block = re.search(r"var AXES = \[(.*?)\];", js, re.DOTALL)
+    assert block is not None, "the viewer's axis list has moved"
+    declared = tuple(re.findall(r'key:\s*"(\w+)"', block.group(1)))
+    assert declared == SCORE_AXES
+
+
+def test_the_viewer_names_no_axis_the_scorer_refuses_to_invent() -> None:
+    """Autonomy and collaboration are judged, not computed. Not dials."""
+    js = _without_comments(_read("viewer.js"))
+    block = re.search(r"var AXES = \[(.*?)\];", js, re.DOTALL)
+    assert block is not None
+    for refused in ("collaboration", "autonomy"):
+        assert refused not in block.group(1), (
+            f"{refused!r} is read off the fleet's behaviour, not off a log"
+        )
 
 
 def test_the_viewer_points_at_the_bundled_episode_that_exists() -> None:
