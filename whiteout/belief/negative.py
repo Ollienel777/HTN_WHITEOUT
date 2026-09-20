@@ -305,9 +305,9 @@ def non_detection_likelihood(
         # Clamped rather than trusted: `gain` is a product of four caller-
         # supplied numbers and a subnormal `slant` would otherwise return a
         # weight below the floor a single look promises.
-        single = max(floor, 1.0 - detected)
+        single: float = max(floor, 1.0 - detected)
         # `looks` independent looks at the same water, which for `looks == 1`
         # is exactly `single` and costs one pow to say so.
-        return single**looks
+        return float(single**looks)
 
     return likelihood
