@@ -1038,7 +1038,11 @@
 
   function drawOutline(ctx, project, field) {
     var across = field.across;
-    ctx.strokeStyle = token("--n-700");
+    /* `--n-600`, not the fainter border above it, because once the field
+     * erodes this line is the only thing left saying that cleared water is
+     * still water. Swept cells fall below the ramp's floor and draw nothing,
+     * so without the shoreline the channel would look shorter every tick. */
+    ctx.strokeStyle = token("--n-600");
     ctx.lineWidth = size("--w-hairline");
     ctx.beginPath();
     field.outline.forEach(function (edge) {
