@@ -82,7 +82,7 @@ __all__ = [
 #: spent on the lat/lon shape above: two shapes that both answered to 2 would
 #: leave the field unable to say "this log is not the shape you expect" about
 #: either of them, which is the whole of what it is for.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")

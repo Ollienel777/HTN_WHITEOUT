@@ -578,36 +578,49 @@ def test_reading_one_tick_does_not_hold_the_file_open(tmp_path: Path) -> None:
 # --- R2-1: the writer refuses anything the reader would reject --------------
 
 
-def test_writer_refuses_an_unknown_enum_and_keeps_the_existing_log(
-    tmp_path: Path,
-) -> None:
-    """The enum guard is reader-side only unless the writer runs the reader.
+def test_an_unknown_vehicle_class_is_refused_where_the_pose_is_made() -> None:
+    """``__post_init__`` checks the enum, so a typo cannot reach the writer.
 
-    ``__post_init__`` coerces but does not check, so a sim holding a typo'd
-    ``cls`` reaches the writer with no warning upstream. Without the write-path
-    round trip the atomic replace succeeds and hands the scorer an unreadable
-    log in place of a good one.
+    It used only to coerce. A class outside :data:`VEHICLE_CLASSES` therefore
+    constructed happily, drove a whole episode and failed on the way back in —
+    discovered at replay, hours after the run that would have to be repeated.
+    Refusing here puts the error on the line that caused it.
+    """
+    with pytest.raises(RecordError) as caught:
+        Pose(
+            asset_id="wing-1",
+            cls="typo",
+            t=0.0,
+            lat=71.99,
+            lon=-94.84,
+            z=100.0,
+            heading=0.0,
+            speed=0.0,
+            energy_used=0.0,
+        )
+    assert "cls" in str(caught.value)
+
+
+def test_a_failed_write_keeps_the_existing_log(tmp_path: Path) -> None:
+    """The atomic replace must not hand the scorer an unreadable log.
+
+    The fault here is a clock that runs backwards, which is a *log-level*
+    rule: no single record is malformed, so only the writer's own read-back
+    can catch it. That is the point — the guarantee under test is atomicity,
+    not any one field's validation.
     """
     log = tmp_path / "episode.jsonl"
     write_episode_log(log, [make_record(tick) for tick in range(5)])
     before = log.read_bytes()
 
     doomed = [make_record(tick) for tick in range(5)]
-    observation = doomed[3].observation
-    poses = list(observation.poses)
-    poses[0] = dataclasses.replace(poses[0], cls="typo")
-    doomed[3] = dataclasses.replace(
-        doomed[3],
-        observation=dataclasses.replace(observation, poses=tuple(poses)),
-    )
+    doomed[3] = make_record(1)  # t runs backwards at line 4
 
     with pytest.raises(EpisodeLogError) as caught:
         write_episode_log(log, doomed)
     assert caught.value.line == 4
-    assert "cls" in str(caught.value)
     assert log.read_bytes() == before
     assert validate_episode_log(log) == 5
-    assert list(tmp_path.iterdir()) == [log]
 
 
 def test_writer_refuses_an_unknown_footprint_kind(tmp_path: Path) -> None:

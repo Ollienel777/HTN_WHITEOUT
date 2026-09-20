@@ -78,7 +78,7 @@ __all__ = ["AssetRole", "SearchPolicy", "Segment"]
 
 #: Vehicle classes this policy knows how to task. Anything else is left alone
 #: rather than sent somewhere a guess says it might go.
-_AIRCRAFT = frozenset({"copter", "plane"})
+_AIRCRAFT = frozenset({"quad", "fixedwing"})
 _TOWER = "tower"
 
 
@@ -90,11 +90,14 @@ class AssetRole:
     ``tower``. The roles are not configuration — they follow from what each
     airframe can physically do, and ``ARENA.md`` §3 is the source:
 
-    - ``plane`` covers ground fastest and cannot loiter, so it takes the
+    - ``fixedwing`` covers ground fastest and cannot loiter, so it takes the
       distant work.
-    - ``copter`` is slow and can hover, so it holds contacts and otherwise
-      takes near work.
+    - ``quad`` is slow and can hover, so it holds contacts and otherwise takes
+      near work.
     - ``tower`` cannot move at all, so it is aimed rather than sent.
+
+    The spellings are :data:`whiteout.types.VEHICLE_CLASSES`, because they
+    arrive on a :class:`~whiteout.types.Pose` and nothing translates them.
     """
 
     asset_id: str
@@ -211,7 +214,7 @@ class SearchPolicy:
             if pose is None:
                 # Silence from an asset is not a reason to guess where it is.
                 continue
-            if role.cls == "copter" and holding:
+            if role.cls == "quad" and holding:
                 assert held_lat_deg is not None and held_lon_deg is not None
                 intents.append(
                     self._waypoint(
@@ -311,7 +314,7 @@ class SearchPolicy:
             return value
         if role.cls not in _AIRCRAFT:
             return None
-        if role.cls == "plane" and range_m < self._params.plane_min_reach_m:
+        if role.cls == "fixedwing" and range_m < self._params.plane_min_reach_m:
             # The sweep asset is not given work it is already on top of; it
             # cannot loiter, so a segment under its nose is a segment it will
             # overfly before it can be tasked to it.

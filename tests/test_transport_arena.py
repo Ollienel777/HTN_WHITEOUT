@@ -163,7 +163,7 @@ class _FakeConn:
         return None
 
 
-def _wired(cls: str = "copter") -> tuple[ArenaTransport, Any]:
+def _wired(cls: str = "quad") -> tuple[ArenaTransport, Any]:
     """A transport with one asset, already 'up', holding a fake connection."""
     asset = AssetLink("quadcopter" if cls != "tower" else "tower-1", cls, 14550, 1)
     transport = ArenaTransport(host="10.0.0.1", roster=(asset,))
@@ -194,7 +194,7 @@ def test_a_pose_carries_degrees_and_an_altitude_in_metres() -> None:
     assert pose.lon == pytest.approx(-94.8393259)
     assert pose.z == pytest.approx(60.0)
     assert pose.speed == pytest.approx(5.5)
-    assert pose.cls == "copter"
+    assert pose.cls == "quad"
 
 
 def test_the_tick_clock_is_ours_and_strictly_increases() -> None:
@@ -221,7 +221,7 @@ def test_an_asset_that_has_not_reported_yet_is_silence_not_a_fault() -> None:
 
 
 def test_a_vehicle_gets_a_guided_position_target() -> None:
-    transport, link = _wired("copter")
+    transport, link = _wired("quad")
     transport.command(
         FleetIntent(
             t=1.0,
@@ -284,7 +284,7 @@ def test_arm_and_takeoff_are_sent_without_a_round_trip_between_them() -> None:
     Waiting for an ack between the two misses the window often enough to look
     like a broken vehicle, so both commands are on the wire back to back.
     """
-    transport, link = _wired("copter")
+    transport, link = _wired("quad")
     transport.arm_and_launch("quadcopter", altitude_m=60.0)
     kinds = [kind for kind, _ in link.conn.mav.sent]
     assert kinds == ["set_mode", "command_long", "command_long"]
@@ -340,3 +340,48 @@ def test_the_pwm_mapping_is_monotonic_and_stays_in_band() -> None:
     assert values == sorted(values)
     assert min(values) >= 1100
     assert max(values) <= 1900
+
+
+# -- attitude crosses the seam (#99) ----------------------------------------
+
+
+def test_a_pose_carries_all_three_angles_so_a_camera_can_be_projected() -> None:
+    """``CameraPose`` needs yaw, pitch and roll; a heading alone is not enough.
+
+    Without these the detect-project-post chain has no lat/lon to post, and a
+    lat/lon is the only thing the tracks API scores.
+    """
+    transport, link = _wired()
+    link.attitude = _Message("ATTITUDE", yaw=0.0, pitch=-0.1, roll=0.2)
+    (pose,) = transport.observe().poses
+    assert pose.pitch == pytest.approx(-0.1 * 180.0 / 3.141592653589793, abs=1e-6)
+    assert pose.roll == pytest.approx(0.2 * 180.0 / 3.141592653589793, abs=1e-6)
+
+
+def test_no_attitude_is_none_rather_than_level() -> None:
+    """Zero reads as level, which is a measurement we did not take."""
+    transport, link = _wired()
+    link.attitude = None
+    (pose,) = transport.observe().poses
+    assert pose.pitch is None
+    assert pose.roll is None
+
+
+def test_the_roster_speaks_the_seam_s_vehicle_classes() -> None:
+    """A class outside VEHICLE_CLASSES writes a log that cannot be read back.
+
+    It constructs happily, drives a whole episode, and fails at replay — hours
+    after the run that would have to be repeated.
+    """
+    from whiteout.types import VEHICLE_CLASSES
+
+    for asset in DEFAULT_ROSTER:
+        assert asset.cls in VEHICLE_CLASSES, asset
+
+
+def test_an_arena_pose_survives_the_episode_log_round_trip() -> None:
+    from whiteout.types import Pose
+
+    transport, _ = _wired()
+    (pose,) = transport.observe().poses
+    assert Pose.from_dict(pose.to_dict()) == pose

@@ -112,7 +112,11 @@ class AssetLink:
     """Where one asset answers, and what kind of vehicle it is.
 
     ``cls`` is the seam's vehicle-class string and decides which GUIDED mode
-    number and which command shape apply — ``copter``, ``plane`` or ``tower``.
+    number and which command shape apply. It must be one of
+    :data:`whiteout.types.VEHICLE_CLASSES` — ``quad``, ``fixedwing``,
+    ``rover`` or ``tower`` — because it is written straight onto a
+    :class:`~whiteout.types.Pose`, and a class outside that set produces an
+    episode log that cannot be read back.
     """
 
     asset_id: str
@@ -123,8 +127,8 @@ class AssetLink:
 
 #: The roster observed on the live arena, and the default when no file is set.
 DEFAULT_ROSTER: tuple[AssetLink, ...] = (
-    AssetLink("quadcopter", "copter", 14550, 1),
-    AssetLink("fixed-wing", "plane", 14560, 2),
+    AssetLink("quadcopter", "quad", 14550, 1),
+    AssetLink("fixed-wing", "fixedwing", 14560, 2),
     AssetLink("tower-1", "tower", 14580, 4),
     AssetLink("tower-2", "tower", 14590, 5),
 )
@@ -350,8 +354,16 @@ class ArenaTransport:
         if position is None:
             return None
         heading = 0.0
+        pitch: float | None = None
+        roll: float | None = None
         if link.attitude is not None:
             heading = float(link.attitude.yaw) * _DEG_PER_RAD % 360.0
+            # ATTITUDE carries all three angles and a camera cannot be
+            # projected without them (#99). Reported as None rather than 0.0
+            # when there is no ATTITUDE: zero reads as level, which is a
+            # measurement we did not take.
+            pitch = float(link.attitude.pitch) * _DEG_PER_RAD
+            roll = float(link.attitude.roll) * _DEG_PER_RAD
         elif position.hdg not in (None, 65535):
             heading = float(position.hdg) / 100.0
         speed = 0.0
@@ -373,6 +385,8 @@ class ArenaTransport:
             # timebase is not established, and an unconverted stamp would
             # pass every check and mean nothing. See the module docstring.
             measured_t=None,
+            pitch=pitch,
+            roll=roll,
         )
 
     def command(self, intent: FleetIntent) -> None:
@@ -480,7 +494,7 @@ class ArenaTransport:
             raise TransportError(f"{asset_id!r} is a tower and does not launch")
         from pymavlink import mavutil
 
-        guided = _MODE_GUIDED_COPTER if link.asset.cls == "copter" else _MODE_GUIDED_PLANE
+        guided = _MODE_GUIDED_COPTER if link.asset.cls == "quad" else _MODE_GUIDED_PLANE
         self.set_mode(asset_id, guided)
         link.conn.mav.command_long_send(
             link.asset.system_id,
