@@ -11,6 +11,7 @@ session, so it covers only what is easy to get wrong.
 | Running the ideation loop | `docs/ideation/README.md`, or `/ideate` |
 | Running the build loop | `docs/build/README.md`, or `/build-loop` |
 | What we are building, and its gate commands | `hackathon/SPEC.md` (exists once the build starts) |
+| Bringing the arena up and flying a run against it | `docs/arena.md` |
 | The design direction | `hackathon/DESIGN.md`, and the `ui-craft` skill |
 | The event: clock, judging, prizes | `hackathon/EVENT.md` |
 
