@@ -130,9 +130,23 @@ class KinematicAsset:
 #: and a fake that put them at 15 m would give them a horizon 45 km nearer
 #: than the real ones have and a footprint to match.
 #:
-#: ``ARENA.md`` §3 starts the quadcopter over the highest point of the map,
-#: which is why its figure is not a height over water and why #76's datum
-#: question is not settled by this table.
+#: **Every figure here is height above the water plane, and for this fleet
+#: that is the same as MSL**, because the fake's water plane is z = 0 and
+#: nothing here sits on a hill it does not know about. #108 measured the same
+#: to hold on the arena — MSL matched the rendered heights to a decimetre —
+#: which is why these are the arena's numbers and not round ones.
+#:
+#: This matters because the belief field's non-detection update treats
+#: ``pose.z - ground_alt_m`` as the camera's height above the water, and a
+#: transport whose ``z`` meant anything else would scale every footprint. An
+#: earlier revision of this comment cited ``ARENA.md`` §3's note that the
+#: quadcopter *starts* over the highest point of the map, which is true of
+#: the arena's spawn and was the wrong thing to say here: it reads as though
+#: this table's quadcopter figure were measured from something other than the
+#: water, and it is not.
+#:
+#: #76 — which datum the arena's own telemetry reports — is settled for the
+#: command side by #108 and is not re-opened by this table.
 #:
 #: Every asset flies level. A camera pitched at 0° looks at the horizon and
 #: sees the water from its near field-of-view edge outward — 102 m for the

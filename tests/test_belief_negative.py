@@ -29,7 +29,7 @@ from whiteout.belief.negative import (
 from whiteout.geo import ARENA_ORIGIN, LocalPoint, local_to_geodetic
 from whiteout.types import VEHICLE_CLASSES
 from whiteout.vision.camera import CAMERAS
-from whiteout.vision.projection import CameraPose
+from whiteout.vision.projection import CameraPose, max_flat_plane_range_m
 from whiteout.vision.standoff import standoff_range_m
 
 SEEDS = range(60)
@@ -365,3 +365,104 @@ def test_the_arena_has_no_rover_so_no_camera_is_published_for_one() -> None:
     """``ARENA.md`` §3. ``rover`` is a valid seam class with no arena hardware."""
     assert "rover" in VEHICLE_CLASSES
     assert "rover" not in CLASS_CAMERAS
+
+
+# --- evidence is per second, not per call ----------------------------------
+
+
+def test_the_same_exposure_split_into_more_looks_gives_the_same_field() -> None:
+    """The invariant the tick rate must not be able to break.
+
+    A loop at 4 Hz makes four times as many calls about the same water as one
+    at 1 Hz. Before ``elapsed_s`` existed each call was worth a whole look, so
+    the field a run settled to was a property of the loop frequency: 100 s of
+    one episode gave a peak probability of 0.0033, 0.0044 or 0.0058 for tick
+    rates of 1.0, 0.5 and 0.25 s. A 76% swing from a sampling rate.
+
+    Held here against a *fixed* pose, which is the only way to isolate it: at
+    a different tick rate a real fleet is re-tasked at a different rate and
+    flies a different path, so its field legitimately differs.
+    """
+    pose = _pose(alt_m=200.0)
+
+    def field_after(steps: int, each_s: float) -> np.ndarray:
+        grid = ChannelBeliefGrid(DEFAULT_STRAIT)
+        for _ in range(steps):
+            grid.update_likelihood(
+                non_detection_likelihood(CAMERAS["quadcopter"], pose, elapsed_s=each_s)
+            )
+        return grid.probabilities().copy()
+
+    slow = field_after(10, 2.0)
+    fast = field_after(40, 0.5)
+    assert np.allclose(slow, fast, rtol=1e-12, atol=0.0)
+
+
+def test_a_longer_look_at_the_same_water_says_more() -> None:
+    """Two seconds of staring is worth twice one second, in the exponent."""
+    pose = _pose(alt_m=200.0)
+    target = _at(900.0)
+    one = non_detection_likelihood(CAMERAS["quadcopter"], pose, elapsed_s=1.0)(*target)
+    two = non_detection_likelihood(CAMERAS["quadcopter"], pose, elapsed_s=2.0)(*target)
+    assert one < 1.0, "the test target is not being looked at"
+    assert two == pytest.approx(one**2)
+
+
+def test_a_stalled_loop_cannot_claim_a_minute_of_staring() -> None:
+    """``max_looks``, and why a gap is not an exposure.
+
+    A loop that resumes after a minute is holding a pose from *after* the
+    gap. Crediting sixty seconds of staring at the current footprint would
+    claim evidence about water the asset had already flown past.
+    """
+    pose = _pose(alt_m=200.0)
+    target = _at(900.0)
+    capped = non_detection_likelihood(CAMERAS["quadcopter"], pose, elapsed_s=60.0)(*target)
+    at_cap = non_detection_likelihood(
+        CAMERAS["quadcopter"], pose, elapsed_s=DEFAULT_SWEEP.max_looks
+    )(*target)
+    assert capped == pytest.approx(at_cap)
+
+
+def test_no_exposure_means_one_look_so_a_caller_with_no_clock_is_right() -> None:
+    pose = _pose(alt_m=200.0)
+    target = _at(900.0)
+    implicit = non_detection_likelihood(CAMERAS["quadcopter"], pose)(*target)
+    explicit = non_detection_likelihood(
+        CAMERAS["quadcopter"], pose, elapsed_s=DEFAULT_SWEEP.reference_s
+    )(*target)
+    assert implicit == pytest.approx(explicit)
+
+
+def test_a_negative_exposure_is_refused() -> None:
+    with pytest.raises(BeliefError, match="elapsed_s"):
+        non_detection_likelihood(CAMERAS["quadcopter"], _pose(), elapsed_s=-1.0)
+
+
+# --- the range bound the docstring promises --------------------------------
+
+
+def test_the_default_range_bound_is_the_flat_plane_limit_and_is_applied() -> None:
+    """A documented safety bound that did not exist is worse than none.
+
+    ``max_range_m=None`` said it deferred to ``max_flat_plane_range_m`` and
+    applied no bound at all. It is inert on this strait — the farthest water
+    cell is about 5.2 km against a 7.1 km bound from the lowest asset — which
+    is exactly why it could sit unimplemented without anything failing.
+
+    The bound is on **ground** range, because that is what
+    ``max_flat_plane_range_m`` returns; comparing it against a slant range
+    would reject a band of cells the bound does not name.
+    """
+    height = 120.0
+    bound = max_flat_plane_range_m(height)
+    likelihood = non_detection_likelihood(CAMERAS["fixed-wing"], _pose(alt_m=height))
+    assert likelihood(*_at(bound * 0.99)) < 1.0
+    assert likelihood(*_at(bound * 1.01)) == 1.0, "the documented bound is not applied"
+
+
+def test_an_explicit_range_bound_overrides_the_default() -> None:
+    tight = SweepParams(max_range_m=500.0)
+    likelihood = non_detection_likelihood(CAMERAS["fixed-wing"], _pose(), params=tight)
+    assert likelihood(*_at(450.0)) < 1.0
+    assert likelihood(*_at(550.0)) == 1.0

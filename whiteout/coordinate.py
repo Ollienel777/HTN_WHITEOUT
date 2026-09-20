@@ -226,10 +226,17 @@ class Coordinator:
         # guard away leaves the whole suite green. It stays because it is
         # clearer and cheaper than depending on that coincidence, and because
         # it stops being a coincidence the moment a prior is seeded.
+        # Also the exposure the non-detection update is credited with, so
+        # that evidence and diffusion are balanced in the same units. On the
+        # first tick there is no gap to measure and one reference look is the
+        # honest credit: the asset has been looking, we just cannot say for
+        # how long.
+        exposure = self._sweep.reference_s
         if self._last_t is not None:
             elapsed = now - self._last_t
             if elapsed > 0.0:
                 self._belief.diffuse(elapsed)
+                exposure = elapsed
         self._last_t = now
 
         poses = {pose.asset_id: pose for pose in observation.poses}
@@ -245,7 +252,7 @@ class Coordinator:
         # evidence about the water it was looking at, and it is applied after
         # the sightings so that an asset which *did* see something is not also
         # asked to argue the vessel is not there.
-        self._erode(observation, {sighting.asset_id for sighting in seen})
+        self._erode(observation, {sighting.asset_id for sighting in seen}, exposure)
 
         posted = False
         held_lat: float | None = None
@@ -293,7 +300,9 @@ class Coordinator:
             return ()
         return tuple(refusals())
 
-    def _erode(self, observation: WorldObservation, saw_something: set[str]) -> None:
+    def _erode(
+        self, observation: WorldObservation, saw_something: set[str], elapsed_s: float
+    ) -> None:
         """Fold every asset's non-detection into the field, #13.
 
         An asset contributes when it reported no sighting this tick **and**
@@ -329,6 +338,7 @@ class Coordinator:
                             roll_deg=pose.roll,
                         ),
                         ground_alt_m=self._ground_alt_m,
+                        elapsed_s=elapsed_s,
                         params=self._sweep,
                     )
                 )

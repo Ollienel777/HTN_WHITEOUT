@@ -123,7 +123,7 @@ from dataclasses import dataclass
 from whiteout.belief.field import BeliefError, Likelihood
 from whiteout.geo import GeoPoint, geodetic_to_local
 from whiteout.vision.camera import CameraModel
-from whiteout.vision.projection import CameraPose, camera_basis
+from whiteout.vision.projection import CameraPose, camera_basis, max_flat_plane_range_m
 
 __all__ = [
     "CLASS_CAMERAS",
@@ -158,18 +158,37 @@ class SweepParams:
         22 pixels across, so an area of ``8 * 8`` sits at the low end of what
         that detector was measured on: below it the statistic is running out
         of samples.
-    :param p_max: the most a single perfect look may claim. Strictly below
-        one, and the module docstring explains why that is the load-bearing
-        parameter rather than the careful one.
-    :param max_range_m: beyond this the cell is treated as unlooked-at
-        whatever the frame says, because a flat water plane stops meaning
-        anything at range. ``None`` defers to
-        :func:`~whiteout.vision.projection.max_flat_plane_range_m`.
+    :param p_max: the most a single perfect look may claim, **over one
+        reference interval**. Strictly below one, and the module docstring
+        explains why that is the load-bearing parameter rather than the
+        careful one.
+    :param reference_s: how long a camera must hold water in frame for that
+        to count as **one independent look**. Evidence accrues per second and
+        not per tick: see the module docstring. One second is a modelling
+        choice, but the invariant it buys — that the same episode gives the
+        same field whatever the loop frequency — is not.
+    :param max_looks: the most independent looks one tick may be worth,
+        however long the gap before it. A stalled loop that resumes after a
+        minute is holding a pose from *after* the gap, so crediting sixty
+        seconds of staring at the current footprint would claim evidence
+        about water the asset had already flown past. Ten seconds is roughly
+        how long the fixed-wing takes to cross its own footprint at 26 m/s.
+    :param max_range_m: **ground** range beyond which a cell is treated as
+        unlooked-at whatever the frame says, because a flat water plane stops
+        meaning anything at range. ``None`` defers to
+        :func:`~whiteout.vision.projection.max_flat_plane_range_m` for the
+        camera's height, which is where that plane's own error reaches 10%.
+        Inert on the strait as it stands — the farthest water cell is 5.2 km
+        against a 7.1 km bound from the lowest asset — and implemented
+        anyway, because a documented bound that does not exist is worse than
+        no bound: it is a safety property a reader will rely on.
     """
 
     vessel_length_m: float = 12.0
     half_pixels: float = 64.0
     p_max: float = 0.7
+    reference_s: float = 1.0
+    max_looks: float = 10.0
     max_range_m: float | None = None
 
     def __post_init__(self) -> None:
@@ -177,6 +196,10 @@ class SweepParams:
             raise BeliefError(f"vessel_length_m must be positive, got {self.vessel_length_m!r}")
         if not (math.isfinite(self.half_pixels) and self.half_pixels > 0.0):
             raise BeliefError(f"half_pixels must be positive, got {self.half_pixels!r}")
+        if not (math.isfinite(self.reference_s) and self.reference_s > 0.0):
+            raise BeliefError(f"reference_s must be positive, got {self.reference_s!r}")
+        if not (math.isfinite(self.max_looks) and self.max_looks > 0.0):
+            raise BeliefError(f"max_looks must be positive, got {self.max_looks!r}")
         if not 0.0 < self.p_max < 1.0:
             # Not `<= 1.0`. A p_max of exactly one is the failure this whole
             # module is arranged to prevent, and accepting it "because the
@@ -210,6 +233,7 @@ def non_detection_likelihood(
     pose: CameraPose,
     *,
     ground_alt_m: float = 0.0,
+    elapsed_s: float | None = None,
     params: SweepParams = DEFAULT_SWEEP,
 ) -> Likelihood:
     """``P(saw nothing | vessel here)``, as a function of position.
@@ -224,10 +248,20 @@ def non_detection_likelihood(
         nothing**. A pose fetched later is a different pose, and at 26 m/s the
         fixed-wing moves a frame's width in a few seconds.
     :param ground_alt_m: the water plane in ``pose.alt_m``'s datum. Issue #76.
-    :raises BeliefError: if the camera is not above the water plane. That is a
-        malformed input rather than an empty sweep: a camera at or below the
-        surface has no footprint to speak of, and silently returning "no
-        evidence everywhere" would hide a datum mistake as a quiet episode.
+    :param elapsed_s: how long this sweep held the frame. ``None`` means one
+        :attr:`SweepParams.reference_s`, which is one independent look and is
+        what a caller with no clock should pass. **Evidence is per second,
+        not per call**: a loop running at 4 Hz makes four times as many calls
+        about the same water as one at 1 Hz, and without this the field it
+        settles to would be a property of the loop frequency rather than of
+        the world. Measured, before this existed: 100 s of the same episode
+        gave a peak probability of 0.0033, 0.0044 or 0.0058 depending only on
+        the tick rate.
+    :raises BeliefError: if the camera is not above the water plane, or
+        ``elapsed_s`` is negative. The first is a malformed input rather than
+        an empty sweep: a camera at or below the surface has no footprint to
+        speak of, and silently returning "no evidence everywhere" would hide
+        a datum mistake as a quiet episode.
     """
     height = pose.alt_m - ground_alt_m
     if height <= 0.0:
@@ -235,9 +269,18 @@ def non_detection_likelihood(
             f"{camera.name}: camera is not above the water plane — altitude "
             f"{pose.alt_m!r} m against a plane at {ground_alt_m!r} m"
         )
+    if elapsed_s is not None and not (math.isfinite(elapsed_s) and elapsed_s >= 0.0):
+        raise BeliefError(f"elapsed_s must be finite and non-negative, got {elapsed_s!r}")
+    exposure = params.reference_s if elapsed_s is None else elapsed_s
+    looks = min(exposure / params.reference_s, params.max_looks)
     right, down, forward = camera_basis(pose)
     origin = GeoPoint(pose.lat_deg, pose.lon_deg)
-    limit = params.max_range_m
+    # The bound is on **ground** range, because that is what
+    # `max_flat_plane_range_m` returns — it is the range at which the flat
+    # water plane's own error reaches 10%, measured along the water and not
+    # along the ray. Comparing it to a slant range would reject a band of
+    # cells the bound does not name, by an amount that grows with altitude.
+    limit = max_flat_plane_range_m(height) if params.max_range_m is None else params.max_range_m
     floor = 1.0 - params.p_max
     # n = fx * fy * L^2 * h / r^3, gathered once: only r varies per cell.
     gain = camera.fx * camera.fy * params.vessel_length_m**2 * height
@@ -254,14 +297,17 @@ def non_detection_likelihood(
         py = camera.cy + camera.fy * below / depth
         if not (0.0 <= px <= camera.width and 0.0 <= py <= camera.height):
             return 1.0  # outside the frame, which includes straight down
-        slant = math.sqrt(east * east + north * north + height * height)
-        if limit is not None and slant > limit:
+        if math.sqrt(east * east + north * north) > limit:
             return 1.0
+        slant = math.sqrt(east * east + north * north + height * height)
         pixels = gain / slant**3
         detected = params.p_max * pixels / (pixels + params.half_pixels)
         # Clamped rather than trusted: `gain` is a product of four caller-
         # supplied numbers and a subnormal `slant` would otherwise return a
-        # weight below the floor this module promises.
-        return max(floor, 1.0 - detected)
+        # weight below the floor a single look promises.
+        single = max(floor, 1.0 - detected)
+        # `looks` independent looks at the same water, which for `looks == 1`
+        # is exactly `single` and costs one pow to say so.
+        return single**looks
 
     return likelihood

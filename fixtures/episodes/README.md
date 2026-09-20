@@ -44,15 +44,22 @@ it could have seen it (#13):
 
 | quantity | tick 0 | tick 400 |
 |---|---|---|
-| `entropy` | 6.7429 | **5.4582** |
-| `peak_p` | 0.00122 | **0.00785** (6.4x) |
+| `entropy` | 6.7429 | **5.9286** |
+| `peak_p` | 0.00122 | **0.00429** (3.5x) |
 | distinct `entropy` values across the file | — | **400** |
 | quadcopter altitude | 40 m | 120 m, commanded, reached at t=27 s |
 
-Before #13 that table read `6.745236` in both columns and **one** distinct
-value across the file. The fleet flew the same sweeps; they just meant
-nothing. A 1200-tick probe at the time showed the same flat digest, so length
-was never the missing piece — erosion was.
+The drop is spread across the run rather than front-loaded: 47.7% of it by
+tick 100, 78.4% by tick 200. Before #13 that table read `6.745236` in both
+columns and **one** distinct value across the whole file. The fleet flew the
+same sweeps; they just meant nothing. A 1200-tick probe at the time showed the
+same flat digest, so length was never the missing piece — erosion was.
+
+**These numbers are properties of the model, not of the tick rate.** Evidence
+accrues per second of exposure rather than per call, so halving
+`DEFAULT_TICK_SECONDS` no longer doubles the erosion. It did until review
+caught it: the same 100 s of episode gave a peak probability of 0.0033, 0.0044
+or 0.0058 depending only on how often the loop ran.
 
 ## Size
 
