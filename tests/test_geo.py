@@ -303,6 +303,17 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "whiteout/vision/camera.py",
         "whiteout/vision/projection.py",
         "whiteout/vision/scene.py",
+        # One `atan2`, and it is not geodesy. #71 flies the fake fleet toward
+        # its commanded waypoint, and a moving asset has to report which way
+        # it is pointing. Both endpoints reach `whiteout.geo` first, so the
+        # call takes an East and a North *in metres* off the tangent plane
+        # that module returned and gives a bearing in radians: no latitude
+        # enters it, and no scale leaves it. The check that this stays true
+        # is not this list -- it is that the ellipsoid guard and the
+        # conversion-name guard both walk this file with no allowlist at all,
+        # so a second converter here still has to spell a constant or name
+        # itself, and both of those are still refused.
+        "whiteout/transport/kinematic.py",
         # Camera-field trigonometry, not latitude trigonometry: it turns a
         # field of view and a height into a depression angle and a ground
         # range, and does its one frame conversion through whiteout.geo like
@@ -313,6 +324,16 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "tests/test_vision_projection.py",
         "tests/test_vision_standoff.py",
         "scripts/jpeg_quantisation.py",
+        # A rotation between two map grids, not a latitude-to-scale step.
+        # Gazebo's world axes are EPSG:3413 grid and grid north is not true
+        # north; the probe turns x/y by minus the site's published grid
+        # convergence to get East/North, then hands those to
+        # whiteout.geo.local_to_geodetic like every other caller. The sin and
+        # cos are of a convergence angle the arena reports, never of a
+        # latitude, and this file owns no ellipsoid and no second converter.
+        # It is also a measurement instrument that nothing under whiteout/
+        # imports, so the one-converter rule is not weakened by it.
+        "scripts/truth_probe.py",
     }
 )
 

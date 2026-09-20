@@ -25,7 +25,8 @@ from pathlib import Path
 import pytest
 
 from whiteout.geo import ARENA_ORIGIN, WGS84_A, WGS84_F, LocalPoint, local_to_geodetic
-from whiteout.log import SCHEMA_VERSION, validate_episode_log
+from whiteout.log import SCHEMA_VERSION, read_episode_log, validate_episode_log
+from whiteout.types import SYNC_STATUSES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIZ = REPO_ROOT / "viz"
@@ -179,6 +180,44 @@ def test_many_contacts_scrolls_the_rail_and_not_the_field() -> None:
     assert re.search(r"\.field \{[^}]*overflow: hidden", css, re.DOTALL)
 
 
+def test_a_contact_says_whether_its_fix_and_attitude_were_one_instant() -> None:
+    """``Contact.sync``, on screen. A fix nobody synchronised must look unlike one
+    that was: the failure being fixed is a 5.5 m error with every field
+    populated and nothing to look at."""
+    markup = _read("index.html")
+    js = _read("viewer.js")
+    css = _without_comments(_read("viewer.css"))
+    contact_row = markup.split('id="tpl-contact-row"')[1].split("</template>")[0]
+    assert "data-contact-sync" in contact_row
+    # Every state the log can carry, plus the absence, reaches the row.
+    for status in SYNC_STATUSES:
+        assert status in js, f"the viewer has no word for {status}"
+    assert "unrecorded" in js, "a contact with no sync recorded reads as a state"
+    assert "skew " in js, "a measured skew is the finding and is not shown"
+    # Semantic colour only, and from tokens: amber for unknown, red for known bad.
+    sync_rules = "".join(css.split(".contact-sync")[1:])
+    assert "--warn" in sync_rules
+    assert "--danger" in sync_rules
+
+
+def test_a_refused_fix_is_named_in_the_rail_and_not_only_dropped() -> None:
+    """`EpisodeRecord.refusals`, on screen.
+
+    A refused sighting leaves no contact, so without this line the rail cannot
+    tell "nobody can see the vessel" from "two cameras saw something we would
+    not stand behind" — and in the artifact the second must not read as an
+    empty sea.
+    """
+    markup = _without_comments(_read("index.html"))
+    js = _read("viewer.js")
+    css = _without_comments(_read("viewer.css"))
+    contacts = markup.split('class="panel panel-contacts"')[1].split("</section>")[0]
+    assert "data-refused" in contacts, "the contacts panel never says what was refused"
+    assert '"refusals"' in js, "the viewer does not read the record's refusals"
+    assert "refused" in js
+    assert "--warn" in "".join(css.split(".panel-note")[1:])
+
+
 # ── no build step ─────────────────────────────────────────────────────
 
 
@@ -222,6 +261,33 @@ def test_the_bundled_episode_is_a_real_valid_episode_log() -> None:
     """The empty state's primary action must never land in the error state."""
     assert BUNDLED_EPISODE.is_file(), "the empty state offers an episode that is not there"
     assert validate_episode_log(BUNDLED_EPISODE) > 0
+
+
+def test_the_bundled_episode_shows_a_fleet_doing_something() -> None:
+    """Valid is not the same as worth looking at, and this is the difference.
+
+    The committed fixture was a valid episode log for a day and a half while
+    being 120 ticks of four parked assets, an empty intent every tick and a
+    1x1 placeholder belief digest with zero mass. Every test above passed the
+    whole time. A judge opening the viewer would have seen a correctly
+    rendered instrument reporting that nothing was happening.
+
+    So this asserts the three things that make it a demo rather than a
+    well-formed file: the fleet is tasked, at least one asset actually goes
+    somewhere, and the belief field is a real grid rather than the
+    placeholder. It deliberately says nothing about *how much* the field
+    moves -- the negative-information update (#13) is not merged, so the
+    field is still uniform, and pinning a number here would have to be
+    rewritten the day it lands.
+    """
+    records = read_episode_log(BUNDLED_EPISODE)
+    last = records[-1]
+    assert last.belief_digest.grid_shape != (1, 1), "the bundled episode carries a placeholder"
+    assert last.belief_digest.mass > 0.0
+    assert any(record.intent.intents for record in records), "nothing was ever tasked"
+    assert any(pose.energy_used > 0.0 for record in records for pose in record.observation.poses), (
+        "no asset moved for the whole episode"
+    )
 
 
 def test_the_viewer_reads_the_same_schema_version_as_the_python_reader() -> None:

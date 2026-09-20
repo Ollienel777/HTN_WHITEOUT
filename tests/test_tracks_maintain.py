@@ -198,3 +198,76 @@ def test_an_unseen_track_says_so_and_posts_nothing(hold: TrackHold) -> None:
     assert hold.tick(5.0) is False
     assert hold.posts == 0
     assert hold.holder is None
+
+
+# -- association: could the held thing have got there? (#113) ---------------
+
+
+def _offset(hold_from: Sighting, east_m: float, t: float) -> Sighting:
+    from whiteout.geo import GeoPoint, LocalPoint, local_to_geodetic
+
+    point = local_to_geodetic(
+        GeoPoint(hold_from.lat_deg, hold_from.lon_deg),
+        LocalPoint(east_m=east_m, north_m=0.0),
+    )
+    return Sighting(t, point.lat_deg, point.lon_deg, "quadcopter")
+
+
+def test_a_sighting_the_vessel_could_not_have_reached_is_refused(
+    hold: TrackHold,
+) -> None:
+    """Flown live, four unrelated false positives became one track.
+
+    It reported 19.8 m/s — the course between two of them, not a boat. A fix
+    further away than the vessel could have travelled is a different object,
+    and taking it teleports the track.
+    """
+    first = Sighting(0.0, 71.99, -94.84, "tower-1")
+    hold.sight(first)
+    hold.sight(_offset(first, 3_000.0, 1.0))
+    assert hold.unassociated == 1
+    assert hold.last_sighting == first
+
+
+def test_a_sighting_consistent_with_three_metres_a_second_is_accepted(
+    hold: TrackHold,
+) -> None:
+    first = Sighting(0.0, 71.99, -94.84, "tower-1")
+    hold.sight(first)
+    moved = _offset(first, 30.0, 10.0)
+    hold.sight(moved)
+    assert hold.unassociated == 0
+    assert hold.last_sighting == moved
+
+
+def test_the_allowance_grows_with_the_gap(hold: TrackHold) -> None:
+    """A long coast must not reject the re-acquisition that ends it."""
+    first = Sighting(0.0, 71.99, -94.84, "tower-1")
+    hold.sight(first)
+    far = _offset(first, 700.0, 1.0)
+    hold.sight(far)
+    assert hold.unassociated == 1, "too far for one second"
+
+    fresh = TrackHold("Sierra One", hold._poster, coast_s=1000.0)
+    fresh.sight(first)
+    fresh.sight(_offset(first, 700.0, 120.0))
+    assert fresh.unassociated == 0, "but reachable in two minutes"
+
+
+def test_the_first_sighting_always_establishes_the_track(hold: TrackHold) -> None:
+    hold.sight(Sighting(0.0, 85.0, -80.0, "tower-1"))
+    assert hold.unassociated == 0
+    assert hold.last_sighting is not None
+
+
+def test_a_lost_track_re_seeds_from_anywhere(hold: TrackHold) -> None:
+    """Otherwise one bad initial lock poisons the run and nothing recovers."""
+    first = Sighting(0.0, 71.99, -94.84, "tower-1")
+    hold.sight(first)
+    hold.tick(first.t + hold.coast_s + 5.0)
+    assert hold.state == "lost"
+
+    elsewhere = _offset(first, 4_000.0, first.t + hold.coast_s + 6.0)
+    hold.sight(elsewhere)
+    assert hold.last_sighting == elsewhere
+    assert hold.unassociated == 0

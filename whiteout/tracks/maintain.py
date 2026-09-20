@@ -57,9 +57,12 @@ from dataclasses import dataclass
 
 from whiteout.geo import GeoPoint, bearing_deg, geodetic_to_local
 from whiteout.tracks.client import TrackFix, TrackPoster
+from whiteout.types import PoseSync
 
 __all__ = [
+    "DEFAULT_ASSOCIATION_SLACK_M",
     "DEFAULT_COAST_S",
+    "DEFAULT_MAX_SPEED_MPS",
     "DEFAULT_POST_INTERVAL_S",
     "Sighting",
     "TrackHold",
@@ -76,6 +79,16 @@ DEFAULT_POST_INTERVAL_S = 2.0
 #: still useful to a policy deciding where to look — and that is the point of
 #: coasting, not of posting.
 DEFAULT_COAST_S = 12.0
+
+#: Fastest the held thing could plausibly be going, m/s. The vessel does 3.0
+#: (``SHIP_SPEED``), and this is the same upper bound the motion gate uses:
+#: above it, a fix is not the thing we were holding.
+DEFAULT_MAX_SPEED_MPS = 8.0
+
+#: Slack added to the travel allowance, metres, for projection error. Starts
+#: at the detection sigma the coordinator folds into belief, because that is
+#: our standing estimate of how far a fix can be wrong.
+DEFAULT_ASSOCIATION_SLACK_M = 150.0
 
 #: Below this, two fixes are the same place and the bearing between them is
 #: noise rather than a course. 15 m is five seconds of travel at 3 m/s.
@@ -100,12 +113,20 @@ class Sighting:
     ``t`` is the tick the sighting belongs to, in the transport's timebase.
     ``asset_id`` is kept so that a handoff is visible afterwards rather than
     inferred.
+
+    ``sync`` is how the frame this came from stood in time against the pose it
+    was projected with (:class:`~whiteout.types.PoseSync`), or ``None`` when
+    the source did not establish it. It is carried through rather than
+    inspected here: this module decides *when* to post, and the question of how
+    good a fix's geometry is belongs to whatever reads the fix. It reaches the
+    episode log on :class:`~whiteout.types.Contact`.
     """
 
     t: float
     lat_deg: float
     lon_deg: float
     asset_id: str
+    sync: PoseSync | None = None
 
 
 class TrackHold:
@@ -123,11 +144,16 @@ class TrackHold:
         *,
         post_interval_s: float = DEFAULT_POST_INTERVAL_S,
         coast_s: float = DEFAULT_COAST_S,
+        max_speed_mps: float = DEFAULT_MAX_SPEED_MPS,
+        association_slack_m: float = DEFAULT_ASSOCIATION_SLACK_M,
     ) -> None:
         self._name = name
         self._poster = poster
         self._post_interval_s = float(post_interval_s)
         self._coast_s = float(coast_s)
+        self._max_speed_mps = float(max_speed_mps)
+        self._association_slack_m = float(association_slack_m)
+        self._unassociated = 0
         self._last: Sighting | None = None
         self._history: list[Sighting] = []
         self._posted_t: float | None = None
@@ -161,6 +187,15 @@ class TrackHold:
     def holder(self) -> str | None:
         """Which asset supplied the most recent fix, if any."""
         return None if self._last is None else self._last.asset_id
+
+    @property
+    def unassociated(self) -> int:
+        """Sightings refused because the held thing could not have got there.
+
+        Rising steadily means the detector is producing scattered false
+        positives, which is worth seeing rather than silently absorbing.
+        """
+        return self._unassociated
 
     @property
     def posts(self) -> int:
@@ -210,11 +245,42 @@ class TrackHold:
         """
         if self._last is not None and sighting.t < self._last.t:
             return
+        if not self._could_have_got_there(sighting):
+            self._unassociated += 1
+            return
         self._last = sighting
         self._history.append(sighting)
         cutoff = sighting.t - _HISTORY_S
         self._history = [s for s in self._history if s.t >= cutoff]
         self._now = max(self._now, sighting.t)
+
+    def _could_have_got_there(self, sighting: Sighting) -> bool:
+        """Could the thing we are holding have reached this fix by now?
+
+        A sighting further from the current fix than the vessel could have
+        travelled since the last one is a **different object**, and taking it
+        teleports the track. Flown live before this existed, four unrelated
+        false positives were stitched into one track reporting 19.8 m/s — the
+        course between two of them, not a boat.
+
+        The allowance grows with the gap, so a long coast does not reject the
+        re-acquisition that ends it.
+
+        Two sightings are always accepted: the first, which has nothing to be
+        inconsistent with, and any sighting once the track is ``lost``. A lost
+        track has no position worth defending, and without that escape one bad
+        initial lock would poison the whole run with nothing able to recover.
+        """
+        last = self._last
+        if last is None or self.state == "lost":
+            return True
+        elapsed = max(0.0, sighting.t - last.t)
+        allowed = self._max_speed_mps * elapsed + self._association_slack_m
+        offset = geodetic_to_local(
+            GeoPoint(last.lat_deg, last.lon_deg),
+            GeoPoint(sighting.lat_deg, sighting.lon_deg),
+        )
+        return math.hypot(offset.east_m, offset.north_m) <= allowed
 
     def tick(self, t: float) -> bool:
         """Advance the clock to ``t`` and post if there is something new.

@@ -77,6 +77,13 @@ round:
    downstream has to re-check, and :meth:`VesselDetection.to_ground` cannot
    raise on a detection this module emitted.
 
+**One degradation is recorded rather than refused**, and it is the one that
+is not about the imagery: whether the frame and the pose it is projected with
+belonged to the same instant. It rides along as
+:attr:`VesselDetection.sync`, whose docstring argues why a skewed pose
+qualifies a detection instead of cancelling it, and where the refusal does
+live.
+
 **Where it stops working**, measured rather than guessed: very heavy floe
 cover, where the channel reads as a cracked sheet rather than as water with
 ice in it. The false-alarm rate climbs sharply there and no threshold in this
@@ -99,6 +106,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from whiteout.types import PoseSync
 from whiteout.vision.camera import CameraModel, VisionError
 from whiteout.vision.projection import (
     CameraPose,
@@ -285,6 +293,38 @@ class VesselDetection:
     :param ground_alt_m: the water plane's altitude in ``pose.alt_m``'s datum,
         as it was when this detection was admitted. Issue #76.
     :param max_range_m: the range bound that admitted it.
+    :param sync: whether ``pose`` and this frame belonged to one instant
+        (:class:`~whiteout.types.PoseSync`), or ``None`` when the caller did
+        not establish it. Carried, not recomputed: a :class:`CameraPose` has no
+        clock in it, so this is the one place the answer can be kept.
+
+    **An unsynchronised pose flags the detection; it does not refuse it.**
+    Both halves of that are deliberate.
+
+    Refusing here would be refusing the wrong thing. Skew does not make the
+    hull absent from the frame — the pixel evidence is exactly as good — it
+    makes the *place* wrong, by 5.5 m per quarter-second at the fixed-wing's
+    22 m/s. A ``None`` from this module means "no vessel, or too degraded a
+    frame to say", and every gate that produces one is a statement about the
+    imagery (the module docstring lists all five). Adding a sixth that is a
+    statement about the *telemetry* would let one adapter that never reports a
+    measurement time silence a whole camera — the arena's adapter is exactly
+    that adapter (it has not established the ``time_boot_ms`` offset, and
+    ``None`` is the correct thing for it to report) — and would throw away the
+    presence and the coverage along with the position.
+
+    Nor is flagging the soft option. ``sync`` is on the detection, in the
+    :class:`~whiteout.tracks.maintain.Sighting` it becomes and in the episode
+    log's :class:`~whiteout.types.Contact`, so no consumer can trust the fix
+    without having been told, and the viewer and the scorer can see which
+    fixes were assembled out of two different instants.
+
+    The refusal belongs one seam further on, where a pixel becomes a lat/lon
+    somebody is scored on: :meth:`whiteout.vision.sightings.VisionSightings.
+    _sight` drops a ``telemetry_stale`` pair, because there the skew is
+    *measured* and exceeds a bound the operator set. What is merely unknown is
+    carried forward and labelled, because refusing the unknown would make the
+    fleet blind in the arena we are actually flying in.
     """
 
     asset_id: str
@@ -302,6 +342,7 @@ class VesselDetection:
     pose: CameraPose
     ground_alt_m: float
     max_range_m: float
+    sync: PoseSync | None = None
 
     def to_ground(self) -> GeoPoint:
         """Project this detection onto the water plane.
@@ -630,6 +671,7 @@ def detect_vessel(
     t: float = 0.0,
     ground_alt_m: float = 0.0,
     params: DetectorParams = DEFAULT_PARAMS,
+    sync: PoseSync | None = None,
 ) -> VesselDetection | None:
     """Return the shadow vessel's pixel in this frame, or ``None``.
 
@@ -648,6 +690,12 @@ def detect_vessel(
         this is a parameter with the same meaning and the same default as
         :func:`~whiteout.vision.projection.project_pixel_to_ground`'s.
     :param params: the thresholds; see :class:`DetectorParams`.
+    :param sync: how ``pose`` and this frame stood in time, from
+        :meth:`whiteout.types.PoseSync.for_frame`. Stamped onto the detection
+        and used for nothing else here: it can only ever *qualify* a detection,
+        never gate one, and :class:`VesselDetection` argues why. ``None`` — the
+        default — says the caller did not establish it, which is what a
+        synthetic frame and a fixture recording have to say.
     :returns: a :class:`VesselDetection`, or ``None`` when the frame holds no
         vessel, when it is too degraded to say, or when the best candidate is
         somewhere the geometry says a vessel cannot be.
@@ -759,6 +807,7 @@ def detect_vessel(
         pose=pose,
         ground_alt_m=float(ground_alt_m),
         max_range_m=float(max_range_m),
+        sync=sync,
     )
     try:
         detection.to_ground()

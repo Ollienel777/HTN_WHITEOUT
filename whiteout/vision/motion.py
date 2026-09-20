@@ -59,7 +59,7 @@ from typing import Protocol
 
 from whiteout.geo import GeoPoint, geodetic_to_local
 from whiteout.tracks.maintain import Sighting
-from whiteout.types import WorldObservation
+from whiteout.types import SightingRefusal, WorldObservation
 
 __all__ = ["DEFAULT_MOTION_PARAMS", "MotionGate", "MotionParams", "Sightable"]
 
@@ -151,6 +151,25 @@ class MotionGate:
 
     It is a :class:`~whiteout.coordinate.SightingSource` itself, so it drops
     in wherever one goes and the run loop does not know it is there.
+
+    **Transparency has to include what the wrapped source refused.** The run
+    loop reads :meth:`refusals` to record why a camera contributed nothing
+    (:class:`~whiteout.types.SightingRefusal`), and a decorator that answered
+    only ``sightings`` would swallow them: composed as
+    ``MotionGate(VisionSightings(...))`` — which is where the camera path is
+    going — the episode log would carry no refusals at all, the viewer's note
+    would never render, and a camera dark for a reason we know would read as an
+    empty sea again. Nothing would fail, which is what made it worth a method
+    rather than an assumption.
+
+    **The gate's own rejections are not refusals, yet.** A candidate dropped
+    for not moving is a different kind of "no" from a pose that could not be
+    synchronised: it is a judgement about the world rather than about our
+    telemetry, and :class:`~whiteout.types.SightingRefusal` carries a
+    ``PoseSync`` as its reason, which cannot express "it did not move".
+    :attr:`rejected` counts them and nothing writes that to the log; giving
+    them the same visibility needs a reason type that is not a ``PoseSync``,
+    and that is a follow-up rather than a widening of this one.
     """
 
     source: Sightable
@@ -202,6 +221,18 @@ class MotionGate:
             if self._believable(candidate):
                 passed.append(sighting)
         return tuple(passed)
+
+    def refusals(self) -> tuple[SightingRefusal, ...]:
+        """What the wrapped source declined this tick, passed straight through.
+
+        Read off the source rather than required of it, because
+        :class:`Sightable` is deliberately one method: this gate wraps anything
+        that reports sightings, including sources with nothing to refuse.
+        """
+        refusals = getattr(self.source, "refusals", None)
+        if not callable(refusals):
+            return ()
+        return tuple(refusals())
 
     def _associate(self, sighting: Sighting) -> _Candidate | None:
         """The open candidate this sighting belongs to, or ``None`` for a new one."""
