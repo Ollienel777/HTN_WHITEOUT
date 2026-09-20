@@ -154,3 +154,17 @@ __all__ = [
     "write_fixtures",
     "write_pgm",
 ]
+
+from whiteout.vision.sightings import (  # noqa: E402
+    ARENA_CAMERA_PORTS,
+    CameraFeed,
+    VisionSightings,
+    arena_feeds,
+)
+
+__all__ += [
+    "ARENA_CAMERA_PORTS",
+    "CameraFeed",
+    "VisionSightings",
+    "arena_feeds",
+]

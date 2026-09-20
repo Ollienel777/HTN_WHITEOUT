@@ -1,0 +1,272 @@
+"""Camera frames becoming sightings, without a camera.
+
+Issue #105. The live path needs four MJPEG sockets and a WireGuard network;
+what is tested here is the join — which assets reach the detector, which are
+skipped and why, and that a stalled camera cannot stall the fleet.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import numpy as np
+import pytest
+
+from whiteout.tracks.maintain import Sighting
+from whiteout.types import Pose, WorldObservation
+from whiteout.vision.camera import CAMERAS, VisionError
+from whiteout.vision.imagery import LumaFrame
+from whiteout.vision.projection import CameraPose
+from whiteout.vision.sightings import (
+    ARENA_CAMERA_PORTS,
+    CameraFeed,
+    VisionSightings,
+    arena_feeds,
+)
+
+TOWER = CAMERAS["tower"]
+
+
+def _pose(asset_id: str, *, alt: float = 120.0, attitude: bool = True) -> Pose:
+    return Pose(
+        asset_id=asset_id,
+        cls="tower",
+        t=1.0,
+        lat=71.9950,
+        lon=-94.8700,
+        z=alt,
+        heading=90.0,
+        speed=0.0,
+        energy_used=0.0,
+        pitch=-10.0 if attitude else None,
+        roll=0.0 if attitude else None,
+    )
+
+
+def _frame(seq: int = 0) -> LumaFrame:
+    return LumaFrame(
+        asset_id="tower-1",
+        camera=TOWER,
+        seq=seq,
+        t=0.0,
+        luma=np.full((TOWER.height, TOWER.width), 60, dtype=np.uint8),
+    )
+
+
+class _StubFeed:
+    """A feed that hands back whatever it was given."""
+
+    def __init__(self, asset_id: str, frame: LumaFrame | None) -> None:
+        self.asset_id = asset_id
+        self._frame = frame
+
+    def latest(self) -> LumaFrame | None:
+        return self._frame
+
+    def open(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+def _observation(poses: tuple[Pose, ...]) -> WorldObservation:
+    return WorldObservation(t=1.0, poses=poses, reports=())
+
+
+# -- the roster --------------------------------------------------------------
+
+
+def test_the_published_camera_ports_are_the_arena_s() -> None:
+    assert ARENA_CAMERA_PORTS == {
+        "quadcopter": 8600,
+        "fixed-wing": 8610,
+        "tower-1": 8630,
+        "tower-2": 8640,
+    }
+
+
+def test_feeds_are_built_from_a_configured_host_never_a_constant() -> None:
+    """The arena's address is handed out per team (#63)."""
+    feeds = arena_feeds("10.0.0.9")
+    assert {f.asset_id for f in feeds} == set(ARENA_CAMERA_PORTS)
+    assert all("10.0.0.9" in f._source for f in feeds)
+
+
+def test_an_asset_with_no_camera_is_skipped_not_invented() -> None:
+    assert arena_feeds("10.0.0.9", assets=("rover",)) == ()
+
+
+# -- what is skipped, and why ------------------------------------------------
+
+
+def test_an_asset_with_no_pose_contributes_nothing() -> None:
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation(())) == ()
+
+
+def test_an_asset_with_no_frame_yet_contributes_nothing() -> None:
+    """A camera that has not produced a frame is silence, not a fault."""
+    source = VisionSightings(feeds=(_StubFeed("tower-1", None),))
+    assert source.sightings(_observation((_pose("tower-1"),))) == ()
+
+
+def test_without_pitch_and_roll_there_is_no_sighting() -> None:
+    """Projection takes three angles, and guessing "level" is a measurement.
+
+    A `Pose` whose pitch and roll are `None` says the transport does not know
+    them; inventing zeros would put the projected point somewhere confidently
+    wrong, and accuracy is scored.
+    """
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    poses = (_pose("tower-1", attitude=False),)
+    assert source.sightings(_observation(poses)) == ()
+
+
+def test_a_camera_at_the_water_plane_is_skipped_rather_than_raising() -> None:
+    """The detector refuses it; the run must not end because of it.
+
+    This is the failure that hid behind ``relative_alt``: every stationary
+    asset reported about zero height, so the towers were discarded silently.
+    """
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation((_pose("tower-1", alt=0.0),))) == ()
+
+
+# -- what a detection becomes ------------------------------------------------
+
+
+def test_a_detection_becomes_a_sighting_with_a_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self):
+            from whiteout.geo import GeoPoint
+
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    (found,) = source.sightings(_observation((_pose("tower-1"),)))
+    assert isinstance(found, Sighting)
+    assert found.asset_id == "tower-1"
+    assert found.lat_deg == pytest.approx(71.9965)
+    assert found.t == 1.0, "stamped with the tick, not the frame"
+
+
+def test_no_detection_is_no_sighting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from whiteout.vision import sightings as module
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: None)
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation((_pose("tower-1"),))) == ()
+
+
+def test_a_malformed_frame_does_not_end_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whiteout.vision import sightings as module
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise VisionError("frame is the wrong shape")
+
+    monkeypatch.setattr(module, "detect_vessel", _boom)
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation((_pose("tower-1"),))) == ()
+
+
+def test_the_pose_handed_to_the_detector_carries_all_three_angles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whiteout.vision import sightings as module
+
+    seen: list[CameraPose] = []
+
+    def _capture(_luma, _camera, pose, **_k):
+        seen.append(pose)
+        return None
+
+    monkeypatch.setattr(module, "detect_vessel", _capture)
+    VisionSightings(feeds=(_StubFeed("tower-1", _frame()),)).sightings(
+        _observation((_pose("tower-1"),))
+    )
+    (camera_pose,) = seen
+    assert camera_pose.yaw_deg == pytest.approx(90.0)
+    assert camera_pose.pitch_deg == pytest.approx(-10.0)
+    assert camera_pose.roll_deg == pytest.approx(0.0)
+
+
+# -- a stalled camera cannot stall the fleet ---------------------------------
+
+
+def test_latest_never_blocks_on_a_camera_that_has_stopped() -> None:
+    """The control loop must run at tick rate whatever a socket is doing.
+
+    Four cameras read inside the tick would put the fleet at the mercy of
+    four sockets — the same failure the tracks poster refuses to have.
+    """
+    feed = CameraFeed("tower-1", "http://127.0.0.1:1/stream", TOWER)
+    feed.open()
+    started = time.monotonic()
+    for _ in range(50):
+        feed.latest()
+    elapsed = time.monotonic() - started
+    feed.close()
+    assert elapsed < 0.2
+
+
+def test_a_feed_that_dies_records_why_rather_than_raising() -> None:
+    """One camera failing must not take the fleet down with it."""
+    feed = CameraFeed("tower-1", "http://127.0.0.1:1/stream", TOWER)
+    feed.open()
+    deadline = time.monotonic() + 5.0
+    while feed.error is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    feed.close()
+    assert feed.error is not None
+    assert feed.frames_seen == 0
+
+
+def test_a_feed_keeps_only_the_newest_frame() -> None:
+    feed = CameraFeed("tower-1", "unused", TOWER)
+    for seq in range(5):
+        with feed._lock:
+            feed._latest = _frame(seq)
+            feed._frames += 1
+    latest = feed.latest()
+    assert latest is not None
+    assert latest.seq == 4, "a backlog is stale by definition"
+    assert feed.frames_seen == 5
+
+
+def test_sightings_are_independent_across_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One camera seeing nothing must not suppress another that does."""
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self):
+            return GeoPoint(71.9965, -94.8448)
+
+    calls = {"n": 0}
+
+    def _every_other(*_a: object, **_k: object):
+        calls["n"] += 1
+        return _Detection() if calls["n"] % 2 == 0 else None
+
+    monkeypatch.setattr(module, "detect_vessel", _every_other)
+    feeds = (_StubFeed("tower-1", _frame()), _StubFeed("tower-2", _frame()))
+    poses = (_pose("tower-1"), _pose("tower-2"))
+    found = VisionSightings(feeds=feeds).sightings(_observation(poses))
+    assert [f.asset_id for f in found] == ["tower-2"]
+
+
+def test_threads_do_not_outlive_a_closed_source() -> None:
+    source = VisionSightings(feeds=arena_feeds("127.0.0.1"))
+    before = threading.active_count()
+    source.open()
+    source.close()
+    assert threading.active_count() <= before + 1

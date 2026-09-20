@@ -175,7 +175,8 @@ def _wired(cls: str = "quad") -> tuple[ArenaTransport, Any]:
         "GLOBAL_POSITION_INT",
         lat=719958319,
         lon=-948393259,
-        relative_alt=60000,
+        alt=60000,
+        relative_alt=0,
         vx=300,
         vy=400,
         hdg=9000,
@@ -385,3 +386,30 @@ def test_an_arena_pose_survives_the_episode_log_round_trip() -> None:
     transport, _ = _wired()
     (pose,) = transport.observe().poses
     assert Pose.from_dict(pose.to_dict()) == pose
+
+
+def test_altitude_is_msl_and_not_relative_to_the_vehicle_s_own_home() -> None:
+    """#76, answered by measurement against the arena.
+
+    ``relative_alt`` is height above the vehicle's **own home**, so every
+    asset that has not moved reports about zero — including a tower standing
+    on a 227 m cliff. The detector refuses a camera at or below the water
+    plane, so on ``relative_alt`` both towers were discarded silently every
+    tick and the free, permanent sensors could never produce a sighting.
+
+    The arena's water plane is ``z = 0`` in the world and MSL matches the
+    rendered heights to a decimetre, so MSL *is* height above the water here.
+    """
+    transport, link = _wired("tower")
+    link.position = _Message(
+        "GLOBAL_POSITION_INT",
+        lat=719806495,
+        lon=-948538272,
+        alt=int(116.8 * 1000),  # GLOBAL_POSITION_INT.alt is millimetres
+        relative_alt=0,
+        vx=0,
+        vy=0,
+        hdg=0,
+    )
+    (pose,) = transport.observe().poses
+    assert pose.z == pytest.approx(116.8)

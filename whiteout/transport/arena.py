@@ -377,7 +377,19 @@ class ArenaTransport:
             t=t,
             lat=float(position.lat) / 1e7,
             lon=float(position.lon) / 1e7,
-            z=float(position.relative_alt) / 1000.0,
+            # MSL, not relative_alt (#76, answered by measurement).
+            # relative_alt is height above the vehicle's OWN home, so every
+            # asset that has not moved reports about zero - including a tower
+            # standing on a 227 m cliff. The detector refuses a camera at or
+            # below the water plane, so on relative_alt both towers were
+            # silently discarded every tick and the free, permanent sensors
+            # could never produce a sighting.
+            #
+            # The arena's water plane is z = 0 in the world, and MSL alt
+            # matches the rendered heights to a decimetre: quadcopter 75.4
+            # against gzweb's 75.5, tower-1 116.8 against 116.8, tower-2
+            # 226.5 against 226.6. So MSL *is* height above the water here.
+            z=float(position.alt) / 1000.0,
             heading=heading,
             speed=speed,
             energy_used=0.0,
