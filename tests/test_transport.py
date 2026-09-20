@@ -1211,3 +1211,55 @@ def test_the_kinematic_transport_opens_no_socket(monkeypatch: pytest.MonkeyPatch
     transport.connect()
     transport.command(FleetIntent(t=transport.observe().t, intents=()))
     transport.close()
+
+
+def test_heading_is_degrees_because_that_is_what_a_camera_pose_reads() -> None:
+    """The unit the arena reports, and the one a projection consumes.
+
+    ``whiteout/transport/arena.py`` converts ``ATTITUDE.yaw`` out of radians
+    and divides ``GLOBAL_POSITION_INT.hdg`` by 100, so every pose that reaches
+    the log from the real fleet carries degrees. ``CameraPose`` reads the same
+    field as ``yaw_deg``. A fake reporting radians is not merely inconsistent
+    — it points every camera 57 times too little off North, silently, and the
+    non-detection update then erodes belief from water nobody looked at.
+
+    Asserting the *range* rather than a value: a heading in radians cannot
+    exceed 2 pi, so a fleet spanning more than that is degrees by arithmetic
+    and not by convention.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = transport.observe()
+    assert all(0.0 <= pose.heading < 360.0 for pose in start.poses)
+
+    east_of = local_to_geodetic(
+        ARENA_ORIGIN,
+        LocalPoint(
+            geodetic_to_local(ARENA_ORIGIN, GeoPoint(start.poses[0].lat, start.poses[0].lon)).east_m
+            + 5_000.0,
+            geodetic_to_local(
+                ARENA_ORIGIN, GeoPoint(start.poses[0].lat, start.poses[0].lon)
+            ).north_m,
+        ),
+    )
+    transport.command(
+        FleetIntent(
+            t=0.0,
+            intents=(
+                WaypointIntent(
+                    asset_id="quadcopter",
+                    t=0.0,
+                    target_lat=east_of.lat_deg,
+                    target_lon=east_of.lon_deg,
+                    target_z=40.0,
+                    speed=0.0,
+                    reason="sweep",
+                    task_id="east",
+                ),
+            ),
+        )
+    )
+    flying = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    # Due east of where it started, so due east is where it should point.
+    assert flying.heading == pytest.approx(90.0, abs=1.0)
+    transport.close()

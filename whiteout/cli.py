@@ -33,6 +33,7 @@ from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
 from whiteout.types import (
     BeliefDigest,
+    BeliefFrame,
     Contact,
     EpisodeRecord,
     FleetIntent,
@@ -158,6 +159,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     digest = _placeholder_digest(observation.t)
                     contacts: tuple[Contact, ...] = ()
                     refusals: tuple[SightingRefusal, ...] = ()
+                    field: BeliefFrame | None = None
                 else:
                     outcome = coordinator.tick(observation)
                     intent, digest, contacts, refusals = (
@@ -166,6 +168,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         outcome.contacts,
                         outcome.refusals,
                     )
+                    field = outcome.field
                 if not args.dry_run:
                     transport.command(intent)
                 records.append(
@@ -178,6 +181,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         contacts=contacts,
                         truth=Truth(t=observation.t, targets=()),
                         refusals=refusals,
+                        belief_field=field,
                     )
                 )
         finally:

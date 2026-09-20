@@ -22,8 +22,9 @@ The format:
 - Every line carries ``schema_version``. A log whose lines disagree with
   :data:`SCHEMA_VERSION` is rejected rather than guessed at.
 - A record's clocks agree: ``observation.t``, ``intent.t``,
-  ``belief_digest.t``, ``truth.t`` and every ``refusals[i].t`` equal the
-  record's ``t``, and ``t`` does not run backwards down the file.
+  ``belief_digest.t``, ``truth.t``, ``belief_field.t`` where there is one, and
+  every ``refusals[i].t`` equal the record's ``t``, and ``t`` does not run
+  backwards down the file.
 
 Writing is atomic: records go to a sibling temp file that replaces the
 destination only once every record has been written. A rejected record can
@@ -90,7 +91,14 @@ __all__ = [
 #: ``EpisodeRecord.refusals`` carries the frames that join refused, so that a
 #: camera which stopped contributing says why instead of reading as an empty
 #: sea (:class:`~whiteout.types.SightingRefusal`).
-SCHEMA_VERSION = 5
+#:
+#: 6 — ``EpisodeRecord.belief_field``, a required record key
+#: (:class:`~whiteout.types.BeliefFrame`). The belief field's per-cell
+#: probability now reaches the log, because the viewer reads the log and
+#: nothing else, and a field it cannot see is a field nobody can debug. The
+#: value is nullable and the key is not: a run with no belief behind it says
+#: ``null``, and a writer that forgot the field is a rejected record.
+SCHEMA_VERSION = 6
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")
@@ -142,6 +150,11 @@ def _clock_fault(record: EpisodeRecord) -> str | None:
     for index, refusal in enumerate(record.refusals):
         if refusal.t != record.t:
             return f"record.refusals[{index}].t is {refusal.t!r} but record.t is {record.t!r}"
+    # Nullable, so it cannot join `_CLOCK_MEMBERS`: a run with no belief field
+    # behind it carries `None` here for the whole episode.
+    field = record.belief_field
+    if field is not None and field.t != record.t:
+        return f"record.belief_field.t is {field.t!r} but record.t is {record.t!r}"
     return None
 
 
@@ -301,6 +314,21 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
     clean through :func:`read_episode_log` and score as an episode with no
     ticks.
 
+    **The belief geometry has to ride the first frame that carries a field.**
+    :class:`~whiteout.types.BeliefFrame` writes the cell lattice once, on the
+    episode's first frame, because restating 11.8 kB on every tick would cost
+    4.7 MB to say the same thing 400 times (#124). That makes the log's
+    drawability a property of the *sequence* rather than of any one line, so
+    it is checked here, beside ``t``, rather than in :func:`validate_line`,
+    which sees one line at a time and cannot know it is looking at the first.
+
+    Without the check the failure is silent and total: ``tail -n +2`` over a
+    committed episode — or any slice, rotation or concatenation that drops the
+    opening record — yields a log in which every line validates, every frame
+    decodes to the right number of bytes, and nothing can be drawn, because
+    no cell has a position any more. A viewer given one renders an empty
+    canvas and a scorer never notices.
+
     The file is read and closed before the first record is yielded, so a
     caller that peeks at one tick and stops does not hold the handle open —
     on Windows that handle blocks the next run from rewriting the log.
@@ -310,6 +338,7 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
         lines = handle.readlines()
     previous: float | None = None
     yielded = 0
+    geometry_seen = False
     for number, line in enumerate(lines, start=1):
         if line.strip("\r\n") == "":
             continue
@@ -319,6 +348,16 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
                 number,
                 f"t {record.t!r} is before the previous line's {previous!r}",
             )
+        if record.belief_field is not None:
+            if not geometry_seen and record.belief_field.geometry is None:
+                raise EpisodeLogError(
+                    number,
+                    "the first belief_field in the log carries no geometry, so its cells "
+                    "have no positions and the field cannot be drawn. The lattice is "
+                    "written once, on the episode's first frame, so this is what a log "
+                    "truncated at the front looks like",
+                )
+            geometry_seen = True
         previous = record.t
         yielded += 1
         yield record

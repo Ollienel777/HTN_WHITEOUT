@@ -32,7 +32,7 @@
   /* Kept in step with whiteout.log.SCHEMA_VERSION by a test: the viewer must
    * reject a log this build cannot read, with the same version in the message
    * the Python reader would have printed. */
-  var SCHEMA_VERSION = 5;
+  var SCHEMA_VERSION = 6;
 
   /* Relative, so it resolves the same from `whiteout serve` and from file://
    * (where the fetch is blocked, and the file picker takes over). */
@@ -47,7 +47,7 @@
 
   var RECORD_FIELDS = [
     "schema_version", "t", "observation", "intent", "belief_digest",
-    "contacts", "truth", "refusals"
+    "contacts", "truth", "refusals", "belief_field"
   ];
 
   /* The em dash the shell shows wherever the episode log does not carry a
