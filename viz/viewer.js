@@ -38,11 +38,20 @@
    * (where the fetch is blocked, and the file picker takes over). */
   var BUNDLED_EPISODE = "../fixtures/episodes/demo.jsonl";
 
+  /* The axes an episode log can answer for, and the order `whiteout score`
+   * prints them in. Pinned to `whiteout.score.AXES` by a test.
+   *
+   * There is deliberately no `collaboration` dial and no `autonomy` one.
+   * `ARENA.md` §5 names seven criteria, but those two are read off the
+   * fleet's behaviour and the explanation rather than off a log — the scorer
+   * says so and refuses to invent them, and a dial for a number that can
+   * never arrive is a dial that reads as broken for the whole run. */
   var AXES = [
     { key: "coverage", label: "coverage" },
-    { key: "collaboration", label: "collaboration" },
-    { key: "efficiency", label: "efficiency" },
-    { key: "tracking_accuracy", label: "accuracy" }
+    { key: "detection_speed", label: "detection" },
+    { key: "tracking_duration", label: "tracking" },
+    { key: "search_efficiency", label: "efficiency" },
+    { key: "accuracy", label: "accuracy" }
   ];
 
   var RECORD_FIELDS = [
