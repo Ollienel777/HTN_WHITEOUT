@@ -348,22 +348,32 @@ def test_the_counts_floor_does_not_cost_a_hull_that_is_really_there() -> None:
     bracketing a value the code no longer held, so it reported a blindfold
     where there was a working gate. Against the parameter it keeps asking the
     question it was written to ask, at whatever the floor becomes next.
+
+    **The rungs are 0.5x, 0.75x, 1.5x and 2x, and the gap in the middle is
+    deliberate.** ``vessel_contrast`` is not the quantity the gate reads: the
+    gate compares ``deepest * sigma`` against the floor, and a hull is diluted
+    across the response box, so measured depth comes out at about 0.8x the
+    contrast asked for. A rung at 1.25x contrast is therefore only about 1.0x
+    in the gated units — at the floor of 12 it clears by 0.2 counts, and at a
+    floor of 10 it measures 9.77 and does not clear at all. Swept over floors
+    from 4 to 30, ``(0.5, 0.75, 1.25, 1.5)`` fails at 10 and this ladder does
+    not. Bracketing a gate wants margin on **both** sides of it, and the
+    conversion factor between what this test sets and what the gate reads is
+    exactly the sort of thing that moves under an unrelated change.
     """
     floor = DEFAULT_PARAMS.min_depth_counts
-    ladder = (floor * 0.5, floor * 0.75, floor * 1.25, floor * 1.5)
-    outcomes = {
-        contrast: detect_on(
-            replace(NO_NOISE, vessel_contrast=contrast), 5, vessel_px=(320.0, 260.0)
-        )[0]
+    ladder = (floor * 0.5, floor * 0.75, floor * 1.5, floor * 2.0)
+    expected = (False, False, True, True)
+    # A list of pairs rather than two dicts: keyed on the contrast, a floor
+    # that made two rungs equal — 0.0 is one, and `DetectorParams` permits it —
+    # would collapse both sides of the comparison alike, and the guard would
+    # pass while asserting almost nothing.
+    outcomes = [
+        detect_on(replace(NO_NOISE, vessel_contrast=contrast), 5, vessel_px=(320.0, 260.0))[0]
         is not None
         for contrast in ladder
-    }
-    assert outcomes == {
-        ladder[0]: False,
-        ladder[1]: False,
-        ladder[2]: True,
-        ladder[3]: True,
-    }, outcomes
+    ]
+    assert outcomes == list(expected), dict(zip(ladder, outcomes, strict=True))
 
 
 def test_confidence_rises_with_contrast() -> None:

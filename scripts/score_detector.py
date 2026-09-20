@@ -413,15 +413,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             "It shows that a number measured uncompressed does not survive compression. It\n"
             "does not say what the arena's own numbers are."
         )
-    else:
+    elif args.synthetic:
         # #90: without this line the headline false-positive rate reads as a
         # statement about the detector, and it is a statement about
         # *uncompressed* frames. The arena serves JPEG, and the same corpus
         # quantised moved the rate on every seed measured.
+        #
+        # Keyed on `--synthetic` and not on "no `--jpeg`", because those are
+        # different questions. The generator is the only source here that is
+        # known to be uncompressed; a fixture directory is whatever was
+        # written into it, and the one kind of fixture that matters most —
+        # a recording of the arena (#63) — is JPEG that must NOT be run
+        # through `--jpeg` again. Claiming "uncompressed" on that branch
+        # would disclaim the only numbers that were ever about frames the run
+        # will really see.
         print(
             "THESE FRAMES ARE UNCOMPRESSED, and the arena publishes JPEG. Every rate below\n"
             "is a number about frames the run will never see. Re-run with --jpeg 75 for the\n"
             "same corpus through a stand-in codec; issue #90 has what that does."
+        )
+    else:
+        print(
+            "WHETHER THESE FRAMES ARE COMPRESSED IS A PROPERTY OF THE DIRECTORY, and this\n"
+            "script cannot see it: a PGM written by --write-fixtures is uncompressed, and a\n"
+            "PGM decoded from an arena stream already carries JPEG quantisation. If these\n"
+            "came from the arena, do NOT add --jpeg — that would quantise them twice. If\n"
+            "they came from the generator, --jpeg 75 is the stand-in; issue #90 has what it\n"
+            "does."
         )
     print("=" * 72)
 
