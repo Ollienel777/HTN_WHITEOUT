@@ -96,20 +96,22 @@ DEFAULT_SPEED_MPS = 3.0
 DEFAULT_FIX_SIGMA_M = 60.0
 
 
-#: Metres per degree of latitude at the strait, and how much shorter a degree
-#: of longitude is there. Derived through :mod:`whiteout.geo`, the tree's only
-#: converter, rather than spelt out: at 72 N a degree of longitude is under a
-#: third of a degree of latitude, so a fix error that ignored that would be
-#: three times too wide East-West.
+#: Metres per degree, on each axis, at the strait. Derived through
+#: :mod:`whiteout.geo`, the tree's only converter, rather than spelt out.
+#:
+#: **Two constants, one per axis, and each offset is divided by its own.** A
+#: single ratio between them is the shape this got wrong once: at 72 N a
+#: degree of longitude is under a third of a degree of latitude, so a ratio
+#: applied the wrong way round misses by its square, and a 60 m error came
+#: out as 5.7 m East-West -- along the channel, which is the axis a track's
+#: course is measured over. Dividing metres by metres-per-degree on the axis
+#: the offset is on cannot be got backwards.
 _M_PER_DEG_LAT = geodetic_to_local(
     ARENA_ORIGIN, GeoPoint(ARENA_ORIGIN.lat_deg + 1.0, ARENA_ORIGIN.lon_deg)
 ).north_m
-_LON_PER_LAT = (
-    _M_PER_DEG_LAT
-    / geodetic_to_local(
-        ARENA_ORIGIN, GeoPoint(ARENA_ORIGIN.lat_deg, ARENA_ORIGIN.lon_deg + 1.0)
-    ).east_m
-)
+_M_PER_DEG_LON = geodetic_to_local(
+    ARENA_ORIGIN, GeoPoint(ARENA_ORIGIN.lat_deg, ARENA_ORIGIN.lon_deg + 1.0)
+).east_m
 
 
 @dataclass
@@ -246,8 +248,8 @@ class ShadowSightings:
             found.append(
                 Sighting(
                     t=observation.t,
-                    lat_deg=truth.lat_deg + self._offset(),
-                    lon_deg=truth.lon_deg + self._offset() / _LON_PER_LAT,
+                    lat_deg=truth.lat_deg + self._offset(_M_PER_DEG_LAT),
+                    lon_deg=truth.lon_deg + self._offset(_M_PER_DEG_LON),
                     asset_id=pose.asset_id,
                 )
             )
@@ -263,6 +265,10 @@ class ShadowSightings:
         """
         return ()
 
-    def _offset(self) -> float:
-        """One axis of the fix error, in degrees of latitude."""
-        return float(self._rng.normal(0.0, self.fix_sigma_m)) / _M_PER_DEG_LAT
+    def _offset(self, m_per_deg: float) -> float:
+        """One axis of the fix error, in degrees of the axis it is on.
+
+        ``m_per_deg`` is that axis's own scale, so the caller cannot apply a
+        latitude figure to a longitude and be out by the ratio between them.
+        """
+        return float(self._rng.normal(0.0, self.fix_sigma_m)) / m_per_deg

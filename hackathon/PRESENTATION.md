@@ -118,6 +118,36 @@ is just the next fix under the same name — no gap, no re-created track, no
 protocol to get wrong. Show `holder` changing from `tower-1` to `fixed-wing`
 to `quadcopter` while one track's `fixes` count climbs without interruption.
 
+### The tower numbers, and why they belong in beat 2
+
+If beat 4 runs short, **move this into beat 2** — it is a "how we thought about
+the problem" beat, not a collaboration one, and it is the only decision in the
+run that was ours to make.
+
+Tower lat/lon is the one `.env` edit Dominion sanctioned: the aircraft start
+near-optimal and should be left alone. Stock placement puts the two towers
+1,656 m and 1,716 m off a channel whose half-width is about 690 m, so they
+cover almost nothing.
+
+| | tower-1 | tower-2 | 
+|---|---|---|
+| **as shipped** | 0.0% | 1.2% |
+| **re-sited** | **27.8%** | **19.4%** |
+
+Two free, permanent sensors went from contributing nothing to covering a
+quarter of the channel each, for two lines of configuration.
+
+**The part worth saying out loud:** our own siting tool had no terrain model.
+It scored every candidate at the height the towers happen to stand at now — so
+its own recommendation put a tower at **0.0 m**, the waterline, where the
+detector refuses the frame outright because the camera is not above the water
+plane. We caught it by reading ground elevation out of the arena's heightmap
+and re-scoring. The tool's warning about this was right there in its output and
+both published recommendations walked straight into it.
+
+That is a better story than the coverage number: a measured decision, and a
+measurement that caught its own tool.
+
 ---
 
 ## Beat 5 — what is autonomous, and what is not (3:50–4:20)
