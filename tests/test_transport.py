@@ -9,6 +9,7 @@ an adapter at hour 25, and by then there are three adapters.
 from __future__ import annotations
 
 import ast
+import math
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
+from whiteout.belief.geometry import DEFAULT_STRAIT, ChannelPoint
+from whiteout.geo import ARENA_ORIGIN, GeoPoint, LocalPoint, geodetic_to_local, local_to_geodetic
 from whiteout.log import SCHEMA_VERSION, read_episode_log, validate_episode_log
+from whiteout.policy.search import AssetRole
 from whiteout.transport import (
     DEFAULT_TRANSPORT,
     IMPLEMENTED_TRANSPORTS,
@@ -30,7 +34,10 @@ from whiteout.transport import (
     create_transport,
     selected_transport_name,
 )
+from whiteout.transport.arena import DEFAULT_ROSTER
+from whiteout.transport.kinematic import _TOWER_STATIONS, FLEET
 from whiteout.types import VEHICLE_CLASSES, FleetIntent, WaypointIntent
+from whiteout.vision.camera import CAMERAS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT_PACKAGE = REPO_ROOT / "whiteout" / "transport"
@@ -564,8 +571,37 @@ def test_the_written_log_carries_the_fleet_and_this_schema_version(tmp_path: Pat
     assert len(records) == 10
     for record in records:
         assert record.schema_version == SCHEMA_VERSION
-        assert {pose.cls for pose in record.observation.poses} == set(VEHICLE_CLASSES)
+        assert {pose.asset_id for pose in record.observation.poses} == {
+            asset.asset_id for asset in FLEET
+        }
     assert [record.t for record in records] == sorted(record.t for record in records)
+
+
+def test_the_default_run_produces_a_coordinated_episode(tmp_path: Path) -> None:
+    """The regression that matters more than any single assertion in this file.
+
+    ``run`` on the default transport used to log four parked assets, no
+    intents, and a 1x1 placeholder belief digest with zero mass — and it did
+    so while the belief field, the policy and the track hold were all merged
+    and green. Nothing failed, because nothing joined them. A run that goes
+    quiet again in that way must break a test, not a demo.
+    """
+    from whiteout.cli import main
+
+    out = tmp_path / "episode.jsonl"
+    assert main(["run", "--seed", "7", "--ticks", "60", "--out", str(out)]) == 0
+    records = read_episode_log(out)
+    last = records[-1]
+    assert last.belief_digest.grid_shape != (1, 1)
+    assert last.belief_digest.mass > 0.0
+    assert last.intent.intents, "the coordinator issued nothing all episode"
+    flown = {
+        pose.asset_id
+        for record in records
+        for pose in record.observation.poses
+        if pose.energy_used > 0.0
+    }
+    assert flown == {asset.asset_id for asset in FLEET if asset.mobile}
 
 
 def test_a_zero_tick_run_refuses_rather_than_writing_an_unreadable_log(tmp_path: Path) -> None:
@@ -582,16 +618,155 @@ def test_a_zero_tick_run_refuses_rather_than_writing_an_unreadable_log(tmp_path:
 # --------------------------------------------------------------------------
 
 
-def test_the_stub_reports_one_asset_of_every_vehicle_class() -> None:
+def test_the_fake_fleet_is_the_arena_fleet() -> None:
+    """#71: two towers, one quad, one fixed-wing, no rover — and the same names.
+
+    The ``asset_id``s are asserted against the arena adapter's own roster
+    rather than against a literal list, because the property that matters is
+    not which strings they are: it is that an episode recorded on the fake
+    and an episode recorded on the arena name the same four assets. A literal
+    here would keep passing while the two rosters drifted apart, which is the
+    one way this can go wrong without anybody noticing until the demo.
+    """
+    assert {asset.asset_id for asset in FLEET} == {link.asset_id for link in DEFAULT_ROSTER}
+    assert {asset.asset_id: asset.cls for asset in FLEET} == {
+        link.asset_id: link.cls for link in DEFAULT_ROSTER
+    }
+    classes = [asset.cls for asset in FLEET]
+    assert classes.count("tower") == 2
+    assert classes.count("quad") == 1
+    assert classes.count("fixedwing") == 1
+    assert "rover" not in classes
+    # Not `set(VEHICLE_CLASSES)`: the seam still speaks `rover`, because the
+    # class is a valid thing for a Pose to carry, and the arena simply has
+    # none. The old test asserted one asset per class and so pinned the fake
+    # to a fleet ARENA.md §3 contradicts.
+    assert "rover" in VEHICLE_CLASSES
+
+
+def test_each_tower_gets_its_own_station_whatever_the_fleet_order() -> None:
+    """The masts are numbered among themselves, not among the fleet.
+
+    The first version indexed ``_TOWER_STATIONS`` by the *fleet* position and
+    was correct only because the towers happen to be the third and fourth
+    entries. One more aircraft would have swapped both masts and their
+    bearings; a third tower would have stood on top of the first. Neither
+    would have failed anything — it would have shipped in a fixture.
+    """
     transport = KinematicTransport(seed=3)
     transport.connect()
-    observation = transport.observe()
-    assert {pose.cls for pose in observation.poses} == set(VEHICLE_CLASSES)
-    assert len({pose.asset_id for pose in observation.poses}) == len(observation.poses)
+    placed = {
+        pose.asset_id: (pose.lat, pose.lon)
+        for pose in transport.observe().poses
+        if pose.cls == "tower"
+    }
+    assert len(set(placed.values())) == len(placed), f"two masts share a spot: {placed}"
+    stations = {(lat, lon) for lat, lon, _ in _TOWER_STATIONS}
+    assert set(placed.values()) == stations
     transport.close()
 
 
-def test_the_stub_reports_static_poses_and_an_advancing_clock() -> None:
+def test_a_third_tower_refuses_rather_than_standing_on_the_first() -> None:
+    """Wrapping the station list would site two masts together, silently."""
+    transport = KinematicTransport(seed=3)
+    with pytest.raises(TransportError, match="has no station"):
+        transport._tower_station(len(_TOWER_STATIONS))
+
+
+def test_an_asset_flies_the_altitude_it_was_commanded() -> None:
+    """``target_z`` is an instruction, not decoration.
+
+    The policy searches at 120 m and holds a contact at 60 m, and #111's
+    stand-off argument is entirely about height. A transport that accepted a
+    commanded altitude and reported a different one wrote a command and a
+    contradicting measurement into the same record on every tick, which is
+    worse than not modelling altitude at all because it looks modelled.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    quad = next(asset for asset in FLEET if asset.asset_id == "quadcopter")
+    climbing = WaypointIntent(
+        asset_id="quadcopter",
+        t=0.0,
+        target_lat=start.lat,
+        target_lon=start.lon,
+        target_z=start.z + 60.0,
+        speed=0.0,
+        reason="sweep",
+        task_id="up",
+    )
+    transport.command(FleetIntent(t=0.0, intents=(climbing,)))
+    after = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    assert after.z == pytest.approx(start.z + quad.climb_mps)
+
+    descending = WaypointIntent(
+        asset_id="quadcopter",
+        t=1.0,
+        target_lat=start.lat,
+        target_lon=start.lon,
+        target_z=start.z,
+        speed=0.0,
+        reason="hold",
+        task_id="down",
+    )
+    transport.command(FleetIntent(t=1.0, intents=(descending,)))
+    back = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    assert back.z == pytest.approx(start.z), "an asset climbs but will not descend"
+    transport.close()
+
+
+def test_altitude_stops_at_the_commanded_height_rather_than_oscillating() -> None:
+    """The same arrival rule the horizontal axis has, and for the same reason."""
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = {pose.asset_id: pose for pose in transport.observe().poses}["fixed-wing"]
+    intent = WaypointIntent(
+        asset_id="fixed-wing",
+        t=0.0,
+        target_lat=start.lat,
+        target_lon=start.lon,
+        target_z=start.z + 0.5,
+        speed=0.0,
+        reason="sweep",
+        task_id="nudge",
+    )
+    for tick in range(4):
+        transport.command(FleetIntent(t=float(tick), intents=(intent,)))
+        pose = {p.asset_id: p for p in transport.observe().poses}["fixed-wing"]
+        assert pose.z == pytest.approx(start.z + 0.5), f"tick {tick}"
+    transport.close()
+
+
+def test_the_fixed_wing_is_the_faster_airframe_and_a_tower_is_immobile() -> None:
+    """``ARENA.md`` §3, as data rather than as physics.
+
+    The policy gives the fixed-wing the distant work; that is only correct if
+    it is actually the quicker of the two, and only this table says so.
+    """
+    by_id = {asset.asset_id: asset for asset in FLEET}
+    assert by_id["fixed-wing"].cruise_mps > by_id["quadcopter"].cruise_mps
+    assert all(asset.mobile for asset in FLEET if asset.cls != "tower")
+    assert not any(asset.mobile for asset in FLEET if asset.cls == "tower")
+    assert all(asset.camera in CAMERAS for asset in FLEET)
+
+
+def test_the_roster_is_published_so_a_coordinator_can_be_built() -> None:
+    """The property whose absence made every default run an empty episode.
+
+    ``whiteout/cli.py`` builds the policy's roles from ``transport.assets``
+    and runs no coordinator at all when a transport has none. Without this,
+    ``run`` logged a parked fleet with a 1x1 placeholder belief digest, and
+    every part above the seam was merged, tested and unreachable.
+    """
+    transport = KinematicTransport(seed=3)
+    assert transport.assets == FLEET
+    roles = tuple(AssetRole(asset.asset_id, asset.cls) for asset in transport.assets)
+    assert len(roles) == len(FLEET)
+
+
+def test_an_uncommanded_fleet_stays_where_it_was_put() -> None:
+    """No intent, no motion: the clock advances and nothing else does."""
     transport = KinematicTransport(seed=3, tick_seconds=0.5)
     transport.connect()
     first = transport.observe()
@@ -601,8 +776,95 @@ def test_the_stub_reports_static_poses_and_an_advancing_clock() -> None:
     assert [(pose.lat, pose.lon) for pose in first.poses] == [
         (pose.lat, pose.lon) for pose in second.poses
     ]
+    assert all(pose.speed == 0.0 for pose in second.poses)
     assert all(pose.t == first.t for pose in first.poses)
     assert all(pose.t == second.t for pose in second.poses)
+
+
+def test_a_commanded_asset_closes_on_its_waypoint_and_a_tower_does_not() -> None:
+    """The motion, and the one asset it must not apply to.
+
+    Distance is measured through ``whiteout.geo`` rather than in degrees,
+    because a degree of longitude at 72 N is about a third of a degree of
+    latitude and a test that compared the raw numbers would pass while the
+    asset flew the wrong way.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = {pose.asset_id: pose for pose in transport.observe().poses}
+    target = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=0.5 * DEFAULT_STRAIT.length_m, w_m=0.0))
+    transport.command(
+        FleetIntent(
+            t=0.0,
+            intents=tuple(
+                WaypointIntent(
+                    asset_id=asset.asset_id,
+                    t=0.0,
+                    target_lat=target[0],
+                    target_lon=target[1],
+                    target_z=asset.altitude_m,
+                    speed=0.0,
+                    reason="sweep",
+                    task_id=f"t-{asset.asset_id}",
+                )
+                for asset in FLEET
+            ),
+        )
+    )
+    after = {pose.asset_id: pose for pose in transport.observe().poses}
+
+    def gap(pose: object) -> float:
+        here = geodetic_to_local(ARENA_ORIGIN, GeoPoint(pose.lat, pose.lon))  # type: ignore[attr-defined]
+        there = geodetic_to_local(ARENA_ORIGIN, GeoPoint(target[0], target[1]))
+        return math.hypot(there.east_m - here.east_m, there.north_m - here.north_m)
+
+    for asset in FLEET:
+        moved = gap(start[asset.asset_id]) - gap(after[asset.asset_id])
+        if asset.mobile:
+            assert moved == pytest.approx(asset.cruise_mps, rel=1e-6), asset.asset_id
+            assert after[asset.asset_id].speed == pytest.approx(asset.cruise_mps)
+            assert after[asset.asset_id].energy_used > 0.0
+        else:
+            assert moved == 0.0, f"{asset.asset_id} was sent somewhere and went"
+            assert after[asset.asset_id].energy_used == 0.0
+    transport.close()
+
+
+def test_an_asset_stops_at_its_waypoint_rather_than_overshooting() -> None:
+    """A near waypoint is arrived at, not crossed and re-crossed for ever.
+
+    Overshoot would read on the canvas as a jitter and in the log as coverage
+    the asset never had, and it is the ordinary case: the policy re-tasks far
+    more often than an asset needs a full tick of travel.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    near = local_to_geodetic(
+        ARENA_ORIGIN,
+        LocalPoint(
+            geodetic_to_local(ARENA_ORIGIN, GeoPoint(start.lat, start.lon)).east_m + 1.0,
+            geodetic_to_local(ARENA_ORIGIN, GeoPoint(start.lat, start.lon)).north_m,
+        ),
+    )
+    intent = WaypointIntent(
+        asset_id="quadcopter",
+        t=0.0,
+        target_lat=near.lat_deg,
+        target_lon=near.lon_deg,
+        target_z=40.0,
+        speed=0.0,
+        reason="sweep",
+        task_id="near",
+    )
+    transport.command(FleetIntent(t=0.0, intents=(intent,)))
+    first = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    transport.command(FleetIntent(t=1.0, intents=(intent,)))
+    second = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    assert first.speed == pytest.approx(1.0)
+    assert (second.lat, second.lon) == (first.lat, first.lon)
+    assert second.speed == 0.0
+    transport.close()
 
 
 def test_the_stub_reports_no_measurement_time_unless_it_is_asked_to() -> None:
@@ -761,7 +1023,15 @@ def test_the_stub_is_a_pure_function_of_its_seed() -> None:
     assert first_observation(7) != first_observation(8)
 
 
-def test_the_stub_accepts_intents_without_acting_on_them() -> None:
+def test_an_intent_naming_an_asset_that_is_not_here_is_ignored() -> None:
+    """A command for an unknown asset moves nothing and raises nothing.
+
+    The old test asserted the *fleet* did not move on any intent, which was
+    this transport's whole defect. What survives of it is the narrower claim
+    that still holds: an intent is matched by ``asset_id``, and one that
+    matches nothing is not an error — a roster can legitimately shrink
+    mid-episode when a link to a real vehicle drops.
+    """
     transport = KinematicTransport(seed=1)
     transport.connect()
     before = transport.observe()
@@ -769,7 +1039,7 @@ def test_the_stub_accepts_intents_without_acting_on_them() -> None:
         t=before.t,
         intents=(
             WaypointIntent(
-                asset_id=before.poses[0].asset_id,
+                asset_id="not-an-asset",
                 t=before.t,
                 target_lat=72.05,
                 target_lon=-94.60,
