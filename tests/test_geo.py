@@ -303,7 +303,15 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "whiteout/vision/camera.py",
         "whiteout/vision/projection.py",
         "whiteout/vision/scene.py",
+        # Camera-field trigonometry, not latitude trigonometry: it turns a
+        # field of view and a height into a depression angle and a ground
+        # range, and does its one frame conversion through whiteout.geo like
+        # everything else. Same category as camera.py and projection.py
+        # above, which is why it sits beside them rather than widening the
+        # rule.
+        "whiteout/vision/standoff.py",
         "tests/test_vision_projection.py",
+        "tests/test_vision_standoff.py",
         "scripts/jpeg_quantisation.py",
     }
 )

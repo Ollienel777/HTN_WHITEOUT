@@ -241,3 +241,89 @@ def test_the_coordinator_never_reaches_for_a_transport() -> None:
     }
     assert not any(name.startswith("whiteout.transport") for name in imported)
     assert "socket" not in imported
+
+
+# -- the hold stands off, it does not hover overhead (#109) ------------------
+
+
+def test_the_hold_point_is_a_stand_off_and_not_the_contact_itself(hold_and_stub) -> None:
+    """The quadcopter's camera looks where the airframe does (#109).
+
+    Hovering over a contact puts it straight down, where a horizon-looking
+    camera cannot see it. Flown live, the quadcopter ended up on top of the
+    vessel and saw nothing.
+    """
+    import math
+
+    from whiteout.geo import GeoPoint, geodetic_to_local
+
+    hold_at = _at(MID)
+    hold, _ = hold_and_stub
+    coordinator = Coordinator(FLEET, hold=hold, sightings=_SawItAt({2.0}, s_m=MID))
+    coordinator.tick(_observation(1.0))
+    outcome = coordinator.tick(_observation(2.0))
+    quad = next(i for i in outcome.intent.intents if i.asset_id == "quadcopter")
+    assert quad.reason == "hold"
+
+    offset = geodetic_to_local(
+        GeoPoint(hold_at[0], hold_at[1]), GeoPoint(quad.target_lat, quad.target_lon)
+    )
+    stand_off = math.hypot(offset.east_m, offset.north_m)
+    assert stand_off > 50.0, "sitting on the contact is the bug this fixes"
+
+
+def test_the_stand_off_follows_the_camera_and_the_altitude(hold_and_stub) -> None:
+    """Higher means further out, because the depression angle is the constraint."""
+    import math
+
+    from whiteout.geo import GeoPoint, geodetic_to_local
+    from whiteout.vision.camera import CAMERAS
+    from whiteout.vision.standoff import standoff_range_m
+
+    base_hold, stub = hold_and_stub
+
+    def make_hold():
+        return TrackHold("Sierra One", base_hold._poster, post_interval_s=2.0)
+
+    def stand_off_for(alt: float) -> float:
+        poses = tuple(
+            Pose(
+                asset_id=r.asset_id,
+                cls=r.cls,
+                t=1.0,
+                lat=_at(MID * 0.5)[0],
+                lon=_at(MID * 0.5)[1],
+                z=alt,
+                heading=0.0,
+                speed=0.0,
+                energy_used=0.0,
+                pitch=0.0,
+                roll=0.0,
+            )
+            for r in FLEET
+        )
+        c = Coordinator(FLEET, hold=make_hold(), sightings=_SawItAt({1.0}, s_m=MID))
+        out = c.tick(WorldObservation(t=1.0, poses=poses, reports=()))
+        quad = next(i for i in out.intent.intents if i.asset_id == "quadcopter")
+        contact = _at(MID)
+        offset = geodetic_to_local(
+            GeoPoint(contact[0], contact[1]), GeoPoint(quad.target_lat, quad.target_lon)
+        )
+        return math.hypot(offset.east_m, offset.north_m)
+
+    low, high = stand_off_for(80.0), stand_off_for(240.0)
+    assert high > low
+    assert low == pytest.approx(standoff_range_m(CAMERAS["quadcopter"], 80.0), rel=0.02)
+
+
+def test_a_hold_without_the_holding_asset_s_pose_falls_back_to_the_contact(hold_and_stub) -> None:
+    """A poor place to watch from, and still better than no instruction."""
+    hold, _ = hold_and_stub
+    coordinator = Coordinator(FLEET, hold=hold, sightings=_SawItAt({1.0}, s_m=MID))
+    without_quad = WorldObservation(
+        t=1.0,
+        poses=tuple(p for p in _observation(1.0).poses if p.asset_id != "quadcopter"),
+        reports=(),
+    )
+    outcome = coordinator.tick(without_quad)
+    assert "quadcopter" not in {i.asset_id for i in outcome.intent.intents}

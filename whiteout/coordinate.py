@@ -60,12 +60,16 @@ from typing import Protocol
 from whiteout.belief.field import BeliefField
 from whiteout.belief.geometry import DEFAULT_STRAIT, StraitGeometry
 from whiteout.belief.grid import ChannelBeliefGrid
+from whiteout.geo import GeoPoint
 from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole, SearchParams, SearchPolicy
 from whiteout.tracks.maintain import Sighting, TrackHold
-from whiteout.types import BeliefDigest, Contact, FleetIntent, WorldObservation
+from whiteout.types import BeliefDigest, Contact, FleetIntent, Pose, WorldObservation
+from whiteout.vision.camera import CAMERAS, VisionError
+from whiteout.vision.standoff import standoff_point, standoff_range_m
 
 __all__ = [
     "DEFAULT_DETECTION_SIGMA_M",
+    "DEFAULT_HOLD_ASSET",
     "DEFAULT_TRACK_NAME",
     "Coordinator",
     "NoSightings",
@@ -81,6 +85,10 @@ DEFAULT_TRACK_NAME = "Sierra One"
 #: standing assumption until the projection's error is measured against the
 #: arena, and a parameter rather than a constant for that reason.
 DEFAULT_DETECTION_SIGMA_M = 150.0
+
+#: Which asset holds a contact, and whose camera the stand-off is computed
+#: for. The quadcopter, because it is the only one that can stop and stare.
+DEFAULT_HOLD_ASSET = "quadcopter"
 
 
 class SightingSource(Protocol):
@@ -131,6 +139,8 @@ class Coordinator:
         hold: TrackHold | None = None,
         sightings: SightingSource | None = None,
         detection_sigma_m: float = DEFAULT_DETECTION_SIGMA_M,
+        hold_asset: str = DEFAULT_HOLD_ASSET,
+        hold_camera: str = "quadcopter",
     ) -> None:
         self._geometry = geometry
         self._policy = SearchPolicy(roles, geometry, params)
@@ -138,6 +148,8 @@ class Coordinator:
         self._hold = hold
         self._sightings = sightings if sightings is not None else NoSightings()
         self._detection_sigma_m = float(detection_sigma_m)
+        self._hold_asset = hold_asset
+        self._hold_camera = hold_camera
         self._last_t: float | None = None
         self._ticks = 0
 
@@ -171,6 +183,7 @@ class Coordinator:
                 self._belief.diffuse(elapsed)
         self._last_t = now
 
+        poses = {pose.asset_id: pose for pose in observation.poses}
         seen = self._sightings.sightings(observation)
         for sighting in seen:
             self._belief.update_detection(
@@ -191,7 +204,12 @@ class Coordinator:
             # where to look, even when there is nothing new to post. Only a
             # track that is genuinely lost releases the asset back to search.
             if last is not None and state != "lost":
-                held_lat, held_lon = last.lat_deg, last.lon_deg
+                # Not the contact's own position: the quadcopter's camera is
+                # fixed at the airframe's attitude and looks at the horizon
+                # (#109), so hovering over a contact puts it straight down
+                # where the camera cannot see. Stand off instead.
+                point = self._hold_point(last.lat_deg, last.lon_deg, poses)
+                held_lat, held_lon = point.lat_deg, point.lon_deg
 
         intent = self._policy.decide(
             observation, self._belief, held_lat_deg=held_lat, held_lon_deg=held_lon
@@ -203,6 +221,30 @@ class Coordinator:
             posted=posted,
             track_state=state,
         )
+
+    def _hold_point(self, lat_deg: float, lon_deg: float, poses: dict[str, Pose]) -> GeoPoint:
+        """Where the holding asset should sit to keep the contact in frame.
+
+        Falls back to the contact's own position when the geometry cannot be
+        computed — the holding asset has not reported, or its camera cannot
+        see the water from where it is. Sitting on top of a contact is a poor
+        place to watch from; it is still a better instruction than none, and
+        the alternative would be to stop holding a contact we can see.
+        """
+        contact = GeoPoint(lat_deg, lon_deg)
+        pose = poses.get(self._hold_asset)
+        camera = CAMERAS.get(self._hold_camera)
+        if pose is None or camera is None:
+            return contact
+        try:
+            range_m = standoff_range_m(
+                camera,
+                pose.z,
+                boresight_pitch_deg=pose.pitch if pose.pitch is not None else 0.0,
+            )
+            return standoff_point(contact, GeoPoint(pose.lat, pose.lon), range_m)
+        except VisionError:
+            return contact
 
     def _digest(self, now: float) -> BeliefDigest:
         peak = self._belief.peak()
