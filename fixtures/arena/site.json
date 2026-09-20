@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "site": "fort_ross",
+  "README": [
+    "The arena's own answers about the site it renders. whiteout/site.py reads",
+    "this and never opens a socket; scripts/arena_site.py is the only thing that",
+    "talks to the arena, and it rewrites this file only when asked with --write.",
+    "Each record holds the response as the arena sent it, under 'response', with",
+    "a note beside it saying where that answer came from. A record whose",
+    "'response' is null has never been fetched: leave it null rather than",
+    "filling it in from a slide, which is what PR #102 exists to undo."
+  ],
+  "records": {
+    "env": {
+      "provenance": {
+        "request": "GET http://<arena>:8090/api/env",
+        "host": null,
+        "at": "2026-09-19",
+        "note": "Transcribed from PR #102, which read /api/env off the live arena and corrected DEFAULT_STRAIT with it. Corroborated by assets/terrain_fort_ross/model.sdf, <size>6500 6500 252.109</size>. Not fetched by scripts/arena_site.py, so 'host' is unknown and 'at' is the date of that PR rather than of a request."
+      },
+      "response": {
+        "SITE_LAT": 71.991960,
+        "SITE_LON": -94.822428,
+        "SITE_EXTENT": 6500.0
+      }
+    },
+    "site": {
+      "provenance": {
+        "request": "GET http://<arena>:8090/api/site",
+        "host": null,
+        "at": null,
+        "note": "Never called. The arena is not reachable from CI and was not reachable from the session that added this file, so the site centre, bounds3413 and convergence_deg are unrecorded rather than guessed. Fill this in with `python scripts/arena_site.py --endpoint <host> --write` from a machine that can reach the arena; whiteout/site.py checks the answer against the env record's centre and against the polar stereographic identity when it arrives."
+      },
+      "response": null
+    }
+  }
+}

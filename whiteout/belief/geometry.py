@@ -344,9 +344,28 @@ class StraitGeometry:
 #: arena serves) and the distance-to-shore field ``terrain/course.py`` builds
 #: from it; that is a follow-up and it must be done per site, because
 #: ``competition.lock`` pins three.
+#:
+#: **What #112 changed about that, and what it did not.** The site's own
+#: parameters are now a recorded answer rather than a transcription:
+#: ``fixtures/arena/site.json`` and :mod:`whiteout.site`, including
+#: ``GET :8090/api/site``'s ``bounds3413`` and ``convergence_deg`` for
+#: whoever next holds the arena. The convergence is **not** a correction to
+#: anything — see :mod:`whiteout.vision.projection`, "Grid North, true North,
+#: and why ``convergence_deg`` is not a bias here" — so none of the vertices
+#: below moved with it. The 470 m the centreline sits off the vessel's track
+#: is still open, and still wants the heightmap.
 #: The rendered site's centre, from ``GET :8090/api/env`` (``SITE_LAT`` and
 #: ``SITE_LON``). Everything the arena simulates is within
 #: :data:`SITE_EXTENT_M` / 2 of it, in both east and north.
+#:
+#: **These three now have a record rather than a citation in a comment**
+#: (#112). ``fixtures/arena/site.json`` holds the arena's own answers with the
+#: provenance of each beside it, :mod:`whiteout.site` reads it, and
+#: ``tests/test_site.py`` fails if these literals and that record disagree.
+#: They stay literals here for two reasons: this module is imported by
+#: everything and must not read a file at import time, and the fixture is not
+#: packaged into the wheel. The record is the source; this is the copy the
+#: gate keeps honest.
 SITE_CENTRE_LAT = 71.991960
 SITE_CENTRE_LON = -94.822428
 

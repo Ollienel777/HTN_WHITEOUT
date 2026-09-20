@@ -321,6 +321,21 @@ def bearing_deg(origin: GeoPoint, point: GeoPoint) -> float:
     bearing is far below the pointing accuracy of anything that consumes it.
     Two coincident points have no bearing between them, and ``atan2(0, 0)``
     is 0.0 rather than an error; callers that care must check the range.
+
+    **The bearing is from true North, and the arena's ``convergence_deg`` is
+    not subtracted from it** (#112). That field, published by ``GET
+    :8090/api/site`` and recorded by :mod:`whiteout.site`, is the ~49.8° turn
+    between true North and the EPSG:3413 grid the arena renders its terrain
+    in — a frame nothing here enters. The reasoning is written out once, in
+    :mod:`whiteout.vision.projection` under "Grid North, true North, and why
+    ``convergence_deg`` is not a bias here"; the half of it that belongs to
+    this function is that the angle is taken **at the origin of its own
+    frame**, where the tangent plane's North is true North exactly, so there
+    is no convergence of any kind left to carry. That holds for the two
+    callers that matter: ``whiteout/transport/arena.py`` takes a bearing about
+    the tower that is about to be pointed along it, and
+    ``whiteout/tracks/maintain.py`` takes a course about the earlier of the
+    two fixes it runs between.
     """
     offset = geodetic_to_local(origin, point)
     return math.degrees(math.atan2(offset.east_m, offset.north_m)) % 360.0

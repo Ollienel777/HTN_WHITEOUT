@@ -55,6 +55,102 @@ takes the vehicle's attitude unchanged:
 A gimballed camera is the same type with the gimbal's angles substituted for
 the airframe's; a tower's come from :mod:`whiteout.vision.tower`.
 
+Grid North, true North, and why ``convergence_deg`` is not a bias here
+-----------------------------------------------------------------------
+
+``GET :8090/api/site`` publishes ``convergence_deg`` beside ``bounds3413``: the
+angle between **grid North** — the northing axis of EPSG:3413, the polar
+stereographic grid the arena tiles its terrain in — and **true North**. At this
+site it is about **49.8°**, because for the polar aspect of a stereographic
+projection the convergence is exactly :math:`\\lambda - \\lambda_0`, and
+EPSG:3413's central meridian is 45° W against a site at 94.82° W.
+:mod:`whiteout.site` records the arena's answer and checks it against that
+identity.
+
+**It corrects nothing in this module, and nothing anywhere else in the
+build.** This is written down rather than left implied because 49.8° is not a
+small angle, and the reflex on first meeting it — somewhere a heading must
+need it subtracted — is wrong here for a reason that takes a paragraph and
+would otherwise be re-derived by every reader in turn.
+
+**The grid is a frame we never enter.** Positions arrive geodetic
+(``GLOBAL_POSITION_INT``, degE7) and leave geodetic (``POST /api/tracks``).
+The one frame in between is :mod:`whiteout.geo`'s local East–North tangent
+plane, and its North axis is true North by construction: ``enu_to_geodetic``
+divides the North offset by the meridional radius of curvature to get a change
+of *latitude*, not a change of northing. No easting, no northing and no scale
+factor of EPSG:3413 is read or written anywhere in ``whiteout/``. A rotation
+between two frames is a correction only for a quantity expressed in one of
+them, and none of ours is. What the grid is for is *rendering*: it is how the
+arena places its terrain mesh and imagery, and it is what a dashboard drawing
+that imagery has to work in. We draw in lat/lon.
+
+**The two heading-shaped inputs are true-North referenced, and they are the
+only two.** ``pose.heading`` becomes :attr:`CameraPose.yaw_deg` in
+``whiteout/vision/sightings.py``; it is ArduPilot's ``ATTITUDE.yaw``, an AHRS
+heading. ArduPilot has no notion of a map projection, and the simulator's
+world frame is an East–North–Up frame about a geodetic origin, so that yaw is
+referenced to true North and not to any grid. The other is a tower's pan zero
+(:func:`whiteout.vision.tower.tower_camera_pose`'s ``boresight_yaw_deg``),
+which is our own convention in a roster file, compared against
+:func:`whiteout.geo.bearing_deg`, and true North for the same reason that
+function is.
+
+**And the frame is always built where the angle is measured**, which is what
+makes the argument airtight rather than merely probable.
+:func:`camera_basis` builds its axes at the camera, and
+:func:`project_pixel_to_ground` resolves the resulting offset with
+:func:`enu_to_geodetic` about *the camera's own* lat/lon. Origin and
+measurement point coincide, so the plane's North is true North exactly there —
+there is no residual convergence to carry, not even the tangent plane's own.
+
+**What it would cost if this were wrong**, since a bias nobody can price is a
+bias nobody weighs. A yaw error :math:`\\gamma` puts a fix at ground range
+:math:`d` off by :math:`2 d \\sin(\\gamma/2)`, which at 49.8° is 0.843 of the
+range:
+
+.. code-block:: text
+
+    ground range   position error at a 49.8 deg yaw bias
+      302 m  (the #111 stand-off)      254 m
+     1000 m                            842 m
+     3000 m                           2527 m
+
+The channel's modelled water is 535 m to 772 m of half-width
+(:data:`whiteout.belief.geometry.DEFAULT_STRAIT`), so at a kilometre the bias
+alone would exceed it: every projected fix would land on rock or outside the
+6.5 km site, and :meth:`ChannelBeliefGrid.update_detection
+<whiteout.belief.grid.ChannelBeliefGrid.update_detection>` would be folding
+belief onto water the camera was not looking at. This is therefore not a
+subtle error that could be sitting there unnoticed — it is the sort that
+breaks a run in the first minute. #110 flew the detector live and reported its
+false alarms landing "one to three kilometres away, on the channel's ice":
+still in the channel, which is where a camera with a true-North yaw puts them
+and is not where a 49.8° rotation would.
+
+**The one-minute check, for whoever next has the arena.** Fly any asset a
+straight leg and compare its ``ATTITUDE.yaw`` against the course over ground
+that :func:`whiteout.geo.bearing_deg` gives between two consecutive
+``GLOBAL_POSITION_INT`` fixes on that leg. Agreement to a few degrees is a
+true-North yaw; a constant offset near 49.8° would mean the arena hands out a
+grid-referenced heading and every paragraph above needs re-deriving. Nothing
+in the repository asserts this, because it needs a live arena and a moving
+asset, and an assertion nobody can run is worse than a procedure somebody can.
+
+**The convergence that does exist here, and where it is zero.** A local
+tangent plane has a meridian convergence of its own: true North at a point
+:math:`\\Delta\\lambda` East of the origin is turned from the plane's North
+axis by :math:`\\Delta\\lambda \\sin\\varphi`. Over the whole 6.5 km site about
+:data:`whiteout.geo.ARENA_ORIGIN` that reaches **0.106°** at the far corner,
+6.0 m of lateral error at 3.25 km. It is not corrected anywhere and does not
+need to be, for two separate reasons. In this module it is identically zero,
+per the paragraph above. In :mod:`whiteout.belief.geometry`, which does use one
+fixed origin across the whole site, no heading is consumed at all: the ribbon
+is a geometric construction inside a single plane, both of its conversions use
+that same plane, and :mod:`whiteout.belief.grid` diffuses isotropically from a
+speed. A heading measured at one point and used in another's frame is the
+thing to watch for, and there is not one.
+
 Accuracy, and the two approximations that cost the most
 -------------------------------------------------------
 
