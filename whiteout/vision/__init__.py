@@ -168,3 +168,11 @@ __all__ += [
     "VisionSightings",
     "arena_feeds",
 ]
+
+from whiteout.vision.motion import (  # noqa: E402
+    DEFAULT_MOTION_PARAMS,
+    MotionGate,
+    MotionParams,
+)
+
+__all__ += ["DEFAULT_MOTION_PARAMS", "MotionGate", "MotionParams"]
