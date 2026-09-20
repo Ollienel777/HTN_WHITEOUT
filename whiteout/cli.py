@@ -23,11 +23,13 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from whiteout.coordinate import Coordinator
 from whiteout.geo import ARENA_ORIGIN
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
+from whiteout.policy import AssetRole
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
 from whiteout.transport import TransportError, create_transport, selected_transport_name
-from whiteout.types import BeliefDigest, EpisodeRecord, FleetIntent, Truth
+from whiteout.types import BeliefDigest, Contact, EpisodeRecord, FleetIntent, Truth
 
 #: Ordered scoring axes. The sponsor scores on exactly these four.
 AXES: tuple[str, str, str, str] = (
@@ -86,6 +88,21 @@ def _placeholder_digest(t: float) -> BeliefDigest:
     )
 
 
+def _coordinator_for(transport: object) -> Coordinator | None:
+    """A coordinator over whatever assets this transport rosters.
+
+    ``None`` when the transport does not publish a roster. The kinematic fake
+    does not, so ``run`` against it stays exactly the observed-and-logged
+    episode it was — this is additive, and the gate's smoke and determinism
+    steps are unaffected by it.
+    """
+    assets = getattr(transport, "assets", None)
+    if not assets:
+        return None
+    roles = tuple(AssetRole(asset.asset_id, asset.cls) for asset in assets)
+    return Coordinator(roles)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Drive the selected transport for ``--ticks`` ticks and write its log."""
     seed = _resolve_seed(args.seed)
@@ -114,18 +131,33 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         try:
             transport.connect()
+            coordinator = _coordinator_for(transport)
             for _tick in range(args.ticks):
                 observation = transport.observe()
-                intent = FleetIntent(t=observation.t, intents=())
-                transport.command(intent)
+                if coordinator is None:
+                    # No roster to build roles from, so there is nothing to
+                    # coordinate. The episode is still recorded: an observed
+                    # run with no tasking is a valid, and readable, log.
+                    intent = FleetIntent(t=observation.t, intents=())
+                    digest = _placeholder_digest(observation.t)
+                    contacts: tuple[Contact, ...] = ()
+                else:
+                    outcome = coordinator.tick(observation)
+                    intent, digest, contacts = (
+                        outcome.intent,
+                        outcome.digest,
+                        outcome.contacts,
+                    )
+                if not args.dry_run:
+                    transport.command(intent)
                 records.append(
                     EpisodeRecord(
                         schema_version=SCHEMA_VERSION,
                         t=observation.t,
                         observation=observation,
                         intent=intent,
-                        belief_digest=_placeholder_digest(observation.t),
-                        contacts=(),
+                        belief_digest=digest,
+                        contacts=contacts,
                         truth=Truth(t=observation.t, targets=()),
                     )
                 )
@@ -216,6 +248,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="run an episode and write its log")
+    run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="decide and log, but send no waypoint to the fleet",
+    )
     run.add_argument("--seed", type=int, default=None)
     run.add_argument("--ticks", type=int, default=400)
     run.add_argument("--out", default="artifacts/episode.jsonl")
