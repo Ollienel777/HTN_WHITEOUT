@@ -84,7 +84,8 @@ socket, so a stale record is a silently wrong convergence angle.
 **3. The fleet answers.** The cheapest honest check is a short dry run — it
 opens every link and every camera feed, waits for a heartbeat from each asset,
 and sends nothing: no waypoint to an aircraft, and no track to the judged
-endpoint even when `WHITEOUT_TRACKS_ENDPOINT` is still exported from §4:
+endpoint even when `WHITEOUT_TRACKS_ENDPOINT` is still exported from step 4
+below:
 
 ```sh
 WHITEOUT_TRANSPORT=arena WHITEOUT_ARENA_ENDPOINT=10.99.4.1 \
@@ -147,6 +148,18 @@ search policy flies at, so the first waypoint does not undo the climb.
 not ask. An asset that will not arm is reported by name and the run continues
 with the rest: an arena episode is live and cannot be repeated, so three
 assets searching beats none.
+
+Three lines to read, and each one distinguishes a cause you would otherwise
+have to guess at:
+
+- On stdout, at the start: **`run: launched quadcopter, fixed-wing to 120 m`**,
+  or a line naming whichever asset refused. Nothing named is nothing flying.
+- On stdout, at the start: **`run: submitting held tracks to …`**, or
+  `not submitting tracks`. If you meant a judged run and see the second, the
+  endpoint is unset and nothing you do later in the run will score.
+- On stderr, on the way out: **`N of M cameras delivered frames`**, and a line
+  naming any camera that stopped and why. Without it "no contacts" has four
+  indistinguishable causes, and only one of them is "no vessel".
 
 ### What it still does not do
 

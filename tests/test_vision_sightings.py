@@ -62,11 +62,19 @@ def _frame(seq: int = 0) -> LumaFrame:
 
 
 class _StubFeed:
-    """A feed that hands back whatever it was given."""
+    """A feed that hands back whatever it was given.
 
-    def __init__(self, asset_id: str, frame: LumaFrame | None) -> None:
+    ``draining`` defaults to ``True`` — a live camera — because that is what
+    almost every case here is about. The dead-stream case is what
+    :func:`test_a_feed_that_has_stopped_draining_is_no_longer_a_sensor`
+    builds, and it is deliberately *not* the same thing as having no frame:
+    a stopped feed keeps its last one.
+    """
+
+    def __init__(self, asset_id: str, frame: LumaFrame | None, *, draining: bool = True) -> None:
         self.asset_id = asset_id
         self._frame = frame
+        self.draining = draining
 
     def latest(self) -> LumaFrame | None:
         return self._frame
@@ -109,6 +117,35 @@ def test_an_asset_with_no_camera_is_skipped_not_invented() -> None:
 def test_an_asset_with_no_pose_contributes_nothing() -> None:
     source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
     assert source.sightings(_observation(())) == ()
+
+
+def test_a_feed_stops_draining_when_its_stream_ends_however_it_ends() -> None:
+    """``draining`` covers a clean end of stream, which sets no ``error``.
+
+    ``CameraFeed._run`` records an error only for ``VisionError``/``OSError``.
+    An MJPEG server that simply closes the connection raises nothing, so a
+    feed that had gone quiet for the most ordinary reason of all would have
+    looked healthy to any check written on ``error`` alone.
+    """
+    from whiteout.vision import sightings as module
+
+    class _Ends:
+        def __init__(self, *_: object) -> None: ...
+
+        def frames(self):
+            return iter(())
+
+    feed = module.CameraFeed("tower-1", "http://nowhere/stream", CAMERAS["tower"])
+    assert not feed.draining, "a feed is not draining before it is opened"
+    module_frames = module.MjpegFrames
+    try:
+        module.MjpegFrames = _Ends  # type: ignore[misc]
+        feed.open()
+        feed._thread.join(2.0)  # noqa: SLF001
+    finally:
+        module.MjpegFrames = module_frames  # type: ignore[misc]
+    assert feed.error is None, "a clean end of stream is not an error"
+    assert not feed.draining, "but it is still the end of the stream"
 
 
 def test_an_asset_with_no_frame_yet_contributes_nothing() -> None:
@@ -386,6 +423,42 @@ def test_no_detection_is_no_sighting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: None)
     source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
     assert source.sightings(_observation((_pose("tower-1"),))) == ()
+
+
+def test_a_feed_that_has_stopped_draining_is_no_longer_a_sensor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead camera goes quiet rather than repeating its last frame.
+
+    ``CameraFeed`` keeps its newest frame for ever, which is right for a feed
+    between frames and wrong for one that will never get another. ``_sight``
+    re-projects whatever it is handed through the pose of *this* tick, so a
+    dead feed on a moving airframe would report a vessel every tick whose
+    ground point walks at the aircraft's own speed — inside ``MotionGate``'s
+    believable band, defended by ``TrackHold`` against the real vessel, and on
+    a judged run POSTed to the scored endpoint.
+
+    The frame is deliberately still there, and a detection is deliberately
+    still available: the only thing this asserts is that a stopped feed is
+    not asked.
+    """
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self):
+            from whiteout.geo import GeoPoint
+
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    observation = _observation((_pose("tower-1"),))
+
+    live = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert len(live.sightings(observation)) == 1, "a draining feed still sights"
+
+    dead = VisionSightings(feeds=(_StubFeed("tower-1", _frame(), draining=False),))
+    assert dead.sightings(observation) == ()
+    assert dead.refusals() == (), "an absence of input is not a fix thrown away"
 
 
 def test_a_malformed_frame_does_not_end_the_run(

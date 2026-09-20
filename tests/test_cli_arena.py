@@ -22,11 +22,12 @@ import pytest
 
 import whiteout.cli as cli
 from whiteout.geo import GeoPoint, LocalPoint, local_to_geodetic
-from whiteout.log import validate_episode_log
+from whiteout.log import read_episode_log, validate_episode_log
 from whiteout.tracks.stub import StubTracksServer, open_stub_tracks_server
 from whiteout.types import Pose, WorldObservation
-from whiteout.vision.camera import CAMERAS, VisionError
+from whiteout.vision.camera import CAMERAS
 from whiteout.vision.imagery import LumaFrame
+from whiteout.vision.sightings import VisionSightings
 
 QUAD = CAMERAS["quadcopter"]
 
@@ -38,12 +39,23 @@ VESSEL_SPEED_MPS = 3.0
 
 
 class _StubFeed:
-    """A camera that always has a frame, and counts its own open and close."""
+    """A camera that always has a frame, and counts its own open and close.
 
-    def __init__(self, asset_id: str) -> None:
+    It carries ``draining``, ``frames_seen`` and ``error`` because the real
+    :class:`~whiteout.vision.sightings.CameraFeed` does and both
+    ``VisionSightings.sightings`` and ``cli._report_cameras`` now read them.
+    ``draining=False`` is the dead-stream case, which is the one a stub has to
+    be able to express: a feed that has stopped keeps its last frame for ever,
+    so "still has a frame" and "still a sensor" are different questions.
+    """
+
+    def __init__(self, asset_id: str, *, draining: bool = True, error: str | None = None) -> None:
         self.asset_id = asset_id
         self.opened = 0
         self.closed = 0
+        self.draining = draining
+        self.frames_seen = 0
+        self.error = error
 
     def open(self) -> None:
         self.opened += 1
@@ -52,6 +64,7 @@ class _StubFeed:
         self.closed += 1
 
     def latest(self) -> LumaFrame:
+        self.frames_seen += 1
         return LumaFrame(
             asset_id=self.asset_id,
             camera=QUAD,
@@ -449,21 +462,151 @@ def test_a_close_that_raises_something_else_is_diagnosed_not_traced(
     assert all(feed.closed == 1 for feed in feeds), "a camera thread outlived a close failure"
 
 
+def test_a_completed_episode_is_written_even_when_the_teardown_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An arena run is live and cannot be repeated, so its log is not collateral.
+
+    Every tick ran and ``records`` is complete; the failure is on the way out.
+    Returning before the write threw the whole episode away to report a socket
+    that would not close — the more expensive of the two mistakes by a wide
+    margin. The exit code is still non-zero, because the run did fail.
+    """
+
+    def _boom() -> None:
+        raise OSError("the socket is already gone")
+
+    monkeypatch.setattr(arena, "close", _boom)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 1
+    assert out.is_file(), "a complete episode was thrown away over a teardown failure"
+    assert len(read_episode_log(out)) == 3
+    validate_episode_log(out)
+    assert "the episode completed" in capsys.readouterr().err
+
+
+def test_a_run_that_dies_mid_episode_writes_no_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """The other side of it, so "write it anyway" does not become "always write".
+
+    A run that died mid-episode has a truncated ``records``, and a partial
+    episode written under the name the operator asked for would be read later
+    as a complete one. Only a run that reached its last tick earns the write.
+    """
+    ticked = iter(range(2))
+    live = arena.observe
+
+    def _dies() -> WorldObservation:
+        if next(ticked, None) is None:
+            from whiteout.transport import TransportError
+
+            raise TransportError("the link dropped")
+        return live()
+
+    monkeypatch.setattr(arena, "observe", _dies)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "5", "--out", str(out)]) == 1
+    assert not out.exists(), "a truncated episode was written as if it were whole"
+
+
+def test_the_cameras_follow_the_roster_the_transport_is_flying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+) -> None:
+    """``WHITEOUT_ARENA_ROSTER`` is the one sanctioned lever, and it moves both.
+
+    ``arena_feeds`` was called with no assets, so it returned all four keys of
+    ``ARENA_CAMERA_PORTS`` whatever the transport was actually flying: a run
+    narrowed to one asset still opened four MJPEG sockets and four drain
+    threads, and the extra three matched no pose and reported nothing.
+    """
+    asked: list[tuple[str, ...]] = []
+
+    def _feeds(host: str, assets: tuple[str, ...] | None = None) -> tuple[_StubFeed, ...]:
+        asked.append(assets or ())
+        return tuple(_StubFeed(asset_id) for asset_id in (assets or ()))
+
+    monkeypatch.setattr(cli, "arena_feeds", _feeds)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "2", "--out", str(out)]) == 0
+    assert asked, "arena_feeds was never called"
+    assert asked[0] == tuple(asset.asset_id for asset in arena.assets)
+
+
+def test_a_roster_with_no_cameras_runs_without_sightings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The empty-feeds branch, which was unreachable while the roster was ignored."""
+    monkeypatch.setattr(cli, "arena_feeds", lambda host, *a, **k: ())
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "2", "--out", str(out)]) == 0
+    assert "no camera in the arena roster" in capsys.readouterr().err
+    validate_episode_log(out)
+
+
+def test_the_motion_gate_is_in_the_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """#110 exists because ice read as a hull; losing the decorator would be silent.
+
+    Nothing else in this file notices if ``MotionGate(camera)`` becomes
+    ``camera`` — every assertion here is about contacts and tracks, which a
+    bare source still produces. So the wrapper is asserted directly.
+    """
+    wrapped: list[object] = []
+    real_gate = cli.MotionGate
+
+    def _gate(source: object, *args: object, **kwargs: object) -> object:
+        wrapped.append(source)
+        return real_gate(source, *args, **kwargs)
+
+    monkeypatch.setattr(cli, "MotionGate", _gate)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "2", "--out", str(out)]) == 0
+    assert len(wrapped) == 1, "the camera no longer reaches the coordinator through MotionGate"
+    assert isinstance(wrapped[0], VisionSightings)
+
+
 def test_a_camera_that_will_not_open_does_not_end_the_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     arena: _ArenaShapedTransport,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An arena episode is live and cannot be repeated; half a fleet beats none."""
+    """An arena episode is live and cannot be repeated; half a fleet beats none.
 
-    def _refuse(host: str) -> tuple[object, ...]:
-        raise VisionError("that camera is not there")
-
-    monkeypatch.setattr(cli, "arena_feeds", _refuse)
+    Driven through the path this actually takes. A stream that refuses does
+    not raise out of ``arena_feeds`` — ``CameraFeed.__init__`` opens no
+    socket, and the connection is attempted on the feed's own thread, which
+    records the failure and stops draining. So the run has to survive a feed
+    that is present, opened, and dead, which is what this builds.
+    """
+    dead = _StubFeed("quadcopter", draining=False, error="connection refused")
+    alive = _StubFeed("tower-1")
+    monkeypatch.setattr(cli, "arena_feeds", lambda host, *a, **k: (dead, alive))
     out = tmp_path / "arena.jsonl"
     assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 0
-    assert "no camera sightings" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "camera quadcopter stopped" in err, "a dead camera is not named on the way out"
+    assert "1 of 2 cameras delivered frames" in err
     validate_episode_log(out)
 
 
