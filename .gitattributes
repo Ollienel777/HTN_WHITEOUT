@@ -2,3 +2,16 @@
 # Shell scripts must keep LF: a CRLF checkout (Windows worktrees) breaks `sh`.
 *.sh text eol=lf
 *.mjs text eol=lf
+
+# Binary fixtures must never be line-ending converted. `* text=auto` above
+# guesses, and it guesses wrong on a PGM: git stored 307215 bytes for a
+# 640x480 frame and a Windows checkout produced 307218, which the loader
+# rejects as a truncated raster. CI runs on Linux, so this fails only on the
+# build machine — the worst place to learn it.
+*.pgm binary
+*.pgm.gz binary
+*.jpg binary
+*.jpeg binary
+*.mjpeg binary
+*.png binary
+*.tif binary

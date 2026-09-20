@@ -630,3 +630,66 @@ def test_a_malformed_camera_is_refused() -> None:
         CameraModel("broken", 60.0, 36.1, 0, 360)
     with pytest.raises(VisionError, match="must be finite"):
         TOWER_CAMERA.normalised(math.nan, 180.0)
+
+
+# -- the raster the arena actually serves -----------------------------------
+
+
+def test_the_same_optics_at_twice_the_pixels_is_the_same_camera() -> None:
+    """``ARENA.md`` §4's resolutions are not what the arena serves.
+
+    Measured off the live cameras: towers and the fixed-wing stream 1280x720
+    against a published 640x360, and the quadcopter 960x720 against 640x480.
+    Each is a pure upscale, so the field of view is unchanged and everything
+    derived from it scales linearly with the raster.
+    """
+    from whiteout.vision.camera import TOWER_CAMERA
+
+    big = TOWER_CAMERA.at_frame_size(1280, 720)
+    assert (big.width, big.height) == (1280, 720)
+    assert big.hfov_deg == TOWER_CAMERA.hfov_deg
+    assert big.vfov_deg == TOWER_CAMERA.vfov_deg
+    assert big.fx == pytest.approx(TOWER_CAMERA.fx * 2.0)
+    assert big.fy == pytest.approx(TOWER_CAMERA.fy * 2.0)
+    assert big.cx == pytest.approx(TOWER_CAMERA.cx * 2.0)
+    assert big.cy == pytest.approx(TOWER_CAMERA.cy * 2.0)
+
+
+def test_an_edge_pixel_is_still_half_the_field_of_view_off_boresight() -> None:
+    """The identity the projection tests pin ``fx`` with, at the new raster."""
+    import math
+
+    from whiteout.vision.camera import TOWER_CAMERA
+
+    big = TOWER_CAMERA.at_frame_size(1280, 720)
+    x, _ = big.normalised(big.width, big.cy)
+    assert math.degrees(math.atan(x)) == pytest.approx(big.hfov_deg / 2.0, abs=1e-9)
+
+
+def test_the_same_size_returns_the_same_object() -> None:
+    from whiteout.vision.camera import TOWER_CAMERA
+
+    assert TOWER_CAMERA.at_frame_size(640, 360) is TOWER_CAMERA
+
+
+def test_a_change_of_aspect_is_refused_rather_than_rescaled() -> None:
+    """Not a rescale: one axis was cropped or stretched.
+
+    The published pair of fields of view stops describing the frame, the focal
+    lengths stop agreeing, and every projection off it would be quietly wrong.
+    ``ARENA.md`` §5 scores accuracy, so a confidently wrong lat/lon costs more
+    than no lat/lon.
+    """
+    from whiteout.vision.camera import TOWER_CAMERA
+    from whiteout.vision.camera import VisionError as _VisionError
+
+    with pytest.raises(_VisionError, match="aspect"):
+        TOWER_CAMERA.at_frame_size(640, 480)
+
+
+def test_a_nonsense_raster_is_refused() -> None:
+    from whiteout.vision.camera import TOWER_CAMERA
+    from whiteout.vision.camera import VisionError as _VisionError
+
+    with pytest.raises(_VisionError):
+        TOWER_CAMERA.at_frame_size(0, 360)

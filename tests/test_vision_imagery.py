@@ -279,10 +279,15 @@ def test_a_recording_becomes_frames_of_pixels(
         assert frame.label is None, "a live camera cannot know what is in its own frame"
 
 
-def test_a_whole_stream_of_the_wrong_size_is_refused(
+def test_a_whole_stream_of_the_wrong_shape_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every frame failing is the configuration, and configuration has to be loud."""
+    """Every frame failing is the configuration, and configuration has to be loud.
+
+    320x240 is 4:3 against a 16:9 camera, so this is not a rescale of the
+    published frame — one axis has been cropped or stretched and the published
+    fields of view no longer describe it.
+    """
     recording = tmp_path / "tower-1.mjpeg"
     recording.write_bytes(multipart(4))
     monkeypatch.setattr(
@@ -291,7 +296,36 @@ def test_a_whole_stream_of_the_wrong_size_is_refused(
     source = MjpegFrames(str(recording), "tower-1", TOWER_CAMERA, max_consecutive_bad=3)
     with pytest.raises(VisionError, match="consecutive frames") as raised:
         list(source.frames())
-    assert "publishes" in str(raised.value.__cause__), "the chained cause names the mismatch"
+    assert "aspect" in str(raised.value.__cause__), "the chained cause names the mismatch"
+
+
+def test_the_arena_resolution_is_adopted_rather_than_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arena does not serve the resolutions ARENA.md section 4 publishes.
+
+    Measured off the live cameras: the towers and the fixed-wing stream
+    1280x720 where the deck says 640x360, and the quadcopter 960x720 where it
+    says 640x480. Every one is a pure upscale, so the field of view is still
+    the published one. Before this was handled, `detect_vessel` raised on
+    every real frame the arena has ever served and the detector could not
+    process a single one of them.
+    """
+    recording = tmp_path / "tower-1.mjpeg"
+    recording.write_bytes(multipart(3))
+    monkeypatch.setattr(
+        imagery, "decode_jpeg_luma", lambda _jpeg: np.zeros((720, 1280), dtype=np.uint8)
+    )
+    source = MjpegFrames(str(recording), "tower-1", TOWER_CAMERA, pose=POSE)
+    frames = list(source.frames())
+
+    assert len(frames) == 3, "a served resolution is not a dropped frame"
+    for frame in frames:
+        assert (frame.camera.width, frame.camera.height) == (1280, 720)
+        assert frame.luma.shape == (frame.camera.height, frame.camera.width)
+        # Same optics: the published fields of view are carried across.
+        assert frame.camera.hfov_deg == TOWER_CAMERA.hfov_deg
+        assert frame.camera.vfov_deg == TOWER_CAMERA.vfov_deg
 
 
 def test_one_unreadable_frame_does_not_end_the_stream(

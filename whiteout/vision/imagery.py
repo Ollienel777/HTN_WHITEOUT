@@ -414,15 +414,20 @@ class MjpegFrames:
         threshold is for a stream that is broken, not one that is lossy.
         """
         bad = 0
+        # The arena does not serve the resolutions ARENA.md section 4
+        # publishes - it upscales, keeping the aspect ratio - so the raster is
+        # adopted from the stream and the published fields of view are kept.
+        # See CameraModel.at_frame_size, which refuses a change of aspect.
+        camera = self.camera
         for frame in self._raw():
             try:
                 luma = decode_jpeg_luma(frame.jpeg)
-                if luma.shape != (self.camera.height, self.camera.width):
-                    raise VisionError(
-                        f"{self.asset_id} frame {frame.seq} decoded to "
-                        f"{luma.shape[1]}x{luma.shape[0]}, but {self.camera.name!r} publishes "
-                        f"{self.camera.width}x{self.camera.height}"
-                    )
+                if luma.shape != (camera.height, camera.width):
+                    # Rescale off the *published* camera every time, never off
+                    # the last adopted one: a stream that changes size twice
+                    # must not ratchet through an aspect the published pair
+                    # never described.
+                    camera = self.camera.at_frame_size(luma.shape[1], luma.shape[0])
             except VisionError as error:
                 bad += 1
                 if bad >= self.max_consecutive_bad:
@@ -435,7 +440,7 @@ class MjpegFrames:
             bad = 0
             yield LumaFrame(
                 asset_id=self.asset_id,
-                camera=self.camera,
+                camera=camera,
                 seq=frame.seq,
                 t=frame.t,
                 luma=luma,
