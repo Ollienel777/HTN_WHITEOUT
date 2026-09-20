@@ -413,8 +413,9 @@ class ArenaTransport:
         """Send each asset where it is told to go.
 
         A waypoint for a tower is meaningless — it cannot move — so a tower's
-        intent is read as a bearing to look along and turned into pan and
-        tilt. Everything else becomes a GUIDED position target.
+        intent is read as a bearing to look along and turned into a pan; see
+        :meth:`_aim` for why tilt is left alone. Everything else becomes a
+        GUIDED position target.
         """
         self._require_up()
         for waypoint in intent.intents:
@@ -458,7 +459,20 @@ class ArenaTransport:
         )
 
     def _aim(self, link: _Link, lat: float, lon: float) -> None:
-        """Point a tower's camera at a lat/lon, via servo 1 and servo 2."""
+        """Turn a tower's camera onto the bearing to a lat/lon, pan only.
+
+        **Tilt is not commanded.** ``servo set 2`` exists on the tracker and
+        :data:`whiteout.vision.tower.TOWER_PAN_TILT` models its travel, but
+        nothing in the product ever sends it, so a tower holds whatever pitch
+        it booted with. A level tower is blind inside ``height /
+        tan(vfov/2)`` — 358 m from tower-1 and 695 m from tower-2 against the
+        36.1° vertical field — and ``scripts/tower_siting.py`` measures that
+        disc at 7.4 points of channel coverage on the taller mast. Driving
+        tilt is #143, not an oversight to fix in passing here: the belief
+        field reads pitch from ``ATTITUDE``, so the command and the reported
+        pose have to move together or the non-detection update erodes water
+        no camera looked at.
+        """
         if link.position is None:
             return
         here_lat = float(link.position.lat) / 1e7
