@@ -22,8 +22,9 @@ The format:
 - Every line carries ``schema_version``. A log whose lines disagree with
   :data:`SCHEMA_VERSION` is rejected rather than guessed at.
 - A record's clocks agree: ``observation.t``, ``intent.t``,
-  ``belief_digest.t``, ``truth.t`` and every ``refusals[i].t`` equal the
-  record's ``t``, and ``t`` does not run backwards down the file.
+  ``belief_digest.t``, ``truth.t``, ``belief_field.t`` where there is one, and
+  every ``refusals[i].t`` equal the record's ``t``, and ``t`` does not run
+  backwards down the file.
 
 Writing is atomic: records go to a sibling temp file that replaces the
 destination only once every record has been written. A rejected record can
@@ -90,7 +91,14 @@ __all__ = [
 #: ``EpisodeRecord.refusals`` carries the frames that join refused, so that a
 #: camera which stopped contributing says why instead of reading as an empty
 #: sea (:class:`~whiteout.types.SightingRefusal`).
-SCHEMA_VERSION = 5
+#:
+#: 6 — ``EpisodeRecord.belief_field``, a required record key
+#: (:class:`~whiteout.types.BeliefFrame`). The belief field's per-cell
+#: probability now reaches the log, because the viewer reads the log and
+#: nothing else, and a field it cannot see is a field nobody can debug. The
+#: value is nullable and the key is not: a run with no belief behind it says
+#: ``null``, and a writer that forgot the field is a rejected record.
+SCHEMA_VERSION = 6
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")
@@ -142,6 +150,11 @@ def _clock_fault(record: EpisodeRecord) -> str | None:
     for index, refusal in enumerate(record.refusals):
         if refusal.t != record.t:
             return f"record.refusals[{index}].t is {refusal.t!r} but record.t is {record.t!r}"
+    # Nullable, so it cannot join `_CLOCK_MEMBERS`: a run with no belief field
+    # behind it carries `None` here for the whole episode.
+    field = record.belief_field
+    if field is not None and field.t != record.t:
+        return f"record.belief_field.t is {field.t!r} but record.t is {record.t!r}"
     return None
 
 

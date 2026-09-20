@@ -25,11 +25,14 @@ determinism step depends on that staying true.
 arena adapter drives. The coordinator tasks the fleet every tick, the aircraft
 fly toward what they were told, and the towers stand where they were sited.
 
-Schema 5 (#117), so every pose carries `pitch`, `roll` and `measured_t`. This
-transport reports no measurement time by default — its fixes are computed, not
-received — so `measured_t` is `null` throughout, which is the honest answer
-rather than a zero-age fix nobody took. Pass `--pose-age` to exercise the
-staleness path.
+Schema 6 (#124), so every pose carries `pitch`, `roll` and `measured_t`, and
+every record carries `belief_field` — the belief grid's 850 water cells,
+quantised to a byte each, with the cell-corner lattice on the first record
+only. That is what the viewer draws the field from; it is a rendering channel
+and nothing reads it back. This transport reports no measurement time by
+default — its fixes are computed, not received — so `measured_t` is `null`
+throughout, which is the honest answer rather than a zero-age fix nobody took.
+Pass `--pose-age` to exercise the staleness path.
 
 **Regenerate it, never hand-merge it.** It is 400 records of generated output,
 so a conflict in it has no correct manual resolution: take either side, run the
@@ -66,8 +69,11 @@ A field nobody has looked away from is a fixed point of diffusion, so it stays
 uniform however long the run is — and with the field flat, the policy's
 staleness model is the only thing left varying, and it saturates at tick 57.
 
-That is the gap between an episode that shows a fleet moving and one that
-shows a fleet *thinking*. The sweeps are visible; the reason for them is not.
+Since #124 the field is **in** the log rather than absent from it, so this is
+now visible rather than merely true: every tick's 850 bytes are the same 850
+bytes. That is the gap between an episode that shows a fleet moving and one
+that shows a fleet *thinking*. The sweeps are visible; the reason for them is
+not.
 Anyone regenerating this after #13 lands should expect these numbers to change,
 should expect the back half to stop being flat, and should revisit whether 400
 ticks is still the right length — at that point a longer run probably does earn
@@ -76,4 +82,5 @@ its bytes.
 ## Size
 
 `ARENA.md` and #43 cap every committed episode log here at 25 MB combined,
-including #48's SITL recording when it arrives. `demo.jsonl` is about 730 KB.
+including #48's SITL recording when it arrives. `demo.jsonl` is about 1.2 MB,
+of which roughly 480 kB is #124's belief field.

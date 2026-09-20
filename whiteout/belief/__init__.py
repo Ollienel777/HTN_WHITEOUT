@@ -5,6 +5,7 @@
 ribbon over the water of :data:`~whiteout.belief.geometry.DEFAULT_STRAIT`.
 """
 
+from whiteout.belief.encode import belief_frame, belief_geometry
 from whiteout.belief.field import BeliefError, BeliefField, BeliefPeak, Likelihood
 from whiteout.belief.geometry import (
     DEFAULT_STRAIT,
@@ -26,4 +27,6 @@ __all__ = [
     "GeometryError",
     "Likelihood",
     "StraitGeometry",
+    "belief_frame",
+    "belief_geometry",
 ]
