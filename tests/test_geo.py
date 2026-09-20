@@ -313,6 +313,16 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "tests/test_vision_projection.py",
         "tests/test_vision_standoff.py",
         "scripts/jpeg_quantisation.py",
+        # A rotation between two map grids, not a latitude-to-scale step.
+        # Gazebo's world axes are EPSG:3413 grid and grid north is not true
+        # north; the probe turns x/y by minus the site's published grid
+        # convergence to get East/North, then hands those to
+        # whiteout.geo.local_to_geodetic like every other caller. The sin and
+        # cos are of a convergence angle the arena reports, never of a
+        # latitude, and this file owns no ellipsoid and no second converter.
+        # It is also a measurement instrument that nothing under whiteout/
+        # imports, so the one-converter rule is not weakened by it.
+        "scripts/truth_probe.py",
     }
 )
 
