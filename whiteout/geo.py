@@ -135,6 +135,7 @@ import math
 from dataclasses import dataclass
 
 __all__ = [
+    "bearing_deg",
     "ARENA_ORIGIN",
     "WGS84_A",
     "WGS84_E2",
@@ -305,3 +306,21 @@ def geodetic_to_local(origin: GeoPoint, point: GeoPoint) -> LocalPoint:
         math.radians(point.lon_deg - origin.lon_deg) * east,
         math.radians(point.lat_deg - origin.lat_deg) * meridional,
     )
+
+
+def bearing_deg(origin: GeoPoint, point: GeoPoint) -> float:
+    """Bearing from ``origin`` to ``point``, degrees clockwise from north.
+
+    Lives here because it is a frame question, and this module is the one
+    converter in the build. It is defined on top of :func:`geodetic_to_local`
+    rather than on a great-circle formula of its own, so it cannot disagree
+    with the projection every other range and offset in the build is taken
+    in — which is the whole point of there being one converter.
+
+    Over a 6.5 km site the difference between this and a great-circle initial
+    bearing is far below the pointing accuracy of anything that consumes it.
+    Two coincident points have no bearing between them, and ``atan2(0, 0)``
+    is 0.0 rather than an error; callers that care must check the range.
+    """
+    offset = geodetic_to_local(origin, point)
+    return math.degrees(math.atan2(offset.east_m, offset.north_m)) % 360.0

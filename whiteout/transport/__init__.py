@@ -21,6 +21,7 @@ import inspect
 import os
 from collections.abc import Callable, Mapping
 
+from whiteout.transport.arena import ArenaTransport
 from whiteout.transport.base import TRANSPORT_METHODS, Transport, TransportError
 from whiteout.transport.kinematic import KinematicTransport
 
@@ -31,6 +32,7 @@ __all__ = [
     "TRANSPORT_METHODS",
     "TRANSPORT_NAMES",
     "TRANSPORT_ENV_VAR",
+    "ArenaTransport",
     "KinematicTransport",
     "Transport",
     "TransportError",
@@ -54,6 +56,7 @@ DEFAULT_TRANSPORT = "kinematic"
 #: go with it is impossible; adding a class that is never returned is too.
 TRANSPORT_FACTORIES: Mapping[str, Callable[..., Transport]] = {
     "kinematic": KinematicTransport,
+    "arena": ArenaTransport,
 }
 
 #: The subset of :data:`TRANSPORT_NAMES` this build can actually construct,
