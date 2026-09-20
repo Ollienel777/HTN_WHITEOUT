@@ -122,48 +122,63 @@ Do that here, not on Sunday.
 
 ```sh
 WHITEOUT_TRANSPORT=arena WHITEOUT_ARENA_ENDPOINT=10.99.4.1 \
-  python -m whiteout.cli run --ticks 400 --out artifacts/judged.jsonl
+WHITEOUT_TRACKS_ENDPOINT=http://10.99.4.1:8010 \
+  python -m whiteout.cli run --arm --ticks 400 --out artifacts/judged.jsonl
 ```
 
-That connects to all four assets, ticks the coordinator, commands waypoints and
-writes the episode log.
+That connects to all four assets, **commands the two aircraft to arm and take
+off**, opens every camera, ticks the coordinator, commands waypoints, holds
+whatever the cameras see and **submits it to the tracks API**, and writes the
+episode log.
 
-### What that command does not do yet
+### What has to be true before a vehicle moves
 
-One thing, and it is a human action that nothing in `whiteout run` performs.
-Read it before the judged run:
+Three things, and all three are off by default. A run started without them
+observes, believes and decides, and touches nothing:
 
-- **It does not arm or launch anything.** `ArenaTransport.arm_and_launch`
-  exists and pipelines the arm and the takeoff (the arm holds about three
-  seconds — `ARENA.md` §3), but no CLI path calls it. Until one does, the
-  aircraft have to be launched by hand, by MAVProxy or from a REPL holding the
-  connected transport:
+| for this to happen | this must be true |
+|---|---|
+| waypoints reach the fleet | `WHITEOUT_TRANSPORT=arena`, and **no** `--dry-run` |
+| the aircraft arm and take off | `WHITEOUT_TRANSPORT=arena`, **`--arm`**, and no `--dry-run` |
+| a fix reaches the judged endpoint | `WHITEOUT_TRACKS_ENDPOINT` is set, and no `--dry-run` |
 
-  ```python
-  # shapes from tests/test_transport_arena.py; not exercised from a machine
-  # without the arena
-  transport.arm_and_launch("quadcopter", altitude_m=60.0)
-  transport.arm_and_launch("fixed-wing")
-  transport.scan("tower-1")  # a tower is never armed: arm_and_launch
-  transport.scan("tower-2")  # refuses one, and `scan` is its fallback mode
-  ```
+`--arm` is opt-in because it moves real vehicles in a simulator the room
+shares. It takes off to `--launch-alt`, which defaults to the altitude the
+search policy flies at, so the first waypoint does not undo the climb.
+**Towers are never armed** — `arm_and_launch` refuses one and the caller does
+not ask. An asset that will not arm is reported by name and the run continues
+with the rest: an arena episode is live and cannot be repeated, so three
+assets searching beats none.
 
-**It does open the cameras and post the track** (#132). On the arena
-transport, and only there, the run builds `MotionGate(VisionSightings(...))`
-over the roster's camera feeds and a `TrackPoster` for
-`WHITEOUT_TRACKS_ENDPOINT`, opens the feeds before the loop and closes them
-after it. So the two bullets that used to sit here — "it posts nothing", "it
-runs no vision" — are gone, and a run with the transport and the endpoint both
-set does score. What is still a human action is the one above.
+Three lines to read, and each one distinguishes a cause you would otherwise
+have to guess at:
 
-Two things to read:
-
-- On stderr, on the way out: **`N of M cameras delivered frames`**, and a line
-  naming any camera that stopped and why. Without it "no contacts" has four
-  indistinguishable causes, and only one of them is "no vessel".
+- On stdout, at the start: **`run: arm and takeoff to 120 m sent to quadcopter,
+  fixed-wing`**, or a line naming whichever asset was not commanded. Read it as
+  *sent*, not as *flying*: the arm and the takeoff go out back to back without
+  waiting for a `COMMAND_ACK`, because the arming window is about three seconds
+  and waiting for the ack misses it. An ArduPilot pre-arm rejection therefore
+  prints this same line. **What tells you a vehicle left the ground is its
+  altitude** — the viewer's fleet rows, or gzweb. An asset named here and still
+  at its home altitude a few ticks in did not arm.
 - On stdout, at the start: **`run: submitting held tracks to …`**, or
   `not submitting tracks`. If you meant a judged run and see the second, the
   endpoint is unset and nothing you do later in the run will score.
+- On stderr, on the way out: **`N of M cameras delivered frames`**, and a line
+  naming any camera that stopped and why. Without it "no contacts" has four
+  indistinguishable causes, and only one of them is "no vessel".
+
+### What it still does not do
+
+- **It does not aim the towers on its own** beyond the waypoint-as-look-at
+  that `ArenaTransport.command` already turns into a **pan**. `_aim` sends
+  servo 1 and nothing else, so **tilt is never commanded** — a tower holds
+  whatever tilt it booted with, and a level tower is blind inside
+  `height / tan(vfov/2)`, which is 695 m for the taller mast. `set_servo` is
+  there to drive servo 2 and has no caller. If a tower is doing nothing
+  useful, `transport.scan("tower-1")` is the do-nothing-clever fallback mode.
+- **The towers are sited wherever `.env` puts them.** `scripts/tower_siting.py`
+  measures what that costs; moving them is a human action and a rebuild.
 
 ### While it runs
 

@@ -102,15 +102,36 @@ class _Detection:
 class _ArenaShapedTransport:
     """A transport that rosters assets the way the arena does, over no network."""
 
-    def __init__(self, fail_at: str | None = None, fail_close: bool = False) -> None:
+    def __init__(
+        self,
+        fail_at: str | None = None,
+        fail_close: bool = False,
+        roster: tuple[tuple[str, str], ...] = (("quadcopter", "quad"), ("tower-1", "tower")),
+        refuses: frozenset[str] = frozenset(),
+        drops_socket: frozenset[str] = frozenset(),
+    ) -> None:
         self._fail_close = fail_close
-        self.assets = (
-            type("AssetLink", (), {"asset_id": "quadcopter", "cls": "quad"})(),
-            type("AssetLink", (), {"asset_id": "tower-1", "cls": "tower"})(),
+        self.assets = tuple(
+            type("AssetLink", (), {"asset_id": asset_id, "cls": cls})() for asset_id, cls in roster
         )
         self.closes = 0
         self._t = 0.0
         self._fail_at = fail_at
+        self._refuses = refuses
+        self._drops_socket = drops_socket
+        #: Every (asset_id, altitude) this transport was asked to launch.
+        self.launched: list[tuple[str, float]] = []
+
+    def arm_and_launch(self, asset_id: str, altitude_m: float = 60.0) -> None:
+        from whiteout.transport import TransportError
+
+        if asset_id in self._refuses:
+            raise TransportError(f"{asset_id!r} would not arm")
+        if asset_id in self._drops_socket:
+            # What pymavlink raises when the UDP socket underneath it goes
+            # away mid-roster: an `OSError`, not a `TransportError`.
+            raise ConnectionResetError(f"{asset_id!r}: the link went away")
+        self.launched.append((asset_id, altitude_m))
 
     def connect(self) -> None:
         return None
@@ -488,9 +509,300 @@ def test_a_camera_whose_stream_ends_cleanly_is_reported_as_stopped(
     validate_episode_log(out)
 
 
+# -- arming the fleet (issue #138) -------------------------------------------
+
+#: The arena's real roster: two aircraft and two towers.
+_FULL_ROSTER = (
+    ("quadcopter", "quad"),
+    ("fixed-wing", "fixedwing"),
+    ("tower-1", "tower"),
+    ("tower-2", "tower"),
+)
+
+
+def _fleet(monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> _ArenaShapedTransport:
+    """An arena run over the full four-asset roster."""
+    transport = _ArenaShapedTransport(roster=_FULL_ROSTER, **kwargs)  # type: ignore[arg-type]
+    monkeypatch.setenv("WHITEOUT_ARENA_ENDPOINT", "10.99.4.1")
+    monkeypatch.delenv("WHITEOUT_TRACKS_ENDPOINT", raising=False)
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "arena")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    return transport
+
+
+def test_arm_launches_the_aircraft_and_never_a_tower(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """``arm_and_launch`` refuses a tower, so the caller must not ask one.
+
+    Asserting on what was *asked* rather than on what succeeded is the point:
+    a caller that asked and swallowed the refusal would pass a test written
+    the other way round, and would print a fault it had caused itself.
+    """
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert [asset for asset, _ in transport.launched] == ["quadcopter", "fixed-wing"]
+
+
+def test_the_fleet_is_not_armed_unless_it_is_asked_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """Off by default. This moves real vehicles in a simulator others share."""
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
+
+
+def test_a_dry_run_arms_nothing_however_it_was_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """``--dry-run`` is the stronger word, and it wins over ``--arm``.
+
+    ``docs/arena.md`` sells the dry run as the cheapest honest check, one that
+    sends nothing. A dry run that armed four vehicles would be the opposite.
+    """
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--dry-run", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
+
+
+def test_one_asset_that_will_not_arm_does_not_end_the_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """An arena run is live and cannot be repeated; three assets beat none."""
+    transport = _fleet(monkeypatch, refuses=frozenset({"quadcopter"}))
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert [asset for asset, _ in transport.launched] == ["fixed-wing"]
+    validate_episode_log(out)
+
+
+def test_the_launch_altitude_is_the_one_the_policy_flies_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """A default that disagreed would have the first waypoint undo the climb."""
+    from whiteout.policy import DEFAULT_SEARCH_PARAMS
+
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert {altitude for _, altitude in transport.launched} == {DEFAULT_SEARCH_PARAMS.search_alt_m}
+
+
+def test_the_launch_altitude_is_a_parameter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    transport = _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--launch-alt", "45", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert {altitude for _, altitude in transport.launched} == {45.0}
+
+
+def test_a_kinematic_run_never_arms_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate runs the smoke episode on this path and compares bytes.
+
+    ``--arm`` is accepted there rather than refused, so that a script with the
+    flag in it does not fail on the fake; it simply has nothing to launch.
+    """
+    transport = _ArenaShapedTransport(roster=_FULL_ROSTER)
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "kinematic")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    out = tmp_path / "kinematic.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
+
+
+def test_a_socket_that_drops_mid_roster_does_not_end_the_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """The promise is about *any* failure to arm, not only `TransportError`.
+
+    ``arm_and_launch`` writes to a pymavlink socket, so the likeliest thing to
+    go wrong mid-roster raises ``OSError``. Catching only ``TransportError``
+    let that out of ``_arm_fleet`` and ended the run before tick 1 — which is
+    the opposite of what the surrounding docstring promises.
+    """
+    transport = _fleet(monkeypatch, drops_socket=frozenset({"quadcopter"}))
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert [asset for asset, _ in transport.launched] == ["fixed-wing"]
+    validate_episode_log(out)
+
+
+def test_the_arming_line_reports_what_was_sent_and_not_what_flew(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nothing here reads a ``COMMAND_ACK``, so nothing here may claim a launch.
+
+    The arm and the takeoff are pipelined because the arming window is about
+    three seconds, which means a pre-arm rejection is indistinguishable from a
+    climb at this layer. An earlier revision printed ``run: launched …``, and
+    ``docs/arena.md`` tells the operator that line is how they know.
+    """
+    _fleet(monkeypatch)
+    out = tmp_path / "arena.jsonl"
+
+    assert cli.main(["run", "--arm", "--ticks", "3", "--out", str(out)]) == 0
+
+    line = next(
+        text
+        for text in capsys.readouterr().out.splitlines()
+        if "quadcopter" in text and "m" in text
+    )
+    assert "sent to" in line
+    assert "launched" not in line
+
+
+# -- a launch altitude that would reach MAV_CMD_NAV_TAKEOFF ------------------
+
+#: Every one of these parses as a float, and every one is nonsense as an
+#: altitude to command a real vehicle to.
+#:
+#: Written in the ``--flag=value`` form because the other one does not reach
+#: the code under test for all of them. ``argparse`` treats a token starting
+#: with ``-`` as an option unless it looks like a negative number, and its
+#: matcher is ``^-\d+$|^-\d*\.\d+$`` — so ``--launch-alt -50`` is a value but
+#: ``--launch-alt -inf`` is refused by the parser as a missing argument.
+#: ``=`` bypasses that split entirely, so it is the spelling that actually
+#: exercises the check.
+_BAD_ALTITUDES = ("-50", "0", "nan", "inf", "-inf")
+
+
+@pytest.mark.parametrize("altitude", _BAD_ALTITUDES)
+def test_a_launch_altitude_that_is_not_an_altitude_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    altitude: str,
+) -> None:
+    """``--launch-alt`` is the one flag on this command that moves a vehicle.
+
+    ``argparse`` takes all five of these as floats and they were forwarded
+    unchecked into ``MAV_CMD_NAV_TAKEOFF``'s altitude parameter. The repo
+    hand-diagnoses a negative ``--seed`` for the same reason.
+    """
+    built: list[object] = []
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "arena")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: built.append(object()))
+    out = tmp_path / "never.jsonl"
+
+    code = cli.main(["run", "--arm", f"--launch-alt={altitude}", "--ticks", "3", "--out", str(out)])
+
+    assert code == 1
+    assert "--launch-alt" in capsys.readouterr().err
+    # Refused before anything was connected to, and before any log was written.
+    assert built == []
+    assert not out.exists()
+
+
+def test_a_negative_launch_altitude_is_refused_in_either_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--launch-alt -50`` reaches the check; ``--launch-alt -inf`` does not.
+
+    Both are refused, but by different code, and the difference is argparse's
+    negative-number heuristic rather than anything here. Pinned so that a
+    later change to the flag's spelling cannot quietly let one of them land on
+    a vehicle.
+    """
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "arena")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: pytest.fail("built a transport"))
+    out = tmp_path / "never.jsonl"
+    run = ["run", "--arm", "--ticks", "3", "--out", str(out)]
+
+    # Looks like a negative number, so argparse hands it over and we refuse it.
+    assert cli.main([*run, "--launch-alt", "-50"]) == 1
+    # Does not, so argparse refuses it first, with its own exit code.
+    with pytest.raises(SystemExit) as exit_code:
+        cli.main([*run, "--launch-alt", "-inf"])
+    assert exit_code.value.code == 2
+
+
+def test_a_bad_launch_altitude_is_refused_on_the_fake_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rehearsal is where a typo in this flag should be found.
+
+    The kinematic transport launches nothing, so it would be consistent to
+    ignore the value there. It is checked anyway: the whole point of running
+    the fake first is that the live run is the one that cannot be repeated.
+    """
+    transport = _ArenaShapedTransport(roster=_FULL_ROSTER)
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "kinematic")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    out = tmp_path / "never.jsonl"
+
+    assert cli.main(["run", "--arm", "--launch-alt", "0", "--ticks", "3", "--out", str(out)]) == 1
+    assert transport.launched == []
+
+
+def test_a_bad_launch_altitude_is_ignored_when_nothing_will_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``--arm`` the value reaches no vehicle, so it fails no run.
+
+    This is the same call the flag pair already makes elsewhere: ``--arm`` on
+    a kinematic run is accepted rather than refused so a script carrying the
+    flag does not fail on the fake. A run that never arms is that case again.
+    """
+    transport = _ArenaShapedTransport(roster=_FULL_ROSTER)
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "kinematic")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    out = tmp_path / "ran.jsonl"
+
+    assert cli.main(["run", "--launch-alt", "-50", "--ticks", "3", "--out", str(out)]) == 0
+
+    assert transport.launched == []
+    validate_episode_log(out)
+
+
 # -- what is never posted ----------------------------------------------------
-
-
 def test_without_a_tracks_endpoint_an_arena_run_still_tracks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
