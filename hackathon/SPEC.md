@@ -184,7 +184,7 @@ in the build and it is made now.
 |---|---|---|
 | **Transport** | `whiteout/transport/` | The one interface and its three implementations. Adapters only: no belief, no policy, no scoring ever lives here. |
 | **Sim** | `whiteout/sim/` | Terrain, vehicle kinematics per class, sensor footprints and detection models, the target mover, the episode clock. Headless, deterministic under a seed, hundreds of × real time. |
-| **Scorer** | `whiteout/score/` | Our model of coverage, collaboration, efficiency, tracking accuracy. **Weights are parameters.** Consumes an episode log; pure function of it. |
+| **Scorer** | `whiteout/score/` | Our model of coverage, detection speed, tracking duration, search efficiency and accuracy — five of `ARENA.md` §5's seven criteria; autonomy and collaboration are read off behaviour and the explanation, not off a log. **Weights are parameters.** Consumes an episode log; pure function of it. Accuracy waits on `Truth.targets` being populated during an arena run, and the full model is #26. |
 | **Belief** | `whiteout/belief/` | The decaying occupancy field, the **negative-information** update, the particle/target estimator, the terrain flow network and its cuts. |
 | **Policy** | `whiteout/policy/` | Allocation (auction), information-gain routing, choke-point posting, the contact lifecycle machine, re-tasking hysteresis, and the **frontier-coverage fallback**. Objective = the scorer. |
 | **Tune** | `whiteout/tune/` | Batch runner, random search and CMA-ES over policy parameters, sweep artifacts, ablations, reports. |
@@ -344,7 +344,7 @@ It runs, in order, failing fast:
 | typecheck | `mypy whiteout` |
 | test | `pytest -q -m "not slow"` — **the `-m "not slow"` is required**: bare `pytest -q` collects `slow`-marked tests, and the one such test is a wall-clock throughput assertion (D9) that is a coin flip on shared runners and in parallel worktrees. `slow` tests run in the tuner (D23), never in the gate. |
 | build | `python -m build --wheel --no-isolation` (proves the package is installable, and it is what the submission links). **`--no-isolation` is required**: the default fetches the build backend from PyPI on every invocation, which breaks §4's no-egress rule and spends venue wifi on every gate run. |
-| smoke | `python -m whiteout.cli run --seed 7 --ticks 400 --out artifacts/smoke.jsonl` (no transport flag exists; `WHITEOUT_TRANSPORT` unset selects `kinematic`, per §7 and D3) then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print four finite scores |
+| smoke | `python -m whiteout.cli run --seed 7 --ticks 400 --out artifacts/smoke.jsonl` (no transport flag exists; `WHITEOUT_TRANSPORT` unset selects `kinematic`, per §7 and D3) then `python -m whiteout.cli score artifacts/smoke.jsonl --weights fixtures/weights/equal.json` — must exit 0 and print a line for every axis in `whiteout.score.AXES`, each one either a finite number or the words saying why this log cannot answer for it (#130); `coverage` is always a number |
 | determinism | second smoke run at the same seed; logs must be byte-identical |
 
 The gate must:

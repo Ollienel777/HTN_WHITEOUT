@@ -1,6 +1,7 @@
 {
-  "coverage": 0.25,
-  "collaboration": 0.25,
-  "efficiency": 0.25,
-  "tracking_accuracy": 0.25
+  "coverage": 0.2,
+  "detection_speed": 0.2,
+  "tracking_duration": 0.2,
+  "search_efficiency": 0.2,
+  "accuracy": 0.2
 }

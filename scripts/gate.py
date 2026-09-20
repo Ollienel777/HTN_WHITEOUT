@@ -54,7 +54,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SMOKE_LOG = REPO_ROOT / "artifacts" / "smoke.jsonl"
 SMOKE_LOG_SECOND = REPO_ROOT / "artifacts" / "smoke.second.jsonl"
 WEIGHTS = "fixtures/weights/equal.json"
-AXES = ("coverage", "collaboration", "efficiency", "tracking_accuracy")
+#: The axes ``whiteout score`` prints, in order — kept in step with
+#: ``whiteout.score.AXES`` and with ``fixtures/weights/equal.json``. Not every
+#: axis is a number: one an episode log cannot answer for prints words instead
+#: (``not detected``, ``not measured (no truth in log)``), which is the point
+#: of #130. The smoke step below checks that every axis appears and that the
+#: ones which are numbers are finite, rather than demanding five floats.
+AXES = (
+    "coverage",
+    "detection_speed",
+    "tracking_duration",
+    "search_efficiency",
+    "accuracy",
+)
+
+#: The axis every episode log can answer for, whatever else it carries.
+#: ``covered_fraction`` is on every record, so a run that cannot print this one
+#: as a finite number is broken.
+ALWAYS_NUMERIC = "coverage"
 
 #: The per-worktree fallback environment. `.venv` and not some new name: it is
 #: already in `.gitignore`, in `[tool.ruff] exclude`, in `[tool.mypy] exclude`
@@ -467,20 +484,41 @@ def step_build() -> str | None:
     return _shell_step([PY, "-m", "build", "--wheel", "--no-isolation"])
 
 
-def _finite_scores(stdout: str) -> list[float]:
-    found: list[float] = []
+def _axis_lines(stdout: str) -> dict[str, str] | None:
+    """Each axis's printed value, or None if an axis is missing.
+
+    The value is returned as it was printed: a number for an axis the log
+    answered for, and words for one it did not.
+    """
+    found: dict[str, str] = {}
     for axis in AXES:
-        match = re.search(rf"^{axis}:\s*(\S+)\s*$", stdout, re.MULTILINE)
+        match = re.search(rf"^{axis}:\s*(.+?)\s*$", stdout, re.MULTILINE)
         if match is None:
-            return []
-        try:
-            value = float(match.group(1))
-        except ValueError:
-            return []
-        if not math.isfinite(value):
-            return []
-        found.append(value)
+            return None
+        found[axis] = match.group(1)
     return found
+
+
+def _score_failure(stdout: str) -> str | None:
+    """Why the smoke step's score output is unacceptable, or None."""
+    axes = _axis_lines(stdout)
+    if axes is None:
+        return f"score did not print a line for each of {', '.join(AXES)}"
+    coverage = axes[ALWAYS_NUMERIC]
+    try:
+        value = float(coverage)
+    except ValueError:
+        return f"score printed a non-numeric {ALWAYS_NUMERIC}: {coverage!r}"
+    if not math.isfinite(value):
+        return f"score printed a non-finite {ALWAYS_NUMERIC}: {coverage!r}"
+    for axis, printed in axes.items():
+        try:
+            other = float(printed)
+        except ValueError:
+            continue  # words in place of a number: an axis this log cannot answer for
+        if not math.isfinite(other):
+            return f"score printed a non-finite {axis}: {printed!r}"
+    return None
 
 
 def _smoke_run(out: Path) -> str | None:
@@ -507,9 +545,7 @@ def step_smoke() -> str | None:
     sys.stderr.write(scored.stderr)
     if scored.returncode != 0:
         return f"score exited {scored.returncode}"
-    if len(_finite_scores(scored.stdout)) != len(AXES):
-        return f"score did not print four finite values for {', '.join(AXES)}"
-    return None
+    return _score_failure(scored.stdout)
 
 
 def step_determinism() -> str | None:
