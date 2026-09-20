@@ -57,6 +57,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from whiteout.belief.encode import belief_frame
 from whiteout.belief.field import BeliefError, BeliefField
 from whiteout.belief.geometry import DEFAULT_STRAIT, StraitGeometry
 from whiteout.belief.grid import ChannelBeliefGrid
@@ -71,6 +72,7 @@ from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole, SearchParams, Sear
 from whiteout.tracks.maintain import Sighting, TrackHold
 from whiteout.types import (
     BeliefDigest,
+    BeliefFrame,
     Contact,
     FleetIntent,
     Pose,
@@ -156,6 +158,10 @@ class TickOutcome:
     onto the episode record. A source that refuses silently would leave a
     camera's going dark looking exactly like an empty sea, which is the one
     thing worse than an unqualified fix.
+
+    ``field`` is the belief field quantised for drawing (#124), or ``None``
+    from a field this build cannot encode. It is the digest's large sibling:
+    the digest says how sharp the belief is, this says where it is.
     """
 
     intent: FleetIntent
@@ -164,6 +170,7 @@ class TickOutcome:
     posted: bool
     track_state: str
     refusals: tuple[SightingRefusal, ...] = ()
+    field: BeliefFrame | None = None
 
 
 class Coordinator:
@@ -283,6 +290,7 @@ class Coordinator:
             posted=posted,
             track_state=state,
             refusals=refusals,
+            field=self._field(now),
         )
 
     def _refusals(self) -> tuple[SightingRefusal, ...]:
@@ -385,6 +393,23 @@ class Coordinator:
             covered_fraction=covered,
             grid_shape=(int(shape[0]), int(shape[1])),
         )
+
+    def _field(self, now: float) -> BeliefFrame | None:
+        """The belief field, quantised for the viewer to draw (#124).
+
+        ``None`` from a field this module has no encoder for. The encoding is
+        a fact about the grid's cells — which of them are water, and where
+        their corners are on the map — so it belongs to the implementation
+        and not to :class:`~whiteout.belief.field.BeliefField`, which is
+        written in lat/lon and metres precisely so the policy never learns
+        that cells exist.
+
+        The layout rides on the first tick's frame and no other; see
+        :class:`~whiteout.types.BeliefGeometry` for what that buys.
+        """
+        if not isinstance(self._belief, ChannelBeliefGrid):
+            return None
+        return belief_frame(self._belief, now, include_geometry=self._ticks == 1)
 
     def _contacts(self, now: float, state: str) -> tuple[Contact, ...]:
         """The held track, as the log's contact record.

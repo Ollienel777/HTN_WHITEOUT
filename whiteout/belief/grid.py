@@ -359,6 +359,32 @@ class ChannelBeliefGrid:
         """Signed offset of each cell centre across the centreline, metres."""
         return self._w_centres.copy()
 
+    def corner_positions(self) -> tuple[_FloatArray, _FloatArray]:
+        """Latitude and longitude of the cell-corner lattice, as two arrays.
+
+        Both are ``(along + 1, across + 1)``, so cell ``(row, column)`` is the
+        quadrilateral on corners ``(row, column)``, ``(row + 1, column)``,
+        ``(row + 1, column + 1)`` and ``(row, column + 1)``.
+
+        Corners and not centres, because the consumer is the viewer, which
+        draws cells as quadrilaterals and may not compute a position for
+        itself: :mod:`whiteout.geo` is the repository's one converter, and
+        the viewer's JavaScript cannot import it. Handing over the corners
+        hands over the drawing without handing over a second conversion.
+        """
+        n_along, n_across = self._p.shape
+        s_edges = np.arange(n_along + 1, dtype=np.float64) * self._along_step
+        w_edges = -self._half_extent + np.arange(n_across + 1, dtype=np.float64) * (
+            self._across_step
+        )
+        lat = np.empty((n_along + 1, n_across + 1), dtype=np.float64)
+        lon = np.empty_like(lat)
+        for row, s_m in enumerate(s_edges):
+            for column, w_m in enumerate(w_edges):
+                point = ChannelPoint(s_m=float(s_m), w_m=float(w_m))
+                lat[row, column], lon[row, column] = self._geometry.to_position(point)
+        return lat, lon
+
     # -- the interface ------------------------------------------------------
 
     def mass(self) -> float:

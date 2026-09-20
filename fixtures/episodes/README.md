@@ -15,8 +15,17 @@ python -m whiteout.cli run --seed 7 --ticks 400 --out fixtures/episodes/demo.jso
 
 `WHITEOUT_TRANSPORT` unset selects `kinematic` (`SPEC.md` §7), which never
 opens a socket, so this reproduces anywhere. The run is a pure function of its
-seed: regenerating at seed 7 gives a byte-identical file, and the gate's
-determinism step depends on that staying true.
+seed — two runs on one machine are byte-identical, which is what the gate's
+determinism step asserts.
+
+**Across machines it is identical to about 1e-15, not to the byte.** The
+committed file was regenerated on a different numpy build from the one that
+wrote the previous commit's, and the two diverge in the last bit of `entropy`
+from record 16 on — 1.8e-15 at worst over the whole run, which moves no
+rendered pixel and no scored number. Worth knowing before you `cmp` this file
+against your own run and conclude something is wrong: the gate compares two
+fresh runs to *each other*, never to these committed bytes, so a diff here is
+not a determinism failure.
 
 ## What `demo.jsonl` is
 
@@ -25,11 +34,14 @@ determinism step depends on that staying true.
 arena adapter drives. The coordinator tasks the fleet every tick, the aircraft
 fly toward what they were told, and the towers stand where they were sited.
 
-Schema 5 (#117), so every pose carries `pitch`, `roll` and `measured_t`. This
-transport reports no measurement time by default — its fixes are computed, not
-received — so `measured_t` is `null` throughout, which is the honest answer
-rather than a zero-age fix nobody took. Pass `--pose-age` to exercise the
-staleness path.
+Schema 6 (#124), so every pose carries `pitch`, `roll` and `measured_t`, and
+every record carries `belief_field` — the belief grid's 850 water cells,
+quantised to a byte each, with the cell-corner lattice on the first record
+only. That is what the viewer draws the field from; it is a rendering channel
+and nothing reads it back. This transport reports no measurement time by
+default — its fixes are computed, not received — so `measured_t` is `null`
+throughout, which is the honest answer rather than a zero-age fix nobody took.
+Pass `--pose-age` to exercise the staleness path.
 
 **Regenerate it, never hand-merge it.** It is 400 records of generated output,
 so a conflict in it has no correct manual resolution: take either side, run the
@@ -61,7 +73,19 @@ accrues per second of exposure rather than per call, so halving
 caught it: the same 100 s of episode gave a peak probability of 0.0033, 0.0044
 or 0.0058 depending only on how often the loop ran.
 
+**And since #124 the field is in the log, so this is drawable rather than
+merely true.** Every record carries its 850 water cells, and **400 of the 400
+cell payloads are distinct** — the bytes change every tick because the fleet
+is eroding them. An earlier draft of this file, written against a build that
+had #124 but not #13, said the opposite in as many words: "every tick's 850
+bytes are the same 850 bytes". That was accurate when it was written and is
+the reason this section is measured rather than remembered. If you regenerate
+and find one distinct payload, the belief field is not being worked and the
+episode is showing a fleet that moves without thinking.
+
 ## Size
 
 `ARENA.md` and #43 cap every committed episode log here at 25 MB combined,
-including #48's SITL recording when it arrives. `demo.jsonl` is about 730 KB.
+including #48's SITL recording when it arrives. `demo.jsonl` is 1.24 MB, of
+which 504 kB is #124's belief field — 492 kB of per-tick cells and the 11.8 kB
+corner lattice that rides the first record.

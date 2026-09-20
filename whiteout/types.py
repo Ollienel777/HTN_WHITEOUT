@@ -52,6 +52,8 @@ module boundary (``SPEC.md`` §5).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
@@ -63,9 +65,12 @@ __all__ = [
     "CONTACT_STATES",
     "DEFAULT_MAX_SKEW_S",
     "FOOTPRINT_KINDS",
+    "QUANTISATION_STEPS",
     "SYNC_STATUSES",
     "VEHICLE_CLASSES",
     "BeliefDigest",
+    "BeliefFrame",
+    "BeliefGeometry",
     "Contact",
     "Detection",
     "EpisodeRecord",
@@ -130,6 +135,12 @@ SYNC_STATUSES: tuple[str, ...] = (
 #: a default and a parameter, never a constant: it is a statement about how
 #: much error we will stand behind, and that belongs to the operator.
 DEFAULT_MAX_SKEW_S = 0.25
+
+#: What byte 255 means in a :class:`BeliefFrame`. The quantisation is over
+#: ``[0, scale]`` in 255 steps, so the reconstruction error is at most
+#: ``scale / 255`` — one step — and :mod:`whiteout.belief.encode` is held to
+#: that by a test.
+QUANTISATION_STEPS = 255
 
 
 class RecordError(ValueError):
@@ -308,6 +319,20 @@ def _one_of(value: str, allowed: tuple[str, ...], where: str, name: str) -> str:
     if value not in allowed:
         raise RecordError(f"{where}.{name}: {value!r} is not one of {', '.join(allowed)}")
     return value
+
+
+def _b64_bytes(value: str, where: str) -> bytes:
+    """Decode a strict base64 field, naming it if it is not one.
+
+    ``validate=True`` so that a field with a character base64 has no meaning
+    for is rejected rather than skipped over: the default discards them
+    silently, which turns a corrupted payload into a short one and moves the
+    complaint to a length check that cannot say what went wrong.
+    """
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RecordError(f"{where}: not valid base64: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -860,20 +885,18 @@ class FleetIntent:
 class BeliefDigest:
     """A summary of the belief field, small enough to log every tick.
 
-    The field itself is a raster and does not belong in a JSONL line. The
-    digest is what the viewer's header and the scorer's coverage axis read:
-    ``entropy`` in nats, ``mass`` the field's total probability mass,
+    The digest is what the viewer's header and the scorer's coverage axis
+    read: ``entropy`` in nats, ``mass`` the field's total probability mass,
     ``peak_lat``/``peak_lon`` the most likely target location with ``peak_p``
     its density,
     ``covered_fraction`` the share of cells swept at least once, and
     ``grid_shape`` the field's dimensions **in cells**.
 
-    ``grid_shape`` alone does not georeference the field: mapping a cell to a
-    world coordinate also needs the grid's origin and cell size (or its world
-    bounds), and this log is the only artifact the viewer reads. Those fields
-    are not here yet — adding them is a schema change and a
-    :data:`~whiteout.log.SCHEMA_VERSION` bump, and it is a decision for the
-    belief-field ticket that will populate them, not for this type.
+    ``grid_shape`` alone does not georeference the field, and this type does
+    not try to. The per-cell probabilities and the lat/lon of the cells they
+    sit in are :class:`BeliefFrame`'s, which is a sibling of this on the
+    record rather than a member of it: the digest is the small thing every
+    reader wants, and the frame is the large one only a renderer does.
     """
 
     t: float
@@ -908,6 +931,166 @@ class BeliefDigest:
             peak_p=_float(data, where, "peak_p"),
             covered_fraction=_float(data, where, "covered_fraction"),
             grid_shape=_int_pair(data, where, "grid_shape"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefGeometry:
+    """Where the belief field's cells are — the part that never changes.
+
+    A :class:`BeliefFrame` is a row of numbers; this is what turns index *i*
+    into a quadrilateral on the map. It is **episode-constant**, so it ships
+    once, on the first frame of the log, and is ``None`` on every frame after
+    it. That is the one place this log departs from "every line is
+    self-describing", and it is bought deliberately: the lattice is about
+    11.8 kB on the default grid, so shipping it on all 400 ticks of an episode
+    would cost 4.7 MB to restate a constant, against ``ARENA.md``'s 25 MB cap
+    on committed episodes.
+
+    ``shape`` is the field in cells, along the channel by across it.
+
+    ``water`` is a bitfield over ``shape``, row-major, most significant bit
+    first — ``numpy.packbits``' own layout — with a 1 for each cell the vessel
+    could be in. Its set bits, read in that order, are exactly the cells
+    :attr:`BeliefFrame.cells` carries, which is what makes a byte's position
+    in that array mean a position on the map.
+
+    ``corners`` is the **cell-corner lattice**, ``(along + 1) × (across + 1)``
+    positions as interleaved big-endian ``float32`` lat/lon pairs, row-major.
+    Cell ``(row, column)`` is the quadrilateral on corners ``(row, column)``,
+    ``(row + 1, column)``, ``(row + 1, column + 1)`` and ``(row, column + 1)``.
+
+    **Corners rather than centres, and float32 rather than float64**, both for
+    the same reason: the consumer is a renderer. A centre needs the cell's
+    local bearing to be drawn as anything but a dot, and that bearing is a
+    trigonometric question about the channel — the one thing the viewer may
+    not answer for itself, since :mod:`whiteout.geo` is the repository's only
+    converter and the viewer cannot import it. Corners are the answer already
+    computed. ``float32`` resolves about 1 m at this latitude, against cells
+    100 m across.
+
+    **Big-endian on the wire** so that the bytes, and therefore the log, do
+    not depend on the machine that wrote them. The gate compares two runs byte
+    for byte.
+    """
+
+    shape: tuple[int, int]
+    water: str
+    corners: str
+
+    def __post_init__(self) -> None:
+        _as_int_pair(self, "shape")
+        along, across = self.shape
+        if along < 1 or across < 1:
+            raise RecordError(f"belief_field.geometry.shape must be positive, got {self.shape!r}")
+        water = _b64_bytes(self.water, "belief_field.geometry.water")
+        expected_water = (along * across + 7) // 8
+        if len(water) != expected_water:
+            raise RecordError(
+                f"belief_field.geometry.water: expected {expected_water} bytes for a "
+                f"{along}x{across} grid, got {len(water)}"
+            )
+        corners = _b64_bytes(self.corners, "belief_field.geometry.corners")
+        expected_corners = (along + 1) * (across + 1) * 2 * 4
+        if len(corners) != expected_corners:
+            raise RecordError(
+                f"belief_field.geometry.corners: expected {expected_corners} bytes for a "
+                f"{along + 1}x{across + 1} lattice, got {len(corners)}"
+            )
+
+    def water_cells(self) -> int:
+        """How many cells the mask marks as water."""
+        return sum(byte.bit_count() for byte in _b64_bytes(self.water, "geometry.water"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_json_dict(self)
+
+    @classmethod
+    def from_dict(cls, payload: object, where: str = "belief_field.geometry") -> BeliefGeometry:
+        data = _mapping(payload, where)
+        _check_keys(data, where, BeliefGeometry)
+        return BeliefGeometry(
+            shape=_int_pair(data, where, "shape"),
+            water=_str(data, where, "water"),
+            corners=_str(data, where, "corners"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefFrame:
+    """The belief field's per-cell probability, quantised, for **drawing only**.
+
+    Issue #124. The viewer reads the episode log and nothing else, so a belief
+    field that exists only inside the process is a belief field nobody can
+    see, and the erosion that makes the fleet's reasoning legible cannot be
+    drawn.
+
+    **Nothing reads this back into a belief field, and nothing may.** The
+    quantisation below is lossy, and the field it came from is the state; this
+    is a picture of it. A scorer or an estimator that reconstructed from here
+    would be reasoning about a rounded copy of a number it could have had
+    exactly.
+
+    ``cells`` is one unsigned byte per water cell, base64-encoded, in the
+    order :attr:`BeliefGeometry.water`'s set bits run. A byte ``b`` decodes to
+    the probability ``b / 255 * scale``, so ``scale`` — the most probable
+    cell's mass — is what byte 255 means, and the reconstruction is within
+    ``scale / 255`` of the original. Re-scaling per frame rather than fixing
+    the range at ``[0, 1]`` is what keeps the resolution useful: a field over
+    850 cells peaks around 0.01 even when it is sharply concentrated, so a
+    fixed range would spend 254 of its 255 codes on values that never occur
+    and quantise the whole field to 0 or 1.
+
+    ``water_cells`` restates the length ``cells`` must decode to, so that a
+    frame validates on its own rather than only on the line the geometry
+    happens to be on.
+
+    ``geometry`` is present on the episode's first frame and ``None``
+    afterwards; see :class:`BeliefGeometry` for why.
+    """
+
+    t: float
+    water_cells: int
+    scale: float
+    cells: str
+    geometry: BeliefGeometry | None
+
+    def __post_init__(self) -> None:
+        _as_floats(self, "t", "scale")
+        if self.water_cells < 1:
+            raise RecordError(
+                f"belief_field.water_cells must be positive, got {self.water_cells!r}"
+            )
+        if self.scale < 0.0:
+            raise RecordError(f"belief_field.scale must not be negative, got {self.scale!r}")
+        cells = _b64_bytes(self.cells, "belief_field.cells")
+        if len(cells) != self.water_cells:
+            raise RecordError(
+                f"belief_field.cells: expected {self.water_cells} bytes, got {len(cells)}"
+            )
+        if self.geometry is not None:
+            masked = self.geometry.water_cells()
+            if masked != self.water_cells:
+                raise RecordError(
+                    f"belief_field: the geometry marks {masked} water cells but the frame "
+                    f"carries {self.water_cells}"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_json_dict(self)
+
+    @classmethod
+    def from_dict(cls, payload: object, where: str = "belief_field") -> BeliefFrame:
+        data = _mapping(payload, where)
+        _check_keys(data, where, BeliefFrame)
+        raw = data["geometry"]
+        geometry = None if raw is None else BeliefGeometry.from_dict(raw, f"{where}.geometry")
+        return BeliefFrame(
+            t=_float(data, where, "t"),
+            water_cells=_int(data, where, "water_cells"),
+            scale=_float(data, where, "scale"),
+            cells=_str(data, where, "cells"),
+            geometry=geometry,
         )
 
 
@@ -1048,6 +1231,13 @@ class EpisodeRecord:
     exactly what the transport reported, and a refusal is a decision taken
     afterwards, on this side of the seam. Empty is the normal case, and on a run
     with no camera path it is empty for the whole episode.
+
+    ``belief_field`` is the drawable copy of the belief field
+    (:class:`BeliefFrame`), and ``None`` on a run with no belief field behind
+    it — a transport with no roster has nothing to coordinate and so nothing
+    to believe. It is a sibling of ``belief_digest`` rather than a member of
+    it, because the digest is the summary every reader wants and this is the
+    raster only a renderer does.
     """
 
     schema_version: int
@@ -1058,6 +1248,7 @@ class EpisodeRecord:
     contacts: tuple[Contact, ...]
     truth: Truth
     refusals: tuple[SightingRefusal, ...] = ()
+    belief_field: BeliefFrame | None = None
 
     def __post_init__(self) -> None:
         _as_floats(self, "t")
@@ -1088,6 +1279,10 @@ class EpisodeRecord:
             SightingRefusal.from_dict(item, f"{where}.refusals[{index}]")
             for index, item in enumerate(_sequence(data, where, "refusals"))
         )
+        raw_field = data["belief_field"]
+        belief_field = (
+            None if raw_field is None else BeliefFrame.from_dict(raw_field, f"{where}.belief_field")
+        )
         return EpisodeRecord(
             schema_version=_int(data, where, "schema_version"),
             t=_float(data, where, "t"),
@@ -1097,4 +1292,5 @@ class EpisodeRecord:
             contacts=contacts,
             truth=Truth.from_dict(data["truth"], f"{where}.truth"),
             refusals=refusals,
+            belief_field=belief_field,
         )
