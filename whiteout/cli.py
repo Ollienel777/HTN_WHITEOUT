@@ -28,9 +28,10 @@ from whiteout.geo import ARENA_ORIGIN
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
 from whiteout.policy import AssetRole
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
-from whiteout.tracks.client import TrackPoster
+from whiteout.tracks.client import TrackPoster, TracksClient, TracksError, endpoint_from_env
 from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
+from whiteout.transport.arena import host_from_env
 from whiteout.types import (
     BeliefDigest,
     BeliefFrame,
@@ -40,6 +41,9 @@ from whiteout.types import (
     SightingRefusal,
     Truth,
 )
+from whiteout.vision.camera import VisionError
+from whiteout.vision.motion import MotionGate
+from whiteout.vision.sightings import VisionSightings, arena_feeds
 
 #: Ordered scoring axes. The sponsor scores on exactly these four.
 AXES: tuple[str, str, str, str] = (
@@ -50,6 +54,15 @@ AXES: tuple[str, str, str, str] = (
 )
 
 _NOT_YET = "not implemented yet"
+
+#: The water plane's altitude in the datum the poses are reported in, metres
+#: (#76). The arena adapter reports MSL and ``ARENA.md``'s water plane is
+#: ``z = 0`` in the world, so zero is the number here. It is threaded from
+#: this one place into both the coordinator's negative-information update and
+#: the camera path's projection: two defaults that happened to agree would be
+#: two numbers to change, and the day they disagreed the belief and the
+#: sightings would be measuring heights above different surfaces.
+GROUND_ALT_M = 0.0
 
 
 def _resolve_seed(explicit: int | None) -> int | None:
@@ -114,10 +127,136 @@ def _coordinator_for(
     if not assets:
         return None
     roles = tuple(AssetRole(asset.asset_id, asset.cls) for asset in assets)
-    hold: TrackHold | None = None
-    if poster is not None:
-        hold = TrackHold(DEFAULT_TRACK_NAME, poster)
-    return Coordinator(roles, hold=hold, sightings=sightings)
+    # The hold is built whether or not there is anywhere to post to. It is
+    # what turns sightings into contacts and into the stand-off the quad is
+    # tasked with, so gating it on the poster made `WHITEOUT_TRACKS_ENDPOINT`
+    # decide whether the fleet *tracks* rather than whether it *submits*: a
+    # rehearsal with the endpoint unset logged an empty sea while the cameras
+    # saw the vessel every tick. `TrackHold` takes an optional poster for
+    # exactly this reason.
+    hold = TrackHold(DEFAULT_TRACK_NAME, poster)
+    return Coordinator(roles, hold=hold, sightings=sightings, ground_alt_m=GROUND_ALT_M)
+
+
+def _arena_camera(assets: tuple[str, ...]) -> VisionSightings | None:
+    """The arena's cameras as a sighting source, or ``None`` if there are none.
+
+    Arena-only, and built here rather than inside :func:`_coordinator_for` so
+    that the run loop keeps something to open and close. The host is the
+    transport's own — :func:`~whiteout.transport.arena.host_from_env` — so the
+    cameras and the MAVLink links can never be pointed at different arenas.
+
+    ``assets`` is the roster the transport is actually flying, so the same is
+    true of *which* cameras: ``WHITEOUT_ARENA_ROSTER`` is the one sanctioned
+    lever over the fleet, and a run narrowed by it used to open four MJPEG
+    sockets regardless. An asset with no published camera port is skipped by
+    :func:`~whiteout.vision.sightings.arena_feeds`, so a roster of towers
+    alone is what makes the empty case below reachable.
+
+    **A camera that dies does not end the run, and does not keep reporting.**
+    Each feed is drained by its own thread that records a stream failure
+    rather than raising, and
+    :meth:`~whiteout.vision.sightings.VisionSightings.sightings` skips a feed
+    that has stopped draining — so four assets over a network degrade one at a
+    time to "no sightings from that asset". That skip is load-bearing rather
+    than tidy: a feed holds its last frame for ever, and re-projecting it
+    through a moving airframe's current pose invents a vessel that keeps pace
+    with the aircraft.
+    """
+    feeds = arena_feeds(host_from_env(), assets)
+    if not feeds:
+        print("run: no camera in the arena roster; running without sightings", file=sys.stderr)
+        return None
+    return VisionSightings(feeds=feeds, ground_alt_m=GROUND_ALT_M)
+
+
+def _report_cameras(camera: VisionSightings) -> None:
+    """Say what each feed actually did, on the way out.
+
+    Without this, "no contacts" on a three-minute judged run has four
+    indistinguishable causes: no vessel in frame, a camera that never
+    connected, one that died at tick 40, and a fleet whose every stream was
+    refused. Each feed already counts its frames and records why it stopped
+    (:attr:`~whiteout.vision.sightings.CameraFeed.frames_seen`,
+    :attr:`~whiteout.vision.sightings.CameraFeed.error`) and until now nothing
+    read either, so an entirely blind fleet exited 0 with nothing on stderr —
+    the same output as a correct run over empty water.
+
+    **A stopped feed is asked about with
+    :attr:`~whiteout.vision.sightings.CameraFeed.draining`, not with
+    ``error``.** An MJPEG server that closes the connection ends the stream
+    without raising, so ``error`` stays ``None`` and ``frames_seen`` stays at
+    whatever it reached — which is the "died at tick 40" case above, the one
+    this function exists for, and the one ``error`` alone cannot see. It is
+    the same distinction
+    :meth:`~whiteout.vision.sightings.VisionSightings.sightings` draws when it
+    stops trusting a feed's last frame; reporting on a weaker test than the
+    one the run loop acts on would mean a camera the fleet had already given
+    up on still counted as healthy here. This runs before ``camera.close()``,
+    so ``draining`` still answers about the run rather than about the
+    shutdown.
+
+    On stderr, because on the arena that is what the operator is watching, and
+    printed even when every feed is healthy: a line saying four cameras
+    delivered frames is how "no contacts" gets to mean "no vessel".
+    """
+    for feed in camera.feeds:
+        why = feed.error
+        if why is not None:
+            print(
+                f"run: camera {feed.asset_id} stopped after {feed.frames_seen} frames: {why}",
+                file=sys.stderr,
+            )
+        elif feed.frames_seen == 0:
+            print(f"run: camera {feed.asset_id} delivered no frames", file=sys.stderr)
+        elif not feed.draining:
+            print(
+                f"run: camera {feed.asset_id} stopped after {feed.frames_seen} frames: "
+                f"the stream ended",
+                file=sys.stderr,
+            )
+    seen = sum(1 for feed in camera.feeds if feed.frames_seen > 0)
+    live = sum(1 for feed in camera.feeds if feed.draining)
+    # Both numbers, because they answer different questions and the episode
+    # is scored on the second: `seen` says the fleet was wired up, `live` says
+    # it was still watching when the run ended. Four cameras that delivered
+    # frames and one still streaming is a fleet that went blind, and the
+    # summary line is where an operator would otherwise read "4 of 4" and
+    # stop looking.
+    print(
+        f"run: {seen} of {len(camera.feeds)} cameras delivered frames, "
+        f"{live} still streaming at the end",
+        file=sys.stderr,
+    )
+
+
+def _arena_poster(dry_run: bool = False) -> TrackPoster | None:
+    """A poster for the tracks API, or ``None`` when no endpoint is configured.
+
+    ``WHITEOUT_TRACKS_ENDPOINT`` is the gate, and it is the client's own
+    (:func:`~whiteout.tracks.client.endpoint_from_env`): unset, it raises
+    rather than inventing an address, and this turns that into "do not submit"
+    rather than into a failed run. So a run posts to a live endpoint exactly
+    when that variable names one, and never by default.
+
+    ``--dry-run`` is the second gate, and it wins. ``docs/arena.md`` §2 step 3
+    sells the dry run as "the cheapest honest check", one that "sends
+    nothing", and step 4 is where the operator is told to export the endpoint
+    — so without this, re-running step 3 in that shell would fabricate and keep
+    updating a scored track from a run nobody intended to count. A dry run
+    still watches and still holds the track (the hold takes no poster); it
+    just has nowhere to send it.
+    """
+    if dry_run:
+        print("run: --dry-run; not submitting tracks")
+        return None
+    try:
+        endpoint = endpoint_from_env()
+    except TracksError as exc:
+        print(f"run: not submitting tracks ({exc})")
+        return None
+    print(f"run: submitting held tracks to {endpoint}")
+    return TrackPoster(TracksClient(endpoint))
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -141,6 +280,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"run: {exc}", file=sys.stderr)
         return 1
     records: list[EpisodeRecord] = []
+    camera: VisionSightings | None = None
+    poster: TrackPoster | None = None
+    # Whether every tick ran. It decides what a failure on the way *out* costs:
+    # see the write below.
+    flown = False
+    failure: str | None = None
     # `connect` is inside both the `try/except` and the `try/finally`: a
     # transport that refuses to start — `SPEC.md` §7 makes that sitl's normal
     # path — must produce the diagnostic `base.TransportError` promises, and a
@@ -148,7 +293,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         try:
             transport.connect()
-            coordinator = _coordinator_for(transport)
+            if name == "arena":
+                # Arena-only, deliberately. The gate's determinism step runs
+                # the smoke episode twice on the default kinematic transport
+                # and compares bytes; a camera or a poster on that path would
+                # put a network and a wall clock inside a run that has to be
+                # reproducible, so neither is ever built for it.
+                camera = _arena_camera(
+                    tuple(asset.asset_id for asset in getattr(transport, "assets", ()))
+                )
+                poster = _arena_poster(dry_run=args.dry_run)
+            sightings: SightingSource | None = None
+            if camera is not None:
+                camera.open()
+                # The gate keeps ice out of the belief (#107). It is a
+                # decorator over the source, so the loop below cannot tell it
+                # is there.
+                sightings = MotionGate(camera)
+            coordinator = _coordinator_for(transport, poster=poster, sightings=sightings)
             for _tick in range(args.ticks):
                 observation = transport.observe()
                 if coordinator is None:
@@ -184,11 +346,44 @@ def cmd_run(args: argparse.Namespace) -> int:
                         belief_field=field,
                     )
                 )
+            flown = True
         finally:
-            transport.close()
+            # Three independent shutdowns, each on threads of its own, so each
+            # gets its own `finally`: a run that failed partway must not leave
+            # four camera threads draining sockets, and the poster drains what
+            # is pending on the way out so the last held fix is not lost. Run
+            # in sequence, `transport.close()` raising would have skipped both
+            # of the lines below it — which is the one case the guarantee was
+            # written for.
+            if camera is not None:
+                _report_cameras(camera)
+            try:
+                transport.close()
+            finally:
+                try:
+                    if camera is not None:
+                        camera.close()
+                finally:
+                    if poster is not None:
+                        poster.close()
     except TransportError as exc:
-        print(f"run: {exc}", file=sys.stderr)
-        return 1
+        failure = str(exc)
+    except (OSError, VisionError, TracksError) as exc:
+        # `close()` is the one place in this command that can raise something
+        # other than `TransportError` — a socket teardown, a camera thread, a
+        # client. Diagnosed rather than left to print a traceback at the end
+        # of a live arena run.
+        failure = str(exc)
+    if failure is not None:
+        print(f"run: {failure}", file=sys.stderr)
+        if not flown:
+            return 1
+        # The episode ran to its last tick and the failure came afterwards,
+        # on the way out. An arena run is live and cannot be repeated, so
+        # throwing its log away to report a socket that would not close is
+        # the more expensive of the two mistakes: write it, and still exit
+        # non-zero, because the run did fail.
+        print("run: the episode completed; writing its log before reporting", file=sys.stderr)
     out = Path(args.out)
     try:
         written = write_episode_log(out, records)
@@ -196,7 +391,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"run: {exc}", file=sys.stderr)
         return 1
     print(f"run: wrote {written} records to {out} (transport={name})")
-    return 0
+    return 0 if failure is None else 1
 
 
 def cmd_score(args: argparse.Namespace) -> int:
@@ -274,7 +469,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--dry-run",
         action="store_true",
-        help="decide and log, but send no waypoint to the fleet",
+        help=(
+            "decide and log, but send nothing: no waypoint to the fleet and "
+            "no track to the scored API, whatever WHITEOUT_TRACKS_ENDPOINT says"
+        ),
     )
     run.add_argument("--seed", type=int, default=None)
     run.add_argument("--ticks", type=int, default=400)

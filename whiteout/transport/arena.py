@@ -75,6 +75,7 @@ __all__ = [
     "ROSTER_ENV",
     "ArenaTransport",
     "AssetLink",
+    "host_from_env",
     "roster_from_env",
 ]
 
@@ -167,7 +168,14 @@ def roster_from_env(env: dict[str, str] | None = None) -> tuple[AssetLink, ...]:
         raise TransportError(f"{ROSTER_ENV}={path!r} has a malformed row: {error}") from error
 
 
-def _host_from_env(env: dict[str, str] | None = None) -> str:
+def host_from_env(env: dict[str, str] | None = None) -> str:
+    """The arena host from ``WHITEOUT_ARENA_ENDPOINT``, as this adapter reads it.
+
+    Public because the cameras answer on the same host as the MAVLink links
+    (``ARENA.md`` §4), so the run loop needs it too. A second reader of the
+    same variable would be a second place to get the parsing wrong (#63), so
+    there is one function and both callers use it.
+    """
     source = os.environ if env is None else env
     value = source.get(ENDPOINT_ENV, "").strip()
     if not value:
@@ -303,7 +311,7 @@ class ArenaTransport:
         # on any machine without the arena, which is every machine but one.
         host = self._host_override
         if host is None:
-            host = _host_from_env()
+            host = host_from_env()
         self._host = host
         for asset in self._roster:
             link = _Link(asset, host)

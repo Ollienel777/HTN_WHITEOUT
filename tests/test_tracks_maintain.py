@@ -271,3 +271,23 @@ def test_a_lost_track_re_seeds_from_anywhere(hold: TrackHold) -> None:
     hold.sight(elsewhere)
     assert hold.last_sighting == elsewhere
     assert hold.unassociated == 0
+
+
+# -- holding is not submitting ----------------------------------------------
+
+
+def test_a_hold_with_no_poster_tracks_and_sends_nothing() -> None:
+    """Holding and submitting are separate jobs (#132 review, R1-M3).
+
+    With the poster mandatory, ``whiteout run`` built no hold at all when no
+    endpoint was configured, so a rehearsal tracked nothing, tasked nobody and
+    logged an empty sea while the cameras saw the vessel every tick.
+    """
+    offline = TrackHold("Sierra One", post_interval_s=2.0, coast_s=12.0)
+    _walk(offline, 0.0, 11)
+    assert offline.state == "held"
+    assert offline.holder == "quadcopter"
+    assert offline.last_sighting is not None
+    assert 5 <= offline.posts <= 6, "the hold still knows which fixes were new"
+    _heading, speed = offline.course()
+    assert speed == pytest.approx(3.0, abs=0.5)

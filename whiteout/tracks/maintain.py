@@ -135,12 +135,19 @@ class TrackHold:
     Feed it :meth:`sight` whenever an asset sees the vessel and :meth:`tick`
     every control cycle. It decides what to post and when, and reports its own
     state honestly.
+
+    ``poster`` is optional, and that is what separates *holding* a track from
+    *submitting* it. With no poster the hold does everything else it does —
+    associates sightings, keeps its identity through a handoff, names its own
+    state, and reports the fixes it would have sent — and sends nothing. A
+    rehearsal or an offline demo therefore still tracks, still tasks the fleet
+    and still logs contacts; only the outbound POST is missing.
     """
 
     def __init__(
         self,
         name: str,
-        poster: TrackPoster,
+        poster: TrackPoster | None = None,
         *,
         post_interval_s: float = DEFAULT_POST_INTERVAL_S,
         coast_s: float = DEFAULT_COAST_S,
@@ -199,7 +206,7 @@ class TrackHold:
 
     @property
     def posts(self) -> int:
-        """How many fixes have been handed to the poster."""
+        """How many new fixes the hold released — handed to the poster, if any."""
         return self._posts
 
     @property
@@ -285,7 +292,8 @@ class TrackHold:
     def tick(self, t: float) -> bool:
         """Advance the clock to ``t`` and post if there is something new.
 
-        Returns whether a fix was handed to the poster. Posting is skipped
+        Returns whether there was a new fix to post — which is also whether
+        one was handed to the poster, when there is a poster. Posting is skipped
         when there is no sighting, when the newest sighting has already been
         posted, and when the interval has not elapsed — never because the
         vessel is hard to see, and never with a position we did not just
@@ -305,15 +313,16 @@ class TrackHold:
         ):
             return False
         heading, speed = self.course()
-        self._poster.submit(
-            TrackFix(
-                name=self._name,
-                lat_deg=last.lat_deg,
-                lon_deg=last.lon_deg,
-                heading_deg=heading,
-                speed_mps=speed,
+        if self._poster is not None:
+            self._poster.submit(
+                TrackFix(
+                    name=self._name,
+                    lat_deg=last.lat_deg,
+                    lon_deg=last.lon_deg,
+                    heading_deg=heading,
+                    speed_mps=speed,
+                )
             )
-        )
         self._posted_t = last.t
         self._last_post_at = self._now
         self._posts += 1
