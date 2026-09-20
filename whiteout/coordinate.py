@@ -63,7 +63,14 @@ from whiteout.belief.grid import ChannelBeliefGrid
 from whiteout.geo import GeoPoint
 from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole, SearchParams, SearchPolicy
 from whiteout.tracks.maintain import Sighting, TrackHold
-from whiteout.types import BeliefDigest, Contact, FleetIntent, Pose, WorldObservation
+from whiteout.types import (
+    BeliefDigest,
+    Contact,
+    FleetIntent,
+    Pose,
+    SightingRefusal,
+    WorldObservation,
+)
 from whiteout.vision.camera import CAMERAS, VisionError
 from whiteout.vision.standoff import standoff_point, standoff_range_m
 
@@ -73,6 +80,7 @@ __all__ = [
     "DEFAULT_TRACK_NAME",
     "Coordinator",
     "NoSightings",
+    "RefusingSightingSource",
     "SightingSource",
     "TickOutcome",
 ]
@@ -98,6 +106,22 @@ class SightingSource(Protocol):
         """Zero or more sightings, in the observation's timebase."""
 
 
+class RefusingSightingSource(Protocol):
+    """A source that can also say what it *declined* to turn into a sighting.
+
+    Separate from :class:`SightingSource`, and read off the object rather than
+    required of it, so that a source with nothing to refuse — :class:`NoSightings`
+    and every test double — stays a one-method protocol. ``refusals`` describes
+    the most recent ``sightings`` call.
+    """
+
+    def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
+        """Zero or more sightings, in the observation's timebase."""
+
+    def refusals(self) -> tuple[SightingRefusal, ...]:
+        """What the last ``sightings`` call dropped, and why."""
+
+
 class NoSightings:
     """Sees nothing, ever.
 
@@ -112,13 +136,20 @@ class NoSightings:
 
 @dataclass(frozen=True)
 class TickOutcome:
-    """What one tick decided, in the shapes the episode log wants."""
+    """What one tick decided, in the shapes the episode log wants.
+
+    ``refusals`` is what the sighting source declined to use and why, straight
+    onto the episode record. A source that refuses silently would leave a
+    camera's going dark looking exactly like an empty sea, which is the one
+    thing worse than an unqualified fix.
+    """
 
     intent: FleetIntent
     digest: BeliefDigest
     contacts: tuple[Contact, ...]
     posted: bool
     track_state: str
+    refusals: tuple[SightingRefusal, ...] = ()
 
 
 class Coordinator:
@@ -185,6 +216,7 @@ class Coordinator:
 
         poses = {pose.asset_id: pose for pose in observation.poses}
         seen = self._sightings.sightings(observation)
+        refusals = self._refusals()
         for sighting in seen:
             self._belief.update_detection(
                 sighting.lat_deg, sighting.lon_deg, sigma_m=self._detection_sigma_m
@@ -220,7 +252,21 @@ class Coordinator:
             contacts=self._contacts(now, state),
             posted=posted,
             track_state=state,
+            refusals=refusals,
         )
+
+    def _refusals(self) -> tuple[SightingRefusal, ...]:
+        """What the source declined this tick, from a source that can say.
+
+        Asked of the object rather than of the protocol, the way
+        ``whiteout.cli`` asks a transport for its roster: a source that cannot
+        refuse has nothing to report, and requiring the method would break
+        every one-method source for the sake of an empty tuple.
+        """
+        refusals = getattr(self._sightings, "refusals", None)
+        if not callable(refusals):
+            return ()
+        return tuple(refusals())
 
     def _hold_point(self, lat_deg: float, lon_deg: float, poses: dict[str, Pose]) -> GeoPoint:
         """Where the holding asset should sit to keep the contact in frame.

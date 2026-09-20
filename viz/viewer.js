@@ -47,7 +47,7 @@
 
   var RECORD_FIELDS = [
     "schema_version", "t", "observation", "intent", "belief_digest",
-    "contacts", "truth"
+    "contacts", "truth", "refusals"
   ];
 
   /* The em dash the shell shows wherever the episode log does not carry a
@@ -418,6 +418,22 @@
     return String(sync.status);
   }
 
+  /* What the tick's cameras declined to turn into a fix. A refused sighting
+   * leaves no contact, so without this line the rail cannot tell "nobody can
+   * see the vessel" from "two cameras saw something and we would not stand
+   * behind where it was" — and the second is the one the operator can act on. */
+  function refusedLine(record) {
+    var refusals = record && Array.isArray(record.refusals) ? record.refusals : [];
+    if (!refusals.length) { return ""; }
+    var reasons = [];
+    refusals.forEach(function (refusal) {
+      var label = syncLabel(refusal ? refusal.sync : null);
+      if (reasons.indexOf(label) === -1) { reasons.push(label); }
+    });
+    var fixes = refusals.length === 1 ? "1 fix" : refusals.length + " fixes";
+    return fixes + " refused — " + reasons.join(", ");
+  }
+
   function renderContacts(record) {
     var contacts = record ? record.contacts : [];
     text(el.contactCount, record ? String(contacts.length) : UNKNOWN);
@@ -433,6 +449,9 @@
       text(row.querySelector("[data-contact-confidence]"), fixed(contact.confidence, 2));
       el.contactList.appendChild(row);
     });
+    var refused = refusedLine(record);
+    el.contactRefused.hidden = refused === "";
+    text(el.contactRefused, refused);
   }
 
   function taskFor(record, assetId) {
@@ -742,6 +761,7 @@
     el.contactList = doc.getElementById("contact-list");
     el.contactEmpty = doc.querySelector("[data-empty='contacts']");
     el.contactCount = doc.querySelector("[data-count='contacts']");
+    el.contactRefused = doc.querySelector("[data-refused]");
     el.fleetList = doc.getElementById("fleet-list");
     el.fleetEmpty = doc.querySelector("[data-empty='fleet']");
     el.fleetCount = doc.querySelector("[data-count='fleet']");

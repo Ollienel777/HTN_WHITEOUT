@@ -392,6 +392,16 @@ body[data-state="loading"] .panel-count { visibility: hidden; }
   padding: var(--s-2) 0;
 }
 
+/* A fix the tick's cameras refused, and why. Amber rather than red: the
+ * refusal itself is correct behaviour — the fix was not trustworthy — and what
+ * the reader needs to notice is that a camera is contributing nothing. */
+.panel-note {
+  font: 400 var(--t-12) var(--font-sans);
+  color: var(--warn);
+  padding: var(--s-2) 0 0;
+  border-top: var(--w-hairline) solid var(--n-850);
+}
+
 /* ── fleet rows ────────────────────────────────────────────────────── */
 
 .fleet-row + .fleet-row { margin-top: var(--s-1); }
@@ -495,7 +505,13 @@ body[data-state="loading"] .panel-count { visibility: hidden; }
  * than in the inspector, and it is tertiary type: the finding is the words, and
  * a row that reads "in sync" must not shout. Semantic colour only — amber for
  * a skew nobody measured, red for one that was measured and is out of bounds or
- * for an attitude that never arrived. */
+ * for an attitude that never arrived.
+ *
+ * Our own vision path refuses the two red states rather than contacting on
+ * them, so in a log this build wrote they arrive on the refusal note below
+ * instead. They are styled anyway because the viewer opens any valid episode
+ * log, including one another build wrote, and the data model permits a contact
+ * to carry either. */
 .contact-sync {
   font: 400 var(--t-12) var(--font-sans);
   color: var(--n-400);

@@ -38,6 +38,7 @@ from whiteout.types import (
     RecordError,
     SensorFootprint,
     SensorReport,
+    SightingRefusal,
     TargetTruth,
     Truth,
     WaypointIntent,
@@ -1007,6 +1008,24 @@ def test_every_status_the_judge_can_produce_is_a_documented_one() -> None:
     assert produced == set(SYNC_STATUSES)
 
 
+def test_a_non_finite_measurement_time_is_a_verdict_and_never_an_exception() -> None:
+    """The one caller is inside a tick with no handler over it.
+
+    ``NaN`` fails every comparison, so without the guard it passes the
+    staleness test and is reported as ``synchronised`` — a non-number read as
+    perfect synchronisation — and then the record's own consistency check turns
+    that into a ``RecordError`` out of the middle of the control loop. An
+    infinity is arithmetically stale but writes a skew the log cannot hold.
+    Neither is a measurement.
+    """
+    for measured_t in (math.nan, math.inf, -math.inf):
+        sync = PoseSync.for_frame(1.0, _sync_pose(measured_t=measured_t))
+        assert sync.status == "telemetry_missing", measured_t
+        assert sync.skew_s is None, measured_t
+    # And the same for a frame stamp that is not a number.
+    assert PoseSync.for_frame(math.nan, _sync_pose()).status == "telemetry_missing"
+
+
 def test_a_contact_reports_no_synchronisation_by_default() -> None:
     """The same absence as ``measured_t``'s, and not a claim of freshness."""
     contact = Contact(
@@ -1066,3 +1085,61 @@ def test_the_writer_refuses_a_non_finite_skew(tmp_path: Path) -> None:
         write_episode_log(log, [dataclasses.replace(record, contacts=(contact,))])
     assert "record.contacts[0].sync.skew_s" in str(caught.value)
     assert not log.exists()
+
+
+# --- the refusals a tick recorded ------------------------------------------
+
+
+def _refusal(t: float = 0.0, status: str = "telemetry_stale") -> SightingRefusal:
+    skew = 0.4 if status in ("synchronised", "telemetry_stale") else None
+    return SightingRefusal(asset_id="fixed-wing", t=t, sync=PoseSync(status=status, skew_s=skew))
+
+
+def test_a_record_carries_no_refusals_by_default() -> None:
+    """A run with no camera path refuses nothing, all episode."""
+    assert make_record(0).refusals == ()
+
+
+def test_refusals_round_trip_and_carry_their_reason(tmp_path: Path) -> None:
+    log = tmp_path / "refused.jsonl"
+    record = dataclasses.replace(
+        make_record(0), refusals=(_refusal(), _refusal(status="attitude_missing"))
+    )
+    assert write_episode_log(log, [record]) == 1
+    back = read_episode_log(log)[0]
+    assert back == record
+    assert isinstance(back.refusals, tuple)
+    assert [r.sync.status for r in back.refusals] == ["telemetry_stale", "attitude_missing"]
+    assert back.refusals[0].sync.skew_s == pytest.approx(0.4)
+
+
+def test_a_refusal_from_another_tick_is_rejected(tmp_path: Path) -> None:
+    """It would attribute a camera's silence to the wrong second of the episode."""
+    log = tmp_path / "clock.jsonl"
+    record = dataclasses.replace(make_record(0), refusals=(_refusal(t=3.0),))
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [record])
+    assert "record.refusals[0].t is 3.0 but record.t is 0.0" in str(caught.value)
+    assert not log.exists()
+
+
+def test_an_absent_refusals_key_is_a_rejected_record(tmp_path: Path) -> None:
+    """A version-4 line does not read as a version-5 one with nothing refused."""
+    log = tmp_path / "absent.jsonl"
+    payload = make_record(0).to_dict()
+    del payload["refusals"]
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "missing field(s) refusals" in str(caught.value)
+
+
+def test_a_refusal_must_carry_a_reason(tmp_path: Path) -> None:
+    """A refusal with a null ``sync`` is the silence this record exists to end."""
+    log = tmp_path / "reasonless.jsonl"
+    payload = dataclasses.replace(make_record(0), refusals=(_refusal(),)).to_dict()
+    payload["refusals"][0]["sync"] = None
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "record.refusals[0].sync" in str(caught.value)

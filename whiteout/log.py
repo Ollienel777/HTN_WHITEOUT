@@ -22,8 +22,8 @@ The format:
 - Every line carries ``schema_version``. A log whose lines disagree with
   :data:`SCHEMA_VERSION` is rejected rather than guessed at.
 - A record's clocks agree: ``observation.t``, ``intent.t``,
-  ``belief_digest.t`` and ``truth.t`` equal the record's ``t``, and ``t`` does
-  not run backwards down the file.
+  ``belief_digest.t``, ``truth.t`` and every ``refusals[i].t`` equal the
+  record's ``t``, and ``t`` does not run backwards down the file.
 
 Writing is atomic: records go to a sibling temp file that replaces the
 destination only once every record has been written. A rejected record can
@@ -83,10 +83,13 @@ __all__ = [
 #: leave the field unable to say "this log is not the shape you expect" about
 #: either of them, which is the whole of what it is for.
 #:
-#: 5 — ``Contact.sync``, a required record key carrying
-#: :class:`~whiteout.types.PoseSync`: whether the frame a fix came from and the
-#: pose it was projected with belonged to the same instant. Nullable, never
-#: absent, for the reason that field argues.
+#: 5 — two required record keys, both about the join between a frame and the
+#: pose it was projected with. ``Contact.sync`` carries
+#: :class:`~whiteout.types.PoseSync` — whether the two belonged to the same
+#: instant — nullable but never absent, for the reason that field argues. And
+#: ``EpisodeRecord.refusals`` carries the frames that join refused, so that a
+#: camera which stopped contributing says why instead of reading as an empty
+#: sea (:class:`~whiteout.types.SightingRefusal`).
 SCHEMA_VERSION = 5
 
 #: Members of a record that carry their own copy of the tick's clock.
@@ -132,6 +135,13 @@ def _clock_fault(record: EpisodeRecord) -> str | None:
         member_t = getattr(record, name).t
         if member_t != record.t:
             return f"record.{name}.t is {member_t!r} but record.t is {record.t!r}"
+    # A refusal is the one member built from a *previous* tick's material -- the
+    # newest frame a camera happens to hold -- so a stamp from the wrong tick is
+    # the mistake available here, and it would attribute a camera's silence to
+    # the wrong second of the episode.
+    for index, refusal in enumerate(record.refusals):
+        if refusal.t != record.t:
+            return f"record.refusals[{index}].t is {refusal.t!r} but record.t is {record.t!r}"
     return None
 
 

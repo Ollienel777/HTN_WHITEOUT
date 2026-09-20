@@ -52,6 +52,7 @@ module boundary (``SPEC.md`` §5).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from typing import Any
@@ -74,6 +75,7 @@ __all__ = [
     "RecordError",
     "SensorFootprint",
     "SensorReport",
+    "SightingRefusal",
     "TargetTruth",
     "Truth",
     "WaypointIntent",
@@ -495,10 +497,9 @@ class PoseSync:
     carried there when it is known, so the log does not lose the second fact
     to the first.
 
-    **Flagged, not refused, on the detection.** See
-    :class:`whiteout.vision.detect.VesselDetection` for that decision and its
-    reasons; the refusal is one seam further on, where a pixel becomes a
-    lat/lon somebody is scored on.
+    Whether a verdict *refuses* a detection or only qualifies it is not this
+    record's business and is argued once, in
+    :class:`whiteout.vision.detect.VesselDetection`.
 
     A ``PoseSync`` also belongs on :class:`Detection` — one sensor hit is
     exactly the scope of one frame-and-pose pair — the moment anything starts
@@ -554,11 +555,25 @@ class PoseSync:
         :param pose: the pose the projection will use.
         :param max_skew_s: the bound; see :data:`DEFAULT_MAX_SKEW_S`.
 
-        Pure and total: every pair of inputs has a verdict, and none of them
-        is an exception. A caller that cannot get a verdict would have to
-        invent one.
+        Pure and total: **every** pair of inputs has a verdict and none of them
+        raises, which is load-bearing rather than tidy. The one caller is
+        inside a control loop's tick, with no handler over it, so a verdict
+        that raised would take down the tick over a number a far side sent us.
+
+        A ``measured_t`` or a ``frame_t`` that is not finite is therefore
+        ``telemetry_missing``, alongside the absent one. ``NaN`` fails every
+        comparison, so it would otherwise pass the staleness test and be
+        called ``synchronised`` — a non-number reported as perfect
+        synchronisation, which is this module's own failure mode with the sign
+        flipped. An infinity is arithmetically stale but writes a skew the log
+        cannot hold (``whiteout.log`` refuses a non-finite float, correctly).
+        Neither is a measurement, and "no usable measurement time" is exactly
+        what ``telemetry_missing`` says.
         """
-        skew_s = None if pose.measured_t is None else float(frame_t) - pose.measured_t
+        measured_t = pose.measured_t
+        skew_s = None if measured_t is None else float(frame_t) - measured_t
+        if skew_s is not None and not math.isfinite(skew_s):
+            skew_s = None
         if pose.pitch is None or pose.roll is None:
             status = "attitude_missing"
         elif skew_s is None:
@@ -584,6 +599,54 @@ class PoseSync:
             status=_one_of(_str(data, where, "status"), SYNC_STATUSES, where, "status"),
             skew_s=_optional_float(data, where, "skew_s"),
             max_skew_s=_float(data, where, "max_skew_s"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SightingRefusal:
+    """A frame the coordinator declined to turn into a fix, and why.
+
+    **This exists because refusing silently is a worse silence than the one
+    the refusal prevents.** A sighting dropped for
+    :class:`PoseSync`'s ``telemetry_stale`` or ``attitude_missing`` leaves no
+    contact, no counter and no reason, and in the episode log that is
+    indistinguishable from an empty sea — while the whole argument for
+    recording synchronisation at all is that an unqualified fix must not look
+    like a qualified one. The refused frame is the same mistake one level up:
+    an asset that has stopped contributing, for a reason we know, with nothing
+    to look at. So the fix is dropped and the *reason* is kept.
+
+    ``asset_id`` is whose camera it was, ``t`` is the tick — equal to the
+    record's, which :mod:`whiteout.log` checks — and ``sync`` is the verdict
+    that caused it. ``sync`` is never ``None`` here: a refusal with no reason
+    would be the thing this record exists to prevent.
+
+    **It says nothing about whether the vessel was visible.** The refusal is
+    taken before the detector runs, because a pose that cannot be projected
+    makes the detector's answer unusable whatever it is, and paying for a
+    frame we have already decided to drop buys nothing. So this records "this
+    camera contributed nothing this tick, and here is why", not "we saw
+    something and threw it away".
+    """
+
+    asset_id: str
+    t: float
+    sync: PoseSync
+
+    def __post_init__(self) -> None:
+        _as_floats(self, "t")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_json_dict(self)
+
+    @classmethod
+    def from_dict(cls, payload: object, where: str = "refusal") -> SightingRefusal:
+        data = _mapping(payload, where)
+        _check_keys(data, where, SightingRefusal)
+        return SightingRefusal(
+            asset_id=_str(data, where, "asset_id"),
+            t=_float(data, where, "t"),
+            sync=PoseSync.from_dict(data["sync"], f"{where}.sync"),
         )
 
 
@@ -978,6 +1041,13 @@ class EpisodeRecord:
     rejected at the line that is wrong.
 
     ``truth`` is a sibling of ``observation``, not a member of it.
+
+    ``refusals`` is what the coordinator's sighting source declined to use this
+    tick and why (:class:`SightingRefusal`). It is top-level and **not** part of
+    ``observation``, for the same reason ``truth`` is not: an observation is
+    exactly what the transport reported, and a refusal is a decision taken
+    afterwards, on this side of the seam. Empty is the normal case, and on a run
+    with no camera path it is empty for the whole episode.
     """
 
     schema_version: int
@@ -987,6 +1057,7 @@ class EpisodeRecord:
     belief_digest: BeliefDigest
     contacts: tuple[Contact, ...]
     truth: Truth
+    refusals: tuple[SightingRefusal, ...] = ()
 
     def __post_init__(self) -> None:
         _as_floats(self, "t")
@@ -1013,6 +1084,10 @@ class EpisodeRecord:
             Contact.from_dict(item, f"{where}.contacts[{index}]")
             for index, item in enumerate(_sequence(data, where, "contacts"))
         )
+        refusals = tuple(
+            SightingRefusal.from_dict(item, f"{where}.refusals[{index}]")
+            for index, item in enumerate(_sequence(data, where, "refusals"))
+        )
         return EpisodeRecord(
             schema_version=_int(data, where, "schema_version"),
             t=_float(data, where, "t"),
@@ -1021,4 +1096,5 @@ class EpisodeRecord:
             belief_digest=BeliefDigest.from_dict(data["belief_digest"], f"{where}.belief_digest"),
             contacts=contacts,
             truth=Truth.from_dict(data["truth"], f"{where}.truth"),
+            refusals=refusals,
         )

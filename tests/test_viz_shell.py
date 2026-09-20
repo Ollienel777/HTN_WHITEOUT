@@ -200,6 +200,24 @@ def test_a_contact_says_whether_its_fix_and_attitude_were_one_instant() -> None:
     assert "--danger" in sync_rules
 
 
+def test_a_refused_fix_is_named_in_the_rail_and_not_only_dropped() -> None:
+    """`EpisodeRecord.refusals`, on screen.
+
+    A refused sighting leaves no contact, so without this line the rail cannot
+    tell "nobody can see the vessel" from "two cameras saw something we would
+    not stand behind" — and in the artifact the second must not read as an
+    empty sea.
+    """
+    markup = _without_comments(_read("index.html"))
+    js = _read("viewer.js")
+    css = _without_comments(_read("viewer.css"))
+    contacts = markup.split('class="panel panel-contacts"')[1].split("</section>")[0]
+    assert "data-refused" in contacts, "the contacts panel never says what was refused"
+    assert '"refusals"' in js, "the viewer does not read the record's refusals"
+    assert "refused" in js
+    assert "--warn" in "".join(css.split(".panel-note")[1:])
+
+
 # ── no build step ─────────────────────────────────────────────────────
 
 

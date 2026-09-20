@@ -263,6 +263,90 @@ def test_the_skew_bound_is_the_callers_to_set(
     assert found.sync.max_skew_s == pytest.approx(1.0)
 
 
+# -- a refusal is recorded, never silent -------------------------------------
+
+
+def test_a_refused_fix_is_recorded_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dropping a fix silently is a worse silence than an unqualified one.
+
+    With no record of it, a camera refused every tick is indistinguishable in
+    the log from an empty sea — no contact, no counter, no reason — and the two
+    sync states that say *do not trust this* could never reach the log at all.
+    """
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.refusals() == (), "nothing is refused before the first tick"
+    assert source.sightings(_observation((_pose("tower-1", measured_t=0.4),))) == ()
+    (refusal,) = source.refusals()
+    assert refusal.asset_id == "tower-1"
+    assert refusal.t == 1.0
+    assert refusal.sync.status == "telemetry_stale"
+    assert refusal.sync.skew_s == pytest.approx(0.6)
+
+
+def test_a_pose_with_no_attitude_is_recorded_as_a_refusal() -> None:
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation((_pose("tower-1", attitude=False),))) == ()
+    (refusal,) = source.refusals()
+    assert refusal.sync.status == "attitude_missing"
+
+
+def test_a_frame_with_no_vessel_is_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The join worked and the answer was "nothing"; counting it buries the real ones."""
+    from whiteout.vision import sightings as module
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: None)
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation((_pose("tower-1", measured_t=0.9),))) == ()
+    assert source.refusals() == ()
+
+
+def test_a_missing_pose_or_frame_is_an_absence_not_a_refusal() -> None:
+    source = VisionSightings(feeds=(_StubFeed("tower-1", None),))
+    assert source.sightings(_observation((_pose("tower-1"),))) == ()
+    assert source.refusals() == ()
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    assert source.sightings(_observation(())) == ()
+    assert source.refusals() == ()
+
+
+def test_the_refusals_of_a_tick_replace_the_last_tick_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """They describe the most recent call, so a fixed tick cannot read as still broken."""
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    source.sightings(_observation((_pose("tower-1", measured_t=0.4),)))
+    assert len(source.refusals()) == 1
+    source.sightings(_observation((_pose("tower-1", measured_t=0.9),)))
+    assert source.refusals() == ()
+
+
+def test_a_non_positive_skew_bound_is_refused_at_construction() -> None:
+    """Otherwise it fails inside `PoseSync`, once per frame, at tick time."""
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(VisionError):
+            VisionSightings(feeds=(), max_skew_s=bad)
+
+
 def test_a_camera_at_the_water_plane_is_skipped_rather_than_raising() -> None:
     """The detector refuses it; the run must not end because of it.
 

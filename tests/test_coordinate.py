@@ -15,7 +15,7 @@ from whiteout.policy import AssetRole
 from whiteout.tracks.client import TrackPoster, TracksClient
 from whiteout.tracks.maintain import Sighting, TrackHold
 from whiteout.tracks.stub import StubTracksServer
-from whiteout.types import Pose, PoseSync, WorldObservation
+from whiteout.types import Pose, PoseSync, SightingRefusal, WorldObservation
 
 FLEET = (
     AssetRole("quadcopter", "quad"),
@@ -192,6 +192,38 @@ def test_a_contact_is_recorded_for_the_log(hold_and_stub) -> None:
     assert contact.assigned_asset_id == "tower-1"
     assert contact.classification == "vessel"
     assert contact.sync is None, "a source that established nothing invents nothing"
+
+
+def test_what_the_source_refused_reaches_the_outcome() -> None:
+    """A refusal that stops at the sighting source is a refusal nobody can see.
+
+    The coordinator is the only path from a camera to the episode log, so a
+    source that declined a fix reports it here or not at all.
+    """
+
+    class _RefusedEverything:
+        def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
+            return ()
+
+        def refusals(self) -> tuple[SightingRefusal, ...]:
+            return (
+                SightingRefusal(
+                    asset_id="fixed-wing",
+                    t=1.0,
+                    sync=PoseSync(status="telemetry_stale", skew_s=0.4),
+                ),
+            )
+
+    outcome = Coordinator(FLEET, sightings=_RefusedEverything()).tick(_observation(1.0))
+    (refusal,) = outcome.refusals
+    assert refusal.asset_id == "fixed-wing"
+    assert refusal.sync.status == "telemetry_stale"
+
+
+def test_a_source_that_cannot_refuse_is_not_asked_to() -> None:
+    """`NoSightings` and every one-method source keep working unchanged."""
+    outcome = Coordinator(FLEET, sightings=NoSightings()).tick(_observation(1.0))
+    assert outcome.refusals == ()
 
 
 def test_a_contact_carries_its_last_fix_s_synchronisation(hold_and_stub) -> None:

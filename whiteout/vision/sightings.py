@@ -57,6 +57,17 @@ What it refuses to do
   is every arena pose today — is **carried and labelled instead**, because
   refusing it would post nothing at all in the arena we are flying in and
   would call that caution.
+
+**Every refusal is recorded, because a silent refusal is the worse silence.**
+Dropping a fix and saying nothing leaves no contact, no counter and no reason,
+which in the episode log is indistinguishable from an empty sea — and the whole
+argument for recording synchronisation is that an unqualified fix must not look
+like a qualified one. :meth:`VisionSightings.refusals` hands the tick's
+refusals to the coordinator as
+:class:`~whiteout.types.SightingRefusal`\\ s, they are written on the episode
+record, and the viewer says how many and why. Without that, the two states this
+module refuses could never reach the log at all, and the states that say *do not
+trust this* would be exactly the ones nobody could see.
 - **No detection, no sighting.** The detector already returns ``None`` rather
   than a guess, and every candidate it emits has been through the projection,
   so a sighting from here always has a lat/lon behind it.
@@ -66,11 +77,18 @@ What it refuses to do
 
 from __future__ import annotations
 
+import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from whiteout.tracks.maintain import Sighting
-from whiteout.types import DEFAULT_MAX_SKEW_S, Pose, PoseSync, WorldObservation
+from whiteout.types import (
+    DEFAULT_MAX_SKEW_S,
+    Pose,
+    PoseSync,
+    SightingRefusal,
+    WorldObservation,
+)
 from whiteout.vision.camera import CAMERAS, CameraModel, VisionError
 from whiteout.vision.detect import DEFAULT_PARAMS, DetectorParams, detect_vessel
 from whiteout.vision.imagery import LumaFrame, MjpegFrames
@@ -213,13 +231,33 @@ class VisionSightings:
         measured from the tick that consumed it before the sighting is refused
         (:data:`~whiteout.types.DEFAULT_MAX_SKEW_S`). It bounds the position
         error this source is willing to post, so it is the operator's number
-        and a parameter rather than a constant.
+        and a parameter rather than a constant. It is checked here, at
+        construction: a non-positive bound would otherwise fail inside
+        `PoseSync` once per frame, at tick time, in a loop with no handler over
+        it -- the error landing four layers from the line that caused it.
+
+        The default is set for the **fastest** thing in the fleet, the
+        fixed-wing at 22 m/s, and is therefore conservative for the towers,
+        which do not move at all and for which a stale fix costs nothing. One
+        number wearing an airframe's argument is a known limitation, not a
+        finding of this design: the bound a rover or a tower deserves is a
+        different number, and a per-class bound is the follow-up.
     """
 
     feeds: tuple[CameraFeed, ...]
     ground_alt_m: float = 0.0
     params: DetectorParams = DEFAULT_PARAMS
     max_skew_s: float = DEFAULT_MAX_SKEW_S
+
+    #: The refusals of the most recent `sightings` call. Captured there rather
+    #: than recomputed on demand: a feed keeps only its newest frame, so asking
+    #: again a moment later can pair a *different* frame with the same pose and
+    #: report a refusal that never happened.
+    _refused: tuple[SightingRefusal, ...] = field(init=False, default=())
+
+    def __post_init__(self) -> None:
+        if not (math.isfinite(self.max_skew_s) and self.max_skew_s > 0.0):
+            raise VisionError(f"max_skew_s must be positive and finite, got {self.max_skew_s!r}")
 
     def open(self) -> None:
         """Start every feed."""
@@ -235,15 +273,50 @@ class VisionSightings:
         """Every asset that can see the vessel right now, and where it says it is."""
         poses = {pose.asset_id: pose for pose in observation.poses}
         found: list[Sighting] = []
+        refused: list[SightingRefusal] = []
         for feed in self.feeds:
             pose = poses.get(feed.asset_id)
             frame = feed.latest()
             if pose is None or frame is None:
+                # Not a refusal. An asset with no pose and a camera with no
+                # frame yet are absences of input, not fixes thrown away, and
+                # counting them would bury the ones that were.
                 continue
             sighting = self._sight(feed.asset_id, pose, frame, observation.t)
             if sighting is not None:
                 found.append(sighting)
+                continue
+            reason = self._refusal(feed.asset_id, pose, observation.t)
+            if reason is not None:
+                refused.append(reason)
+        self._refused = tuple(refused)
         return tuple(found)
+
+    def refusals(self) -> tuple[SightingRefusal, ...]:
+        """What the last :meth:`sightings` call declined to use, and why.
+
+        The coordinator writes these onto the episode record, which is the only
+        artifact anything downstream reads: without them, the two states this
+        source refuses on could never appear in a log, and a camera that had
+        gone dark for a reason we knew would look exactly like an empty sea.
+
+        Empty when nothing was refused, and empty before the first tick.
+        """
+        return self._refused
+
+    def _refusal(self, asset_id: str, pose: Pose, t: float) -> SightingRefusal | None:
+        """The record for a frame `_sight` dropped, or `None` if it dropped it for
+        a reason that is not about synchronisation.
+
+        A frame with no vessel in it, or one the detector could not read, is not
+        a refusal: the join worked and the answer was "nothing". Only the two
+        sync verdicts `_sight` acts on are recorded, which is why this asks
+        `PoseSync` again rather than trusting that a `None` sighting means skew.
+        """
+        sync = PoseSync.for_frame(t, pose, max_skew_s=self.max_skew_s)
+        if sync.status in ("attitude_missing", "telemetry_stale"):
+            return SightingRefusal(asset_id=asset_id, t=t, sync=sync)
+        return None
 
     def _sight(self, asset_id: str, pose: Pose, frame: LumaFrame, t: float) -> Sighting | None:
         # `t` and not `frame.t`: the frame's own stamp is a wall clock (live) or
