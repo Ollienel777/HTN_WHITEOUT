@@ -51,9 +51,39 @@ python -m whiteout.cli serve
 episode you just wrote. The viewer is static HTML and a `<canvas>` — no build
 step, no `node_modules`.
 
-Everything runs against the `kinematic` transport by default, which never opens
-a socket. `WHITEOUT_TRANSPORT=arena` points the same code at the real ArcticSim
-fleet over MAVLink.
+Everything above runs against the `kinematic` transport, which never opens a
+socket. It is the default **on purpose** — a clean checkout must run for
+someone with no arena — but it means the commands above post nothing to a
+tracks API.
+
+## Run it against your own ArcticSim
+
+Three variables, and all three are required. There is no default for any of
+them: an endpoint quietly pointing at nothing posts nothing and scores nothing
+without ever failing, so each one refuses loudly instead.
+
+```bash
+export WHITEOUT_TRANSPORT=arena
+export WHITEOUT_ARENA_ENDPOINT=10.99.4.1        # your sim's host
+export WHITEOUT_TRACKS_ENDPOINT=http://10.99.4.1:8010
+python -m whiteout.cli run --ticks 400 --out artifacts/arena.jsonl
+```
+
+That connects one MAVLink link per asset, arms and launches the fleet, opens
+the four camera streams, and POSTs a track to `/api/tracks` whenever the hold
+has a new fix worth posting.
+
+Two optional ones:
+
+| variable | what it does |
+|---|---|
+| `WHITEOUT_ARENA_ROSTER` | a JSON file of `{asset_id, cls, port, system_id}`, to fly a subset. Defaults to the four assets `ARENA.md` §3 lists. |
+| `WHITEOUT_SEED` | episode seed. Absent means `0`, never "random". |
+
+**If the run says `WHITEOUT_ARENA_ENDPOINT is unset`**, that is this working
+as intended — it will not guess an address. If it connects but posts nothing,
+check `WHITEOUT_TRACKS_ENDPOINT`: the fleet will search and track perfectly
+well without it and submit none of it.
 
 ---
 
