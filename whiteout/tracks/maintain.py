@@ -57,6 +57,7 @@ from dataclasses import dataclass
 
 from whiteout.geo import GeoPoint, bearing_deg, geodetic_to_local
 from whiteout.tracks.client import TrackFix, TrackPoster
+from whiteout.types import PoseSync
 
 __all__ = [
     "DEFAULT_ASSOCIATION_SLACK_M",
@@ -112,12 +113,20 @@ class Sighting:
     ``t`` is the tick the sighting belongs to, in the transport's timebase.
     ``asset_id`` is kept so that a handoff is visible afterwards rather than
     inferred.
+
+    ``sync`` is how the frame this came from stood in time against the pose it
+    was projected with (:class:`~whiteout.types.PoseSync`), or ``None`` when
+    the source did not establish it. It is carried through rather than
+    inspected here: this module decides *when* to post, and the question of how
+    good a fix's geometry is belongs to whatever reads the fix. It reaches the
+    episode log on :class:`~whiteout.types.Contact`.
     """
 
     t: float
     lat_deg: float
     lon_deg: float
     asset_id: str
+    sync: PoseSync | None = None
 
 
 class TrackHold:

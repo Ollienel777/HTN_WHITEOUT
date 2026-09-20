@@ -63,7 +63,14 @@ from whiteout.belief.grid import ChannelBeliefGrid
 from whiteout.geo import GeoPoint
 from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole, SearchParams, SearchPolicy
 from whiteout.tracks.maintain import Sighting, TrackHold
-from whiteout.types import BeliefDigest, Contact, FleetIntent, Pose, WorldObservation
+from whiteout.types import (
+    BeliefDigest,
+    Contact,
+    FleetIntent,
+    Pose,
+    SightingRefusal,
+    WorldObservation,
+)
 from whiteout.vision.camera import CAMERAS, VisionError
 from whiteout.vision.standoff import standoff_point, standoff_range_m
 
@@ -92,10 +99,30 @@ DEFAULT_HOLD_ASSET = "quadcopter"
 
 
 class SightingSource(Protocol):
-    """Whatever saw the vessel this tick."""
+    """Whatever saw the vessel this tick — and whatever it would not stand behind.
+
+    **Both methods, not one.** ``refusals`` was briefly optional, discovered on
+    the object, so that a source with nothing to refuse could stay a single
+    method. That is the shape in which a *decorator* — the motion gate, which
+    wraps a source and is deliberately invisible to this loop — silently
+    swallows every refusal the source made, and the episode log goes back to
+    showing a dark camera as an empty sea. Nothing fails; the log is just
+    quietly empty again, which is the failure this whole seam exists to end.
+    So the contract asks for both, every source in ``whiteout/`` answers both,
+    and ``tests/test_coordinate.py`` fails the gate if one stops.
+    """
 
     def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
         """Zero or more sightings, in the observation's timebase."""
+
+    def refusals(self) -> tuple[SightingRefusal, ...]:
+        """What the last ``sightings`` call dropped, and why.
+
+        Empty is the normal answer, and is what a source with nothing to
+        refuse returns for ever. A source that *wraps* another forwards the
+        inner source's refusals; swallowing them makes a camera's silence
+        unreadable.
+        """
 
 
 class NoSightings:
@@ -109,16 +136,27 @@ class NoSightings:
     def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
         return ()
 
+    def refusals(self) -> tuple[SightingRefusal, ...]:
+        """Nothing was refused, because nothing was looked at."""
+        return ()
+
 
 @dataclass(frozen=True)
 class TickOutcome:
-    """What one tick decided, in the shapes the episode log wants."""
+    """What one tick decided, in the shapes the episode log wants.
+
+    ``refusals`` is what the sighting source declined to use and why, straight
+    onto the episode record. A source that refuses silently would leave a
+    camera's going dark looking exactly like an empty sea, which is the one
+    thing worse than an unqualified fix.
+    """
 
     intent: FleetIntent
     digest: BeliefDigest
     contacts: tuple[Contact, ...]
     posted: bool
     track_state: str
+    refusals: tuple[SightingRefusal, ...] = ()
 
 
 class Coordinator:
@@ -185,6 +223,7 @@ class Coordinator:
 
         poses = {pose.asset_id: pose for pose in observation.poses}
         seen = self._sightings.sightings(observation)
+        refusals = self._refusals()
         for sighting in seen:
             self._belief.update_detection(
                 sighting.lat_deg, sighting.lon_deg, sigma_m=self._detection_sigma_m
@@ -220,7 +259,23 @@ class Coordinator:
             contacts=self._contacts(now, state),
             posted=posted,
             track_state=state,
+            refusals=refusals,
         )
+
+    def _refusals(self) -> tuple[SightingRefusal, ...]:
+        """What the source declined this tick.
+
+        :class:`SightingSource` asks every source for this, and the shipped
+        ones are held to it by a test. The ``getattr`` is tolerance for a
+        hand-written double in somebody's test that predates the method, not a
+        second contract: a source in ``whiteout/`` that quietly lost
+        ``refusals`` would take the episode log's only record of a dark camera
+        with it, so that case is caught at the gate rather than absorbed here.
+        """
+        refusals = getattr(self._sightings, "refusals", None)
+        if not callable(refusals):
+            return ()
+        return tuple(refusals())
 
     def _hold_point(self, lat_deg: float, lon_deg: float, poses: dict[str, Pose]) -> GeoPoint:
         """Where the holding asset should sit to keep the contact in frame.
@@ -270,6 +325,12 @@ class Coordinator:
         vocabularies on purpose — one is about whether we can still see the
         vessel, the other is the log's lifecycle — so the mapping is written
         out rather than assumed to coincide.
+
+        The last sighting's ``sync`` rides along with its position, because
+        that is whose position this is: the contact's lat/lon is the last
+        fix's, so the qualification on that fix is the qualification on this
+        record. ``None`` when the sighting source did not establish one — it is
+        never filled in with a synchronised-looking default here.
         """
         if self._hold is None or self._hold.last_sighting is None:
             return ()
@@ -290,5 +351,6 @@ class Coordinator:
                 confidence=0.0 if state == "lost" else 1.0,
                 classification="vessel",
                 assigned_asset_id=self._hold.holder,
+                sync=last.sync,
             ),
         )

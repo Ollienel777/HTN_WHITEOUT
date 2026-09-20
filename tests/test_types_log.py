@@ -27,15 +27,18 @@ from whiteout.log import (
     write_episode_log,
 )
 from whiteout.types import (
+    SYNC_STATUSES,
     BeliefDigest,
     Contact,
     Detection,
     EpisodeRecord,
     FleetIntent,
     Pose,
+    PoseSync,
     RecordError,
     SensorFootprint,
     SensorReport,
+    SightingRefusal,
     TargetTruth,
     Truth,
     WaypointIntent,
@@ -156,6 +159,12 @@ def make_record(tick: int) -> EpisodeRecord:
                 confidence=0.62,
                 classification="vehicle",
                 assigned_asset_id="wing-1",
+                # Both arms of `sync` are spelt out here for the same reason
+                # both arms of `measured_t` are above: a fix whose frame and
+                # pose were judged against each other, and one from a path
+                # that never judged them. Every round trip below then carries
+                # a populated nested record and a null one.
+                sync=PoseSync(status="telemetry_stale", skew_s=0.4),
             ),
             Contact(
                 contact_id="c-2",
@@ -166,6 +175,7 @@ def make_record(tick: int) -> EpisodeRecord:
                 confidence=0.05,
                 classification="unknown",
                 assigned_asset_id=None,
+                sync=None,
             ),
         ),
         truth=Truth(
@@ -895,3 +905,241 @@ def test_the_writer_refuses_a_non_finite_measurement_time(tmp_path: Path) -> Non
         write_episode_log(log, [dataclasses.replace(record, observation=observation)])
     assert "record.observation.poses[0].measured_t" in str(caught.value)
     assert not log.exists()
+
+
+# --- frame-to-pose synchronisation -----------------------------------------
+
+
+def _sync_pose(**overrides: Any) -> Pose:
+    fields_: dict[str, Any] = {
+        "asset_id": "wing-1",
+        "cls": "fixedwing",
+        "t": 1.0,
+        "lat": 71.99,
+        "lon": -94.84,
+        "z": 120.0,
+        "heading": 0.0,
+        "speed": 22.0,
+        "energy_used": 0.0,
+        "measured_t": 0.9,
+        "pitch": -2.0,
+        "roll": 1.0,
+    }
+    fields_.update(overrides)
+    return Pose(**fields_)
+
+
+def test_a_fresh_fix_with_an_attitude_is_synchronised() -> None:
+    sync = PoseSync.for_frame(1.0, _sync_pose())
+    assert sync.status == "synchronised"
+    assert sync.skew_s == pytest.approx(0.1)
+    assert sync.max_skew_s == pytest.approx(0.25)
+
+
+def test_a_fix_past_the_bound_is_stale_and_carries_how_far() -> None:
+    """The size of the skew is the finding, so it is recorded, not just judged."""
+    sync = PoseSync.for_frame(1.0, _sync_pose(measured_t=0.5))
+    assert sync.status == "telemetry_stale"
+    assert sync.skew_s == pytest.approx(0.5)
+
+
+def test_a_fix_from_the_future_is_stale_too() -> None:
+    """The way that happens is an unconverted far-side clock, not freshness.
+
+    ``Pose.measured_t`` is in our timebase and is ``<= t``; a stamp ahead of
+    the frame it is joined to cannot have measured it, and reading the skew's
+    sign as freshness would hide exactly the mistake that field warns about.
+    """
+    assert PoseSync.for_frame(1.0, _sync_pose(measured_t=2.0)).status == "telemetry_stale"
+
+
+def test_no_measurement_time_is_unknown_and_never_zero() -> None:
+    """The arena adapter's state. ``0.0`` would read as simultaneous."""
+    sync = PoseSync.for_frame(1.0, _sync_pose(measured_t=None))
+    assert sync.status == "telemetry_missing"
+    assert sync.skew_s is None
+
+
+def test_a_missing_attitude_wins_over_a_stale_fix() -> None:
+    """It is the fact that makes the projection impossible, not merely wrong.
+
+    The skew is still carried where it is known, so the second fact is not
+    lost to the first.
+    """
+    sync = PoseSync.for_frame(1.0, _sync_pose(measured_t=0.2, pitch=None))
+    assert sync.status == "attitude_missing"
+    assert sync.skew_s == pytest.approx(0.8)
+    assert PoseSync.for_frame(1.0, _sync_pose(roll=None)).status == "attitude_missing"
+
+
+def test_the_bound_decides_the_verdict_and_is_recorded_with_it() -> None:
+    """A verdict read next to a different bound is not the verdict made."""
+    pose = _sync_pose(measured_t=0.5)
+    assert PoseSync.for_frame(1.0, pose, max_skew_s=1.0).status == "synchronised"
+    assert PoseSync.for_frame(1.0, pose, max_skew_s=1.0).max_skew_s == pytest.approx(1.0)
+
+
+def test_a_sync_record_cannot_contradict_itself() -> None:
+    """Every consumer trusts the status word, so it may not disagree with the number."""
+    with pytest.raises(RecordError):
+        PoseSync(status="synchronised", skew_s=2.0)
+    with pytest.raises(RecordError):
+        PoseSync(status="telemetry_stale", skew_s=0.01)
+    with pytest.raises(RecordError):
+        PoseSync(status="synchronised", skew_s=None)
+    with pytest.raises(RecordError):
+        PoseSync(status="telemetry_missing", skew_s=0.1)
+    with pytest.raises(RecordError):
+        PoseSync(status="in_sync_ish", skew_s=0.1)
+    with pytest.raises(RecordError):
+        PoseSync(status="synchronised", skew_s=0.0, max_skew_s=0.0)
+
+
+def test_every_status_the_judge_can_produce_is_a_documented_one() -> None:
+    produced = {
+        PoseSync.for_frame(1.0, pose).status
+        for pose in (
+            _sync_pose(),
+            _sync_pose(measured_t=0.1),
+            _sync_pose(measured_t=None),
+            _sync_pose(pitch=None),
+        )
+    }
+    assert produced == set(SYNC_STATUSES)
+
+
+def test_a_non_finite_measurement_time_is_a_verdict_and_never_an_exception() -> None:
+    """The one caller is inside a tick with no handler over it.
+
+    ``NaN`` fails every comparison, so without the guard it passes the
+    staleness test and is reported as ``synchronised`` — a non-number read as
+    perfect synchronisation — and then the record's own consistency check turns
+    that into a ``RecordError`` out of the middle of the control loop. An
+    infinity is arithmetically stale but writes a skew the log cannot hold.
+    Neither is a measurement.
+    """
+    for measured_t in (math.nan, math.inf, -math.inf):
+        sync = PoseSync.for_frame(1.0, _sync_pose(measured_t=measured_t))
+        assert sync.status == "telemetry_missing", measured_t
+        assert sync.skew_s is None, measured_t
+    # And the same for a frame stamp that is not a number.
+    assert PoseSync.for_frame(math.nan, _sync_pose()).status == "telemetry_missing"
+
+
+def test_a_contact_reports_no_synchronisation_by_default() -> None:
+    """The same absence as ``measured_t``'s, and not a claim of freshness."""
+    contact = Contact(
+        contact_id="c",
+        t=1.0,
+        state="tracked",
+        lat=72.0,
+        lon=-95.0,
+        confidence=1.0,
+        classification="vessel",
+        assigned_asset_id=None,
+    )
+    assert contact.sync is None
+
+
+def test_a_contacts_synchronisation_round_trips_through_the_log(tmp_path: Path) -> None:
+    log = tmp_path / "sync.jsonl"
+    write_episode_log(log, [make_record(0)])
+    contacts = read_episode_log(log)[0].contacts
+    assert contacts[0].sync == PoseSync(status="telemetry_stale", skew_s=0.4)
+    assert contacts[1].sync is None
+    payload = make_record(0).to_dict()
+    assert payload["contacts"][0]["sync"]["status"] == "telemetry_stale"
+    assert payload["contacts"][1]["sync"] is None
+
+
+def test_an_absent_sync_key_is_a_rejected_record(tmp_path: Path) -> None:
+    """Nullable, never missing: a writer that forgot the field is not a null."""
+    log = tmp_path / "absent.jsonl"
+    payload = make_record(0).to_dict()
+    del payload["contacts"][0]["sync"]
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "missing field(s) sync" in str(caught.value)
+    assert "record.contacts[0]" in str(caught.value)
+
+
+def test_an_unknown_sync_status_is_rejected_by_name(tmp_path: Path) -> None:
+    log = tmp_path / "status.jsonl"
+    payload = make_record(0).to_dict()
+    payload["contacts"][0]["sync"]["status"] = "vibing"
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "record.contacts[0].sync.status" in str(caught.value)
+
+
+def test_the_writer_refuses_a_non_finite_skew(tmp_path: Path) -> None:
+    """``None`` is how an unknown skew is written; ``NaN`` is not JSON."""
+    log = tmp_path / "nan-skew.jsonl"
+    record = make_record(0)
+    contact = dataclasses.replace(
+        record.contacts[0], sync=PoseSync(status="telemetry_stale", skew_s=math.inf)
+    )
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [dataclasses.replace(record, contacts=(contact,))])
+    assert "record.contacts[0].sync.skew_s" in str(caught.value)
+    assert not log.exists()
+
+
+# --- the refusals a tick recorded ------------------------------------------
+
+
+def _refusal(t: float = 0.0, status: str = "telemetry_stale") -> SightingRefusal:
+    skew = 0.4 if status in ("synchronised", "telemetry_stale") else None
+    return SightingRefusal(asset_id="fixed-wing", t=t, sync=PoseSync(status=status, skew_s=skew))
+
+
+def test_a_record_carries_no_refusals_by_default() -> None:
+    """A run with no camera path refuses nothing, all episode."""
+    assert make_record(0).refusals == ()
+
+
+def test_refusals_round_trip_and_carry_their_reason(tmp_path: Path) -> None:
+    log = tmp_path / "refused.jsonl"
+    record = dataclasses.replace(
+        make_record(0), refusals=(_refusal(), _refusal(status="attitude_missing"))
+    )
+    assert write_episode_log(log, [record]) == 1
+    back = read_episode_log(log)[0]
+    assert back == record
+    assert isinstance(back.refusals, tuple)
+    assert [r.sync.status for r in back.refusals] == ["telemetry_stale", "attitude_missing"]
+    assert back.refusals[0].sync.skew_s == pytest.approx(0.4)
+
+
+def test_a_refusal_from_another_tick_is_rejected(tmp_path: Path) -> None:
+    """It would attribute a camera's silence to the wrong second of the episode."""
+    log = tmp_path / "clock.jsonl"
+    record = dataclasses.replace(make_record(0), refusals=(_refusal(t=3.0),))
+    with pytest.raises(EpisodeLogError) as caught:
+        write_episode_log(log, [record])
+    assert "record.refusals[0].t is 3.0 but record.t is 0.0" in str(caught.value)
+    assert not log.exists()
+
+
+def test_an_absent_refusals_key_is_a_rejected_record(tmp_path: Path) -> None:
+    """A version-4 line does not read as a version-5 one with nothing refused."""
+    log = tmp_path / "absent.jsonl"
+    payload = make_record(0).to_dict()
+    del payload["refusals"]
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "missing field(s) refusals" in str(caught.value)
+
+
+def test_a_refusal_must_carry_a_reason(tmp_path: Path) -> None:
+    """A refusal with a null ``sync`` is the silence this record exists to end."""
+    log = tmp_path / "reasonless.jsonl"
+    payload = dataclasses.replace(make_record(0), refusals=(_refusal(),)).to_dict()
+    payload["refusals"][0]["sync"] = None
+    _write_lines(log, [json.dumps(payload, sort_keys=True)])
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(log)
+    assert "record.refusals[0].sync" in str(caught.value)
