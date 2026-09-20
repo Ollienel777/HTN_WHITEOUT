@@ -177,9 +177,13 @@ python scripts/truth_probe.py --host 10.99.4.1 --seconds 60 \
   --compare http://10.99.4.1:8010 --track "Sierra One"
 ```
 
-`score` prints the four axes this repository computes. They are **not** the
-seven the sponsor judges on (`ARENA.md` §5) — treat them as our own instrument,
-not as a prediction of the result.
+`score` prints the five axes this repository computes: coverage, detection
+speed, tracking duration, search efficiency and accuracy. They are five of the
+seven the sponsor judges on (`ARENA.md` §5), scored by our own instrument and
+not by the sponsor's — autonomy and collaboration are not axes at all, because
+they are read off the fleet's behaviour and the explanation rather than off a
+log. Treat the numbers as our own instrument, not as a prediction of the
+result.
 
 `truth_probe` reads the arena's ground truth from gzweb and diffs it against
 what we posted. It is a **measurement instrument, not an input**: nothing under

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Sequence
@@ -229,6 +230,20 @@ def cmd_score(args: argparse.Namespace) -> int:
         except (TypeError, ValueError) as exc:
             print(f"score: weights file has a non-numeric axis: {exc}", file=sys.stderr)
             return 1
+        # A weight is a share, so it is finite and not negative. Without this,
+        # a sweep that emits a negative weight prints ``total: 0.0000`` and a
+        # ``NaN`` weight — which bare JSON accepts as a token — prints
+        # ``total: nan``: a fake number on the one line a judge reads.
+        for name, weight in weights.items():
+            if not math.isfinite(weight):
+                print(f"score: weights file has a non-finite weight for {name}", file=sys.stderr)
+                return 1
+            if weight < 0.0:
+                print(
+                    f"score: weights file has a negative weight for {name}: {weight}",
+                    file=sys.stderr,
+                )
+                return 1
     try:
         records = read_episode_log(log)
     except EpisodeLogError as exc:

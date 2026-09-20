@@ -58,8 +58,10 @@ WEIGHTS = "fixtures/weights/equal.json"
 #: ``whiteout.score.AXES`` and with ``fixtures/weights/equal.json``. Not every
 #: axis is a number: one an episode log cannot answer for prints words instead
 #: (``not detected``, ``not measured (no truth in log)``), which is the point
-#: of #130. The smoke step below checks that every axis appears and that the
-#: ones which are numbers are finite, rather than demanding five floats.
+#: of #130. The smoke step below checks that every axis appears, that
+#: :data:`ALWAYS_NUMERIC` are finite numbers, and that any other axis is
+#: either a finite number or one of :data:`ACCEPTED_WORDS` — rather than
+#: demanding five floats, or accepting any string at all.
 AXES = (
     "coverage",
     "detection_speed",
@@ -68,10 +70,22 @@ AXES = (
     "accuracy",
 )
 
-#: The axis every episode log can answer for, whatever else it carries.
-#: ``covered_fraction`` is on every record, so a run that cannot print this one
-#: as a finite number is broken.
-ALWAYS_NUMERIC = "coverage"
+#: The axes the smoke run must print as finite numbers. ``covered_fraction``
+#: and ``energy_used`` are on every record of any run this gate makes, so an
+#: axis here printing words is a regression, not an honest absence — which is
+#: the failure #130 exists to catch.
+ALWAYS_NUMERIC = ("coverage", "search_efficiency")
+
+#: The exact words an axis may print in place of a number — the full set
+#: ``whiteout.score`` can emit. Pinned rather than accepting any string,
+#: because "not a float" is also what a stub prints: a regression that puts an
+#: axis back to a constant word must fail here rather than pass as an honest
+#: absence.
+ACCEPTED_WORDS = (
+    "not detected",
+    "no energy recorded",
+    "not measured (no truth in log)",
+)
 
 #: The per-worktree fallback environment. `.venv` and not some new name: it is
 #: already in `.gitignore`, in `[tool.ruff] exclude`, in `[tool.mypy] exclude`
@@ -504,19 +518,19 @@ def _score_failure(stdout: str) -> str | None:
     axes = _axis_lines(stdout)
     if axes is None:
         return f"score did not print a line for each of {', '.join(AXES)}"
-    coverage = axes[ALWAYS_NUMERIC]
-    try:
-        value = float(coverage)
-    except ValueError:
-        return f"score printed a non-numeric {ALWAYS_NUMERIC}: {coverage!r}"
-    if not math.isfinite(value):
-        return f"score printed a non-finite {ALWAYS_NUMERIC}: {coverage!r}"
     for axis, printed in axes.items():
         try:
-            other = float(printed)
+            value = float(printed)
         except ValueError:
-            continue  # words in place of a number: an axis this log cannot answer for
-        if not math.isfinite(other):
+            if axis in ALWAYS_NUMERIC:
+                return f"score printed a non-numeric {axis}: {printed!r}"
+            if printed not in ACCEPTED_WORDS:
+                return (
+                    f"score printed {printed!r} for {axis}, which is neither a number "
+                    f"nor one of {', '.join(repr(word) for word in ACCEPTED_WORDS)}"
+                )
+            continue  # words this scorer can honestly emit for an unanswerable axis
+        if not math.isfinite(value):
             return f"score printed a non-finite {axis}: {printed!r}"
     return None
 

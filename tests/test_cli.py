@@ -229,3 +229,33 @@ def test_score_diagnoses_malformed_weights(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert main(["score", str(log), "--weights", str(non_numeric)]) == 1
+
+
+def test_score_refuses_a_negative_or_non_finite_weight(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-M4: a bad weight used to print ``total: 0.0000`` or ``total: nan``.
+
+    Both are reachable from a plain file a sweep could write — Python's
+    ``json`` accepts the bare token ``NaN`` — and the total is the one line a
+    judge reads, so a fake number there is the exact output #130 abolished.
+    """
+    log = tmp_path / "episode.jsonl"
+    assert main(["run", "--seed", "7", "--ticks", "4", "--out", str(log)]) == 0
+    capsys.readouterr()
+    negative = tmp_path / "negative.json"
+    negative.write_text(
+        json.dumps({axis: (-4.0 if axis == "coverage" else 1.0) for axis in AXES}),
+        encoding="utf-8",
+    )
+    assert main(["score", str(log), "--weights", str(negative)]) == 1
+    assert "coverage" in capsys.readouterr().err
+    not_a_number = tmp_path / "nan.json"
+    not_a_number.write_text(
+        "{"
+        + ", ".join(f'"{axis}": ' + ("NaN" if axis == "coverage" else "1.0") for axis in AXES)
+        + "}",
+        encoding="utf-8",
+    )
+    assert main(["score", str(log), "--weights", str(not_a_number)]) == 1
+    assert "coverage" in capsys.readouterr().err

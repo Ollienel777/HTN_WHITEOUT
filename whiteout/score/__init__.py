@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from whiteout.score.episode import (
     AXES,
+    HELD_STATES,
     AxisScore,
     EpisodeScore,
     ScoreError,
@@ -24,6 +25,7 @@ from whiteout.score.episode import (
 
 __all__ = [
     "AXES",
+    "HELD_STATES",
     "AxisScore",
     "EpisodeScore",
     "ScoreError",

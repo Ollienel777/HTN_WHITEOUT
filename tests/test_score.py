@@ -9,6 +9,7 @@ hand-built one.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -91,17 +92,42 @@ def _record(
     )
 
 
-def _contact(tick: int) -> Contact:
+def _contact(tick: int, state: str = "tracked") -> Contact:
     return Contact(
         contact_id="c-1",
         t=float(tick),
-        state="confirming",
+        state=state,
         lat=71.996,
         lon=-94.845,
         confidence=0.7,
         classification="vessel",
         assigned_asset_id="quadcopter",
     )
+
+
+def _pair(tick: int, *, covered: float, quad: float, rover: float | None) -> EpisodeRecord:
+    """A two-asset record where the rover can be silent on a tick.
+
+    ``rover=None`` omits its pose entirely, which is what ``ArenaTransport``
+    does for an asset that has not reported.
+    """
+    base = _record(tick, covered=covered, energy=quad)
+    poses = base.observation.poses
+    if rover is not None:
+        poses = poses + (
+            Pose(
+                asset_id="rover",
+                cls="rover",
+                t=float(tick),
+                lat=71.99,
+                lon=-94.84,
+                z=0.0,
+                heading=0.0,
+                speed=2.0,
+                energy_used=rover,
+            ),
+        )
+    return replace(base, observation=replace(base.observation, poses=poses))
 
 
 def _episode(*, detect_at: int | None, ticks: int = 10) -> list[EpisodeRecord]:
@@ -158,15 +184,23 @@ def test_demo_episode_reports_the_axes_it_cannot_answer_for_in_words() -> None:
     axes = score_episode(read_episode_log(DEMO)).by_axis()
     assert axes["detection_speed"].value is None
     assert axes["detection_speed"].rendered() == "not detected"
+    assert axes["tracking_duration"].value is None
+    assert axes["tracking_duration"].rendered() == "not detected"
     assert axes["accuracy"].value is None
     assert axes["accuracy"].rendered() == "not measured (no truth in log)"
 
 
-def test_demo_episode_tracks_for_no_time_because_it_holds_nothing() -> None:
-    """A measured zero is a different statement from an unmeasured one."""
+def test_demo_episode_does_not_report_a_tracking_duration_it_never_measured() -> None:
+    """No contact anywhere is an absence, not a measured zero (R1-M1).
+
+    ``detection_speed`` and ``tracking_duration`` read the same absence, so
+    they say the same thing about it: the demo log carries no contact, so
+    there was never anything to hold and neither axis prints ``0.0000``.
+    """
     axes = score_episode(read_episode_log(DEMO)).by_axis()
-    assert axes["tracking_duration"].value == 0.0
-    assert "0 of 400 ticks" in axes["tracking_duration"].derivation
+    assert axes["tracking_duration"].value is None
+    assert axes["tracking_duration"].rendered() == "not detected"
+    assert "no record of 400 carries a contact" in axes["tracking_duration"].derivation
 
 
 # --- the axes, one at a time -------------------------------------------------
@@ -185,6 +219,11 @@ def test_detecting_sooner_scores_higher_than_detecting_later() -> None:
     late = score_episode(_episode(detect_at=8)).by_axis()["detection_speed"]
     assert early.value is not None and late.value is not None
     assert 0.0 < late.value < early.value <= 1.0
+    # The curve itself, not just the ordering: ``1 - elapsed / span`` over a
+    # ten-tick episode spanning 9 s. An ordering assertion alone survives any
+    # monotone reshaping of the metric (R1-M5).
+    assert early.value == pytest.approx(1.0 - 1.0 / 9.0)
+    assert late.value == pytest.approx(1.0 - 8.0 / 9.0)
     assert "first contact at t=1.0" in early.derivation
 
 
@@ -192,6 +231,40 @@ def test_tracking_duration_is_the_share_of_ticks_holding_a_contact() -> None:
     axis = score_episode(_episode(detect_at=5)).by_axis()["tracking_duration"]
     assert axis.value == pytest.approx(0.5)
     assert "5 of 10 ticks" in axis.derivation
+
+
+def test_a_lost_contact_is_not_a_tracked_tick() -> None:
+    """R1-C1: ``Coordinator`` emits a contact for ever after the first sighting.
+
+    ``TrackHold._last`` is never cleared, so once a sighting has landed every
+    later record carries a ``state="lost"`` contact. Counting non-empty
+    ``contacts`` would score a target lost on sight at 0.9750 — the axis would
+    measure time since first detection, not time tracking.
+    """
+    records = [_record(tick, covered=0.5, energy=10.0 * tick) for tick in range(2)]
+    records += [
+        _record(tick, covered=0.5, energy=10.0 * tick, contacts=(_contact(tick, "tracked"),))
+        for tick in range(2, 4)
+    ]
+    records += [
+        _record(tick, covered=0.5, energy=10.0 * tick, contacts=(_contact(2, "lost"),))
+        for tick in range(4, 20)
+    ]
+    axis = score_episode(records).by_axis()["tracking_duration"]
+    assert axis.value == pytest.approx(2 / 20)
+    assert "2 of 20 ticks" in axis.derivation
+
+
+def test_a_target_detected_and_never_held_scores_a_measured_zero() -> None:
+    """The zero that *is* a measurement: contacts in the log, none ever held."""
+    records = [
+        _record(tick, covered=0.5, energy=10.0 * tick, contacts=(_contact(tick, "confirming"),))
+        for tick in range(6)
+    ]
+    axes = score_episode(records).by_axis()
+    assert axes["tracking_duration"].value == 0.0
+    assert "0 of 6 ticks" in axes["tracking_duration"].derivation
+    assert axes["detection_speed"].value is not None
 
 
 def test_search_efficiency_rewards_covering_before_spending() -> None:
@@ -209,7 +282,51 @@ def test_search_efficiency_rewards_covering_before_spending() -> None:
     assert early_axis.value is not None and late_axis.value is not None
     assert early_axis.value > late_axis.value
     assert 0.0 <= late_axis.value <= 1.0 and 0.0 <= early_axis.value <= 1.0
+    # The values, not just the ordering: each 10-unit increment is weighed by
+    # the coverage standing at the tick it was spent on, so the early fleet
+    # spends all 90 units at coverage 1.0 and the late one spends 10 of 90
+    # there. Crediting the previous tick's coverage instead would leave an
+    # ordering assertion green (R1-M5).
+    assert early_axis.value == pytest.approx(1.0)
+    assert late_axis.value == pytest.approx(10.0 / 90.0)
     assert "90 units" in early_axis.derivation
+
+
+def test_search_efficiency_differences_energy_per_asset() -> None:
+    """R1-M3: a silent asset must not mis-attribute its whole cumulative spend.
+
+    ``ArenaTransport.observe`` omits a pose for an asset that has not reported
+    this tick. Differencing the fleet-wide sum makes that dip clamp to zero
+    and then lands the asset's entire ``energy_used`` on the tick it returns,
+    weighed by that one tick's coverage.
+    """
+    # The rover has already spent 100 units and spends nothing more; only the
+    # quad spends during the episode, 10 units a tick, all of it while the
+    # strait is dark. The fleet's 30 units therefore bought no coverage at the
+    # time they went, and the axis is 10 of 30 units at coverage 1.0.
+    both = [
+        _pair(tick, covered=0.0 if tick < 3 else 1.0, quad=10.0 * tick, rover=100.0)
+        for tick in range(4)
+    ]
+    # The same episode, except the rover says nothing on ticks 1 and 2. Across
+    # the fleet-wide sum its 100 units vanish and then reappear: the dip
+    # clamps two real quad increments to zero and 110 units land on the one
+    # tick coverage is 1.0, scoring 0.9167 for a fleet that covered nothing
+    # until the last tick.
+    silent = [
+        _pair(
+            tick,
+            covered=0.0 if tick < 3 else 1.0,
+            quad=10.0 * tick,
+            rover=None if tick in (1, 2) else 100.0,
+        )
+        for tick in range(4)
+    ]
+    steady = score_episode(both).by_axis()["search_efficiency"]
+    dropped = score_episode(silent).by_axis()["search_efficiency"]
+    assert steady.value is not None and dropped.value is not None
+    assert steady.value == pytest.approx(1.0 / 3.0)
+    assert dropped.value == pytest.approx(steady.value)
 
 
 def test_search_efficiency_says_so_when_no_energy_was_spent() -> None:

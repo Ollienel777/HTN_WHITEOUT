@@ -28,18 +28,31 @@ What each axis means:
     the axis reports **not detected** in words.
 
 ``tracking_duration``
-    The share of ticks whose ``contacts`` are non-empty, with the equivalent
-    in seconds in the derivation.
+    The share of ticks that carry a contact **in a state that means we are
+    holding it** (:data:`HELD_STATES`), with the equivalent in seconds in the
+    derivation. A ``lost`` contact is not a tracked tick: ``Coordinator``
+    keeps emitting one for every tick after the first sighting, so counting
+    any non-empty ``contacts`` would measure time since first detection and
+    print a near-perfect score for a target lost on sight. When no record
+    carries a contact at all there was never anything to hold, and the axis
+    reports **not detected** in words — the same absence ``detection_speed``
+    reports, decided once. A zero here is therefore a measurement: contacts
+    exist in the log and none of them was ever held.
 
 ``search_efficiency``
-    Coverage measured against the energy that bought it: the fleet's
-    ``covered_fraction`` averaged over the episode *weighted by energy spent*
-    — that is, ``sum(covered_fraction_i * energy_spent_in_tick_i) /
-    total_energy_used``. Energy burned while the strait is still dark scores
-    low; a fleet that covers early and then holds spends most of its energy at
-    high coverage and scores high. Bounded in ``[0, 1]`` by construction,
-    which a bare coverage-per-joule ratio is not. With no energy recorded
-    there is no denominator, and the axis says so in words.
+    *When* the fleet's energy went, weighed against the coverage standing at
+    the time: ``sum(covered_fraction_i * energy_spent_in_tick_i) /
+    total_energy_used``, differenced per ``asset_id`` so an asset that misses
+    a tick does not mis-attribute its whole cumulative spend. Energy burned
+    while the strait is still dark scores low; a fleet that covers early and
+    then holds spends most of its energy at high coverage and scores high.
+    Bounded in ``[0, 1]`` by construction, which a bare coverage-per-joule
+    ratio is not. It is a convex combination, so it is **scale-invariant in
+    energy**: a fleet burning ten times the energy on the identical coverage
+    curve scores the same. It ranks promptness of spend, not thrift; the
+    magnitude of the spend is in the derivation line, not in the number.
+    With no energy recorded there is no denominator, and the axis says so in
+    words.
 
 ``accuracy``
     **Not measured.** It is a comparison against ``truth``, and ``cmd_run``
@@ -70,7 +83,16 @@ AXES: tuple[str, str, str, str, str] = (
     "accuracy",
 )
 
+#: The :data:`~whiteout.types.CONTACT_STATES` that mean the fleet is holding
+#: the target on this tick. ``unconfirmed`` and ``confirming`` are a hypothesis
+#: not yet a track, and ``lost`` is the opposite of holding — and it is the
+#: dangerous one, because ``Coordinator._contacts`` emits a ``lost`` contact on
+#: every tick after the first sighting for the rest of the run.
+HELD_STATES: frozenset[str] = frozenset({"tracked", "handed_off"})
+
 _NO_TRUTH = "no episode log carries truth targets yet, so there is nothing to measure against"
+
+_NOT_DETECTED = "not detected"
 
 
 class ScoreError(ValueError):
@@ -159,7 +181,17 @@ def _coverage(records: Sequence[EpisodeRecord]) -> AxisScore:
 
 
 def _contact_ticks(records: Sequence[EpisodeRecord]) -> list[int]:
+    """Ticks carrying any contact at all — a detection, whatever its state."""
     return [index for index, record in enumerate(records) if record.contacts]
+
+
+def _held_ticks(records: Sequence[EpisodeRecord]) -> list[int]:
+    """Ticks the fleet was actually holding a contact on (:data:`HELD_STATES`)."""
+    return [
+        index
+        for index, record in enumerate(records)
+        if any(contact.state in HELD_STATES for contact in record.contacts)
+    ]
 
 
 def _span(records: Sequence[EpisodeRecord]) -> float:
@@ -172,7 +204,7 @@ def _detection_speed(records: Sequence[EpisodeRecord]) -> AxisScore:
         return AxisScore(
             axis="detection_speed",
             value=None,
-            words="not detected",
+            words=_NOT_DETECTED,
             derivation=(
                 f"no record of {len(records)} carries a contact, so there is no first "
                 "detection to time"
@@ -194,30 +226,56 @@ def _detection_speed(records: Sequence[EpisodeRecord]) -> AxisScore:
 
 
 def _tracking_duration(records: Sequence[EpisodeRecord]) -> AxisScore:
-    held = _contact_ticks(records)
+    if not _contact_ticks(records):
+        return AxisScore(
+            axis="tracking_duration",
+            value=None,
+            words=_NOT_DETECTED,
+            derivation=(
+                f"no record of {len(records)} carries a contact, so there was never "
+                "anything to hold"
+            ),
+        )
+    held = _held_ticks(records)
     share = len(held) / len(records)
     span = _span(records)
+    states = ", ".join(sorted(HELD_STATES))
     return AxisScore(
         axis="tracking_duration",
         value=_clamp(share),
         words="",
         derivation=(
-            f"{len(held)} of {len(records)} ticks carry a contact "
-            f"({share * span:.1f} s of {span:.1f} s)"
+            f"{len(held)} of {len(records)} ticks carry a contact in state {states} "
+            f"({share * span:.1f} s of {span:.1f} s); a lost contact is not a held one"
         ),
     )
 
 
 def _search_efficiency(records: Sequence[EpisodeRecord]) -> AxisScore:
-    """Coverage weighted by the energy that bought it (see the module docstring)."""
+    """Coverage weighted by *when* the energy went (see the module docstring).
+
+    Scale-invariant in energy by construction: it ranks promptness of spend,
+    not thrift.
+    """
     spent = 0.0
     weighted = 0.0
-    previous = sum(pose.energy_used for pose in records[0].observation.poses)
-    opening = previous
+    #: Last seen ``energy_used`` per asset. Differencing the fleet-wide sum
+    #: would mis-read a silent asset: ``ArenaTransport.observe`` omits a pose
+    #: for an asset that has not reported this tick, so the sum dips and then
+    #: jumps, and that asset's whole cumulative spend lands on one tick's
+    #: coverage. Per asset, a missed tick costs nothing and the increment is
+    #: credited when it arrives.
+    previous: dict[str, float] = {
+        pose.asset_id: pose.energy_used for pose in records[0].observation.poses
+    }
+    opening = sum(previous.values())
     for record in records[1:]:
-        total = sum(pose.energy_used for pose in record.observation.poses)
-        delta = max(0.0, total - previous)
-        previous = total
+        delta = 0.0
+        for pose in record.observation.poses:
+            before = previous.get(pose.asset_id)
+            increment = pose.energy_used if before is None else pose.energy_used - before
+            previous[pose.asset_id] = pose.energy_used
+            delta += max(0.0, increment)
         spent += delta
         weighted += record.belief_digest.covered_fraction * delta
     if spent <= 0.0:
@@ -236,8 +294,10 @@ def _search_efficiency(records: Sequence[EpisodeRecord]) -> AxisScore:
         words="",
         derivation=(
             f"coverage averaged over the {spent:.0f} units of "
-            f"observation.poses[].energy_used spent after t={records[0].t:.1f} s "
-            f"(fleet total at the last tick: {previous:.0f}, at the first: {opening:.0f})"
+            f"observation.poses[].energy_used spent after t={records[0].t:.1f} s, "
+            f"differenced per asset (fleet total last reported: "
+            f"{sum(previous.values()):.0f}, at the first tick: {opening:.0f}); "
+            "this ranks when the energy went, not how much of it there was"
         ),
     )
 
