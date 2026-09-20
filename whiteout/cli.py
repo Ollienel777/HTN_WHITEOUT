@@ -24,6 +24,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from whiteout.coordinate import DEFAULT_TRACK_NAME, Coordinator, SightingSource
 from whiteout.geo import ARENA_ORIGIN
@@ -34,7 +35,7 @@ from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_
 from whiteout.tracks.client import TrackPoster, TracksClient, TracksError, endpoint_from_env
 from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
-from whiteout.transport.arena import host_from_env
+from whiteout.transport.arena import ArenaTransport, host_from_env
 from whiteout.types import (
     BeliefDigest,
     BeliefFrame,
@@ -254,8 +255,8 @@ def _arena_poster(dry_run: bool = False) -> TrackPoster | None:
     return TrackPoster(TracksClient(endpoint))
 
 
-def _arm_fleet(transport: object, altitude_m: float) -> None:
-    """Arm and launch every asset that can move, before the tick loop runs.
+def _arm_fleet(transport: ArenaTransport, altitude_m: float) -> None:
+    """Send every asset that can move a GUIDED-arm-takeoff, before the tick loop.
 
     Issue #138. The coordinator commands GUIDED-mode waypoints, and a waypoint
     to a disarmed vehicle is ignored — so without this a live arena run drives
@@ -265,30 +266,43 @@ def _arm_fleet(transport: object, altitude_m: float) -> None:
     that asked anyway would be reading a refusal it caused as a fault. They
     are filtered here by class rather than caught below.
 
+    **"Commanded" is the strongest word available, and the line below says
+    that and not more.** :meth:`~whiteout.transport.arena.ArenaTransport.arm_and_launch`
+    writes the arm and the takeoff back to back without reading
+    ``COMMAND_ACK``, on purpose: the arming window is about three seconds and
+    waiting for an ack misses it often enough to look like a broken vehicle.
+    So nothing reachable from here can tell a vehicle that climbed from one
+    ArduPilot rejected on a pre-arm check — an earlier revision printed
+    ``launched``, which reads as confirmation and is not one. ``docs/arena.md``
+    §3 says where to look for what actually happened.
+
     **One asset that will not arm does not end the episode.** An arena run is
-    live and cannot be repeated, so a refusal is reported by name and the run
-    continues with whatever did launch — three assets searching beats none.
+    live and cannot be repeated, so a failure is reported by name and the run
+    continues with whatever was commanded — three assets searching beats none.
+    :class:`OSError` is caught beside :class:`TransportError` for exactly that
+    reason: ``arm_and_launch`` writes to a pymavlink socket, and a socket that
+    fails partway through the roster would otherwise end the run before tick 1
+    — the opposite of what this function promises.
     """
-    launch = getattr(transport, "arm_and_launch", None)
-    if not callable(launch):
-        print("run: this transport launches nothing; --arm ignored", file=sys.stderr)
-        return
-    mobile = [asset for asset in getattr(transport, "assets", ()) or () if asset.cls != "tower"]
+    mobile = [asset for asset in transport.assets if asset.cls != "tower"]
     if not mobile:
         print("run: no mobile assets in the roster; nothing to launch", file=sys.stderr)
         return
-    launched: list[str] = []
+    commanded: list[str] = []
     for asset in mobile:
         try:
-            launch(asset.asset_id, altitude_m=altitude_m)
-        except TransportError as exc:
-            print(f"run: {asset.asset_id} did not launch ({exc})", file=sys.stderr)
+            transport.arm_and_launch(asset.asset_id, altitude_m=altitude_m)
+        except (TransportError, OSError) as exc:
+            print(f"run: {asset.asset_id} was not commanded ({exc})", file=sys.stderr)
         else:
-            launched.append(asset.asset_id)
-    if launched:
-        print(f"run: launched {', '.join(launched)} to {altitude_m:.0f} m")
+            commanded.append(asset.asset_id)
+    if commanded:
+        print(
+            f"run: arm and takeoff to {altitude_m:.0f} m sent to {', '.join(commanded)}"
+            " — watch the fleet rows, or gzweb, for who actually left the ground"
+        )
     else:
-        print("run: nothing launched; the fleet is still on the ground", file=sys.stderr)
+        print("run: nothing was commanded; the fleet is still on the ground", file=sys.stderr)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -304,6 +318,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         # the same reason: a bad seed is the caller's mistake, not a crash.
         # Normalising it (`abs`) would silently merge two distinct episodes.
         print(f"run: seed {seed} is negative; episode seeds are non-negative", file=sys.stderr)
+        return 1
+    if args.arm and not (math.isfinite(args.launch_alt) and args.launch_alt > 0.0):
+        # Checked whenever `--arm` is passed, including on the kinematic
+        # transport where it launches nothing: a rehearsal is where a typo in
+        # this flag should be found, not the one live run. `argparse` accepts
+        # `-50`, `0`, `nan` and `inf` as floats, and every one of them is
+        # forwarded into `MAV_CMD_NAV_TAKEOFF`'s altitude parameter.
+        #
+        # Finite and positive, and no ceiling: that is the bound
+        # `SearchParams` puts on `search_alt_m`, which is this flag's default,
+        # and a ceiling here would be a number invented in the CLI rather than
+        # one the arena or the policy states.
+        print(
+            f"run: --launch-alt {args.launch_alt!r} must be finite and positive",
+            file=sys.stderr,
+        )
         return 1
     try:
         name = selected_transport_name()
@@ -338,7 +368,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                         # both has a wrong expectation about one of them.
                         print("run: --dry-run; not arming the fleet")
                     else:
-                        _arm_fleet(transport, args.launch_alt)
+                        # `cast` rather than a runtime check: `transport` is
+                        # typed as the `Transport` protocol, which carries no
+                        # `arm_and_launch`, and this branch is the one the
+                        # factory just built an `ArenaTransport` for. An
+                        # earlier revision guarded with `callable()` instead,
+                        # and that branch was unreachable.
+                        _arm_fleet(cast(ArenaTransport, transport), args.launch_alt)
                 camera = _arena_camera(
                     tuple(asset.asset_id for asset in getattr(transport, "assets", ()))
                 )
@@ -578,8 +614,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SEARCH_PARAMS.search_alt_m,
         metavar="METRES",
         help=(
-            "altitude to take off to with --arm; defaults to the altitude the "
-            "search policy flies at, so the climb is not undone by the first waypoint"
+            "altitude to take off to with --arm; must be finite and positive, "
+            "and defaults to the altitude the search policy flies at, so the "
+            "climb is not undone by the first waypoint"
         ),
     )
     run.set_defaults(func=cmd_run)

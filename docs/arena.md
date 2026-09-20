@@ -126,9 +126,10 @@ WHITEOUT_TRACKS_ENDPOINT=http://10.99.4.1:8010 \
   python -m whiteout.cli run --arm --ticks 400 --out artifacts/judged.jsonl
 ```
 
-That connects to all four assets, **arms and launches the two aircraft**, opens
-every camera, ticks the coordinator, commands waypoints, holds whatever the
-cameras see and **submits it to the tracks API**, and writes the episode log.
+That connects to all four assets, **commands the two aircraft to arm and take
+off**, opens every camera, ticks the coordinator, commands waypoints, holds
+whatever the cameras see and **submits it to the tracks API**, and writes the
+episode log.
 
 ### What has to be true before a vehicle moves
 
@@ -138,7 +139,7 @@ observes, believes and decides, and touches nothing:
 | for this to happen | this must be true |
 |---|---|
 | waypoints reach the fleet | `WHITEOUT_TRANSPORT=arena`, and **no** `--dry-run` |
-| the aircraft arm and take off | **`--arm`**, and no `--dry-run` |
+| the aircraft arm and take off | `WHITEOUT_TRANSPORT=arena`, **`--arm`**, and no `--dry-run` |
 | a fix reaches the judged endpoint | `WHITEOUT_TRACKS_ENDPOINT` is set, and no `--dry-run` |
 
 `--arm` is opt-in because it moves real vehicles in a simulator the room
@@ -152,8 +153,14 @@ assets searching beats none.
 Three lines to read, and each one distinguishes a cause you would otherwise
 have to guess at:
 
-- On stdout, at the start: **`run: launched quadcopter, fixed-wing to 120 m`**,
-  or a line naming whichever asset refused. Nothing named is nothing flying.
+- On stdout, at the start: **`run: arm and takeoff to 120 m sent to quadcopter,
+  fixed-wing`**, or a line naming whichever asset was not commanded. Read it as
+  *sent*, not as *flying*: the arm and the takeoff go out back to back without
+  waiting for a `COMMAND_ACK`, because the arming window is about three seconds
+  and waiting for the ack misses it. An ArduPilot pre-arm rejection therefore
+  prints this same line. **What tells you a vehicle left the ground is its
+  altitude** — the viewer's fleet rows, or gzweb. An asset named here and still
+  at its home altitude a few ticks in did not arm.
 - On stdout, at the start: **`run: submitting held tracks to …`**, or
   `not submitting tracks`. If you meant a judged run and see the second, the
   endpoint is unset and nothing you do later in the run will score.
@@ -164,9 +171,12 @@ have to guess at:
 ### What it still does not do
 
 - **It does not aim the towers on its own** beyond the waypoint-as-look-at
-  that `ArenaTransport.command` already turns into servo 1 and servo 2. If a
-  tower is doing nothing useful, `transport.scan("tower-1")` is the
-  do-nothing-clever fallback mode.
+  that `ArenaTransport.command` already turns into a **pan**. `_aim` sends
+  servo 1 and nothing else, so **tilt is never commanded** — a tower holds
+  whatever tilt it booted with, and a level tower is blind inside
+  `height / tan(vfov/2)`, which is 695 m for the taller mast. `set_servo` is
+  there to drive servo 2 and has no caller. If a tower is doing nothing
+  useful, `transport.scan("tower-1")` is the do-nothing-clever fallback mode.
 - **The towers are sited wherever `.env` puts them.** `scripts/tower_siting.py`
   measures what that costs; moving them is a human action and a rebuild.
 
