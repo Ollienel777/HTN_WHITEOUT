@@ -55,6 +55,156 @@ takes the vehicle's attitude unchanged:
 A gimballed camera is the same type with the gimbal's angles substituted for
 the airframe's; a tower's come from :mod:`whiteout.vision.tower`.
 
+Grid North, true North, and what ``convergence_deg`` does and does not reach
+-----------------------------------------------------------------------------
+
+``GET :8090/api/site`` publishes ``convergence_deg`` beside ``bounds3413``: the
+angle between **grid North** — the northing axis of EPSG:3413, the polar
+stereographic grid the arena tiles its terrain in — and **true North**. At this
+site it is about **49.8°**, because for the polar aspect of a stereographic
+projection the convergence is exactly :math:`\\lambda - \\lambda_0`, and
+EPSG:3413's central meridian is 45° W against a site at 94.82° W. The arena
+was asked and answered **-49.80479°**, against the identity's -49.822428°;
+:mod:`whiteout.site` holds that answer and checks it, and the 0.0176° between
+the two is discussed there. So the grid this section reasons about is the grid
+the arena is actually using.
+
+**Nothing under** ``whiteout/`` **applies it, and this section is why.** The
+scope matters and an earlier revision got it wrong by saying "nothing anywhere
+else in the build": ``scripts/truth_probe.py`` applies exactly this rotation
+and calls it "the whole game" (#121). That is not a contradiction, it is the
+distinction — the probe reads Gazebo's world coordinates, which *are* grid
+coordinates, and anything holding a grid quantity must rotate it. The claim
+here is narrower and is the one the argument needs: no quantity this package
+computes is expressed in that grid.
+
+**The grid is a frame ``whiteout/`` never enters.** Positions arrive geodetic
+(``GLOBAL_POSITION_INT``, degE7) and leave geodetic (``POST /api/tracks``).
+The one frame in between is :mod:`whiteout.geo`'s local East–North tangent
+plane, and its North axis is true North by construction: ``enu_to_geodetic``
+divides the North offset by the meridional radius of curvature to get a change
+of *latitude*, not a change of northing. No easting, no northing and no scale
+factor of EPSG:3413 is read or written anywhere in ``whiteout/``. A rotation
+between two frames is a correction only for a quantity expressed in one of
+them, and none of ours is.
+
+**So there is exactly one way convergence could still reach us: the heading we
+are handed.** Two inputs are heading-shaped. A tower's pan zero
+(:func:`whiteout.vision.tower.tower_camera_pose`'s ``boresight_yaw_deg``) is
+our own convention in a roster file, compared against
+:func:`whiteout.geo.bearing_deg`, so it is true North by construction. The
+other is ``pose.heading`` — ArduPilot's ``ATTITUDE.yaw``, which
+``whiteout/vision/sightings.py`` hands straight to :attr:`CameraPose.yaw_deg`.
+**Whether that yaw is referenced to true North or to grid North is not
+settled**, and the rest of this section is about what is known.
+
+What #121 falsified, and what it did not
+-----------------------------------------
+
+An earlier revision of this section asserted that "the simulator's world frame
+is an East–North–Up frame about a geodetic origin, so that yaw is referenced
+to true North". **That is false.** ``scripts/truth_probe.py`` measured it:
+Gazebo's world x/y are EPSG:3413 grid axes. Against MAVLink lat/lon for the
+same aircraft, no rotation gives 1547.6 m of error and rotating by minus the
+published convergence gives 5.7 m.
+
+What that measurement *does* establish is the other end of the chain.
+**MAVLink's lat/lon is geodetically correct** — it is the reference the probe
+fitted Gazebo's grid coordinates to. So the −49.8° rotation is applied
+somewhere between Gazebo's grid-aligned world and ``GLOBAL_POSITION_INT``, and
+the open question is only whether attitude went through it with position.
+
+The case for true North, stated as the inference it is
+-------------------------------------------------------
+
+ArduPilot's EKF fuses GPS-derived position against inertial data rotated by
+its own attitude estimate. If its lat/lon were true-North referenced while its
+attitude were grid-referenced, those two would disagree by 49.8° inside the
+filter: the innovations would be enormous, dead reckoning would diverge, and
+guided flight to a waypoint would not track. #118 stood the fleet up and flew
+it to waypoints. That is a real argument and it is the strongest one available
+— but it is an inference from "the vehicles fly", not a measurement of the
+angle.
+
+The circumstantial evidence points the same way. #110 flew the detector live
+and reported its false alarms landing "one to three kilometres away, on the
+channel's ice": still in the channel, which is where a camera with a
+true-North yaw puts them and is not where a 49.8° rotation would.
+
+**So no correction is applied here, and the reason is that no measurement
+supports applying one — not that the question is closed.** Pointing this
+module at ``-convergence`` on the strength of #121's *position* finding would
+be the same mistake in the other direction, and it would be the larger one:
+the rotation is worth ~1500 m at the arena's scale, so a wrong correction
+costs as much as a missing one.
+
+What it costs if this is wrong
+-------------------------------
+
+A bias nobody can price is a bias nobody weighs. A yaw error :math:`\\gamma`
+puts a fix at ground range :math:`d` off by :math:`2 d \\sin(\\gamma/2)`,
+which at 49.8° is 0.843 of the range:
+
+.. code-block:: text
+
+    ground range   position error at a 49.8 deg yaw bias
+      302 m  (the #111 stand-off)      254 m
+     1000 m                            842 m
+     3000 m                           2527 m
+
+The channel's modelled water is 535 m to 772 m of half-width
+(:data:`whiteout.belief.geometry.DEFAULT_STRAIT`), so at a kilometre the bias
+alone would exceed it: every projected fix would land on rock or outside the
+6.5 km site, and :meth:`ChannelBeliefGrid.update_detection
+<whiteout.belief.grid.ChannelBeliefGrid.update_detection>` would be folding
+belief onto water the camera was not looking at. This is not a subtle error
+that could sit unnoticed — it is the sort that breaks a run in the first
+minute, which is itself part of why the inference above is credible.
+
+The check that would settle it
+-------------------------------
+
+#121 makes this much easier than it was, and **it no longer needs a moving
+asset** — which is what defeated the last attempt, when ``GET
+:8090/api/status`` answered ``{"state": "idle"}``, the aircraft's MAVLink
+ports refused a connection, and a stationary asset has no course over ground.
+
+Gazebo's ``~/pose/info`` carries each model's **orientation** beside the
+position ``truth_probe`` keeps. Read an aircraft's yaw from that stream and
+its ``ATTITUDE.yaw`` from MAVLink at the same instant. The two hypotheses
+differ by exactly the convergence: if ``ATTITUDE.yaw`` matches Gazebo's world
+yaw, the heading is grid-referenced and every consumer of ``pose.heading``
+needs the rotation; if it sits ~49.8° from it, the heading is true North and
+this section stands. A parked quadcopter answers it.
+
+Pin the conventions before trusting the sign — Gazebo's yaw is
+counter-clockwise from its +x axis while a bearing is clockwise from North, so
+the robust reading is *which* of 0° or 49.8° the difference lands on, not its
+sign. For the position case the relation implied by
+``truth_probe.grid_to_local`` is ``true bearing = grid bearing +
+convergence_deg``.
+
+The older course-over-ground check still works and needs no Gazebo: fly a
+straight leg and compare ``ATTITUDE.yaw`` against the bearing
+:func:`whiteout.geo.bearing_deg` gives between two consecutive
+``GLOBAL_POSITION_INT`` fixes on it. Nothing in the repository asserts either,
+because both need a live arena, and an assertion nobody can run is worse than
+a procedure somebody can.
+
+**The convergence that does exist here, and where it is zero.** A local
+tangent plane has a meridian convergence of its own: true North at a point
+:math:`\\Delta\\lambda` East of the origin is turned from the plane's North
+axis by :math:`\\Delta\\lambda \\sin\\varphi`. Over the whole 6.5 km site about
+:data:`whiteout.geo.ARENA_ORIGIN` that reaches **0.106°** at the far corner,
+6.0 m of lateral error at 3.25 km. It is not corrected anywhere and does not
+need to be, for two separate reasons. In this module it is identically zero,
+per the paragraph above. In :mod:`whiteout.belief.geometry`, which does use one
+fixed origin across the whole site, no heading is consumed at all: the ribbon
+is a geometric construction inside a single plane, both of its conversions use
+that same plane, and :mod:`whiteout.belief.grid` diffuses isotropically from a
+speed. A heading measured at one point and used in another's frame is the
+thing to watch for, and there is not one.
+
 Accuracy, and the two approximations that cost the most
 -------------------------------------------------------
 

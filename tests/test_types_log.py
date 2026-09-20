@@ -1143,3 +1143,59 @@ def test_a_refusal_must_carry_a_reason(tmp_path: Path) -> None:
     with pytest.raises(EpisodeLogError) as caught:
         validate_episode_log(log)
     assert "record.refusals[0].sync" in str(caught.value)
+
+
+# --- the belief geometry rides the first frame (#124) ----------------------
+#
+# A cross-line invariant, so it lives in `iter_episode_log` beside `t` rather
+# than in `validate_line`, which sees one line at a time. These run against the
+# committed episode rather than a synthetic record, because the failure being
+# guarded is a real operation on a real file: slicing, rotating or
+# concatenating a log drops the one record the lattice is on.
+
+DEMO_LOG = Path(__file__).resolve().parents[1] / "fixtures" / "episodes" / "demo.jsonl"
+
+
+def test_the_committed_episode_carries_its_geometry_on_the_first_frame() -> None:
+    """The positive control, and a statement about the fixture itself."""
+    records = read_episode_log(DEMO_LOG)
+    assert records[0].belief_field is not None
+    assert records[0].belief_field.geometry is not None
+    carriers = [i for i, r in enumerate(records) if r.belief_field is not None]
+    assert carriers, "the committed episode carries no belief field at all"
+    assert carriers[0] == 0
+    # Written once: 11.8 kB on all 400 ticks would be 4.7 MB of the same bytes.
+    with_geometry = [
+        i for i, r in enumerate(records) if r.belief_field and r.belief_field.geometry is not None
+    ]
+    assert with_geometry == [0]
+
+
+def test_a_log_beheaded_of_its_first_record_is_refused(tmp_path: Path) -> None:
+    """``tail -n +2`` over a committed episode is the case this exists for.
+
+    Every remaining line validates on its own -- each frame decodes to the
+    right number of bytes against its own ``water_cells`` -- and not one cell
+    has a position any more. Without this check that log reads clean and draws
+    nothing, which a viewer shows as an empty canvas and a scorer never
+    notices.
+    """
+    beheaded = tmp_path / "beheaded.jsonl"
+    lines = DEMO_LOG.read_text(encoding="utf-8").splitlines(keepends=True)
+    beheaded.write_text("".join(lines[1:]), encoding="utf-8", newline="")
+    with pytest.raises(EpisodeLogError) as caught:
+        validate_episode_log(beheaded)
+    assert "line 1" in str(caught.value)
+    assert "cannot be drawn" in str(caught.value)
+
+
+def test_a_log_that_never_carries_a_belief_field_is_still_valid(tmp_path: Path) -> None:
+    """The invariant binds the first frame that exists, not every record.
+
+    ``make_record`` builds no belief field, and a log of those must stay
+    readable: the field is optional in the schema, and a transport or a test
+    that writes none is not writing a broken episode.
+    """
+    log = tmp_path / "fieldless.jsonl"
+    _write_lines(log, [_good_line(0), _good_line(1), _good_line(2)])
+    assert validate_episode_log(log) == 3

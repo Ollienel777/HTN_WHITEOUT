@@ -88,6 +88,15 @@ class KinematicAsset:
         slower; that ordering is the only thing this number is asked to get
         right, because the policy's two altitudes — search at 120 m, hold a
         contact at 60 m — differ by a minute of climb, not by a second.
+    :param pitch_deg: the airframe's pitch, and so the camera's, since the
+        quadcopter's mount is not commandable (#99). **Reported rather than
+        left ``None``**, and the distinction is the point: ``Pose.pitch`` is
+        ``None`` when a transport does not *know* the attitude, which is the
+        arena adapter's position until ``ATTITUDE`` arrives. This transport is
+        not ignorant of the attitude — it decides it. A fake that flies level
+        and says so is reporting its world; one that flew level and returned
+        ``None`` would make the non-detection update (#13) skip every asset,
+        which is exactly what happened the first time this was written.
     :param mobile: false for a tower, which is **aimed and never sent**.
         Nothing here infers that from ``cls``: the policy already reasons
         about it, and two modules deciding the same fact separately is how
@@ -100,6 +109,7 @@ class KinematicAsset:
     camera: str
     cruise_mps: float
     climb_mps: float
+    pitch_deg: float
     mobile: bool
 
 
@@ -114,18 +124,49 @@ class KinematicAsset:
 #: — including by us, the night before. Callsigns are a rendering concern and
 #: belong to the viewer, which already maps what the log names.
 #:
-#: Altitudes: ``ARENA.md`` §3 starts the quadcopter over the highest point of
-#: the map, which is why its figure is not a height over water and why #76's
-#: datum question is not settled by this table.
+#: Altitudes are **MSL**, matching what the arena adapter reports and what
+#: #108 measured against gzweb: tower-1 at 116.8 m and tower-2 at 226.5 m are
+#: the rendered mast heights, not round numbers — the towers stand on cliffs,
+#: and a fake that put them at 15 m would give them a horizon 45 km nearer
+#: than the real ones have and a footprint to match.
+#:
+#: **Every figure here is height above the water plane, and for this fleet
+#: that is the same as MSL**, because the fake's water plane is z = 0 and
+#: nothing here sits on a hill it does not know about. #108 measured the same
+#: to hold on the arena — MSL matched the rendered heights to a decimetre —
+#: which is why these are the arena's numbers and not round ones.
+#:
+#: This matters because the belief field's non-detection update treats
+#: ``pose.z - ground_alt_m`` as the camera's height above the water, and a
+#: transport whose ``z`` meant anything else would scale every footprint. An
+#: earlier revision of this comment cited ``ARENA.md`` §3's note that the
+#: quadcopter *starts* over the highest point of the map, which is true of
+#: the arena's spawn and was the wrong thing to say here: it reads as though
+#: this table's quadcopter figure were measured from something other than the
+#: water, and it is not.
+#:
+#: #76 — which datum the arena's own telemetry reports — is settled for the
+#: command side by #108 and is not re-opened by this table.
+#:
+#: Every asset flies level. A camera pitched at 0° looks at the horizon and
+#: sees the water from its near field-of-view edge outward — 102 m for the
+#: quadcopter's 99.4° field at 120 m, 308 m for the fixed-wing's 42.6°. That
+#: near edge is #111's whole finding, and it falls out of the geometry here
+#: rather than being special-cased anywhere.
 FLEET: tuple[KinematicAsset, ...] = (
-    KinematicAsset("quadcopter", "quad", 40.0, "quadcopter", 12.0, 3.0, mobile=True),
-    KinematicAsset("fixed-wing", "fixedwing", 120.0, "fixed-wing", 26.0, 2.0, mobile=True),
-    KinematicAsset("tower-1", "tower", 15.0, "tower", 0.0, 0.0, mobile=False),
-    KinematicAsset("tower-2", "tower", 15.0, "tower", 0.0, 0.0, mobile=False),
+    KinematicAsset("quadcopter", "quad", 40.0, "quadcopter", 12.0, 3.0, 0.0, mobile=True),
+    KinematicAsset("fixed-wing", "fixedwing", 120.0, "fixed-wing", 26.0, 2.0, 0.0, mobile=True),
+    KinematicAsset("tower-1", "tower", 116.8, "tower", 0.0, 0.0, 0.0, mobile=False),
+    KinematicAsset("tower-2", "tower", 226.5, "tower", 0.0, 0.0, 0.0, mobile=False),
 )
 
 #: Where the two masts stand, and which way each looks: ``(lat, lon, bearing)``
-#: with the bearing in radians clockwise from North.
+#: with the bearing in **degrees** clockwise from North, which is the unit
+#: ``Pose.heading`` carries. The arena adapter converts ``ATTITUDE.yaw`` from
+#: radians and divides ``GLOBAL_POSITION_INT.hdg`` by 100 to get there, and
+#: :class:`whiteout.vision.projection.CameraPose` reads the field as
+#: ``yaw_deg``; a transport reporting radians into it is out by a factor of 57
+#: in the one number that says which way a camera is pointing.
 #:
 #: **Literal coordinates, and not a channel parameterisation.** The obvious
 #: spelling — ask ``whiteout.belief.geometry`` for a point 18% along the
@@ -147,8 +188,8 @@ FLEET: tuple[KinematicAsset, ...] = (
 #: this is a decision we are allowed to make; #68 makes it a deliberate one
 #: instead of a default.
 _TOWER_STATIONS: tuple[tuple[float, float, float], ...] = (
-    (72.00155816096998, -94.88122329045646, 1.8586),
-    (71.99210765845011, -94.76346780323156, 4.9264),
+    (72.00155816096998, -94.88122329045646, 106.49),
+    (71.99210765845011, -94.76346780323156, 282.26),
 )
 
 
@@ -288,7 +329,7 @@ class KinematicTransport:
                 east, north = generator.uniform(-_START_SPREAD, _START_SPREAD, size=2)
                 start = local_to_geodetic(ARENA_ORIGIN, LocalPoint(float(east), float(north)))
                 lat, lon = start.lat_deg, start.lon_deg
-                heading = float(generator.uniform(0.0, 2.0 * np.pi))
+                heading = float(generator.uniform(0.0, 360.0))
             else:
                 lat, lon, heading = self._tower_station(towers)
                 towers += 1
@@ -301,6 +342,8 @@ class KinematicTransport:
                     lon=lon,
                     z=asset.altitude_m,
                     heading=heading,
+                    pitch=asset.pitch_deg,
+                    roll=0.0,
                     speed=0.0,
                     energy_used=0.0,
                 )
@@ -399,7 +442,7 @@ class KinematicTransport:
                     LocalPoint(here.east_m + east * fraction, here.north_m + north * fraction),
                 )
                 lat, lon = arrived.lat_deg, arrived.lon_deg
-                heading = math.atan2(east, north) % (2.0 * math.pi)
+                heading = math.degrees(math.atan2(east, north)) % 360.0
                 speed = step / self._tick_seconds
             # Altitude is flown too, and this is not symmetry for its own
             # sake. `target_z` is a real instruction: the policy searches at
@@ -419,6 +462,8 @@ class KinematicTransport:
             lon=lon,
             z=z,
             heading=heading,
+            pitch=pose.pitch,
+            roll=pose.roll,
             speed=speed,
             # Energy is distance flown, not time powered: a loitering quad and
             # a parked one are not the same asset to the efficiency axis, but

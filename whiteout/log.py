@@ -314,6 +314,21 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
     clean through :func:`read_episode_log` and score as an episode with no
     ticks.
 
+    **The belief geometry has to ride the first frame that carries a field.**
+    :class:`~whiteout.types.BeliefFrame` writes the cell lattice once, on the
+    episode's first frame, because restating 11.8 kB on every tick would cost
+    4.7 MB to say the same thing 400 times (#124). That makes the log's
+    drawability a property of the *sequence* rather than of any one line, so
+    it is checked here, beside ``t``, rather than in :func:`validate_line`,
+    which sees one line at a time and cannot know it is looking at the first.
+
+    Without the check the failure is silent and total: ``tail -n +2`` over a
+    committed episode — or any slice, rotation or concatenation that drops the
+    opening record — yields a log in which every line validates, every frame
+    decodes to the right number of bytes, and nothing can be drawn, because
+    no cell has a position any more. A viewer given one renders an empty
+    canvas and a scorer never notices.
+
     The file is read and closed before the first record is yielded, so a
     caller that peeks at one tick and stops does not hold the handle open —
     on Windows that handle blocks the next run from rewriting the log.
@@ -323,6 +338,7 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
         lines = handle.readlines()
     previous: float | None = None
     yielded = 0
+    geometry_seen = False
     for number, line in enumerate(lines, start=1):
         if line.strip("\r\n") == "":
             continue
@@ -332,6 +348,16 @@ def iter_episode_log(path: Path | str) -> Iterator[EpisodeRecord]:
                 number,
                 f"t {record.t!r} is before the previous line's {previous!r}",
             )
+        if record.belief_field is not None:
+            if not geometry_seen and record.belief_field.geometry is None:
+                raise EpisodeLogError(
+                    number,
+                    "the first belief_field in the log carries no geometry, so its cells "
+                    "have no positions and the field cannot be drawn. The lattice is "
+                    "written once, on the episode's first frame, so this is what a log "
+                    "truncated at the front looks like",
+                )
+            geometry_seen = True
         previous = record.t
         yielded += 1
         yield record
