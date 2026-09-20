@@ -17,6 +17,7 @@ standing job.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -24,9 +25,23 @@ from pathlib import Path
 
 import pytest
 
-from whiteout.geo import ARENA_ORIGIN, WGS84_A, WGS84_F, LocalPoint, local_to_geodetic
+from whiteout.geo import (
+    ARENA_ORIGIN,
+    WGS84_A,
+    WGS84_F,
+    GeoPoint,
+    LocalPoint,
+    geodetic_to_local,
+    local_to_geodetic,
+)
 from whiteout.log import SCHEMA_VERSION, read_episode_log, validate_episode_log
 from whiteout.types import SYNC_STATUSES
+from whiteout.vision.camera import CAMERAS, CameraModel
+from whiteout.vision.projection import (
+    CameraPose,
+    max_flat_plane_range_m,
+    project_pixel_to_ground,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VIZ = REPO_ROOT / "viz"
@@ -417,3 +432,232 @@ def test_the_viewers_projection_is_pinned_to_whiteout_geo() -> None:
     assert 1.0 / float(flattening.group(1)) == WGS84_F
     assert float(origin.group(1)) == ARENA_ORIGIN.lat_deg
     assert float(origin.group(2)) == ARENA_ORIGIN.lon_deg
+
+
+# ── the field canvas (issue #20) ──────────────────────────────────────
+
+
+#: The footprint block, cut out of ``viewer.js`` so ``node`` can run it. It
+#: reads the ellipsoid out of the drawing frame above it, so both blocks are
+#: handed to node together.
+_FOOTPRINT_OPENS = "var EARTH_MEAN_RADIUS_M"
+_FOOTPRINT_CLOSES = "function cameraFor"
+
+
+def _run_viewer_block(blocks: str, tail: str) -> object:
+    node = shutil.which("node")
+    assert node is not None, (
+        "node is needed to pin the viewer's field canvas to whiteout.vision. "
+        "It is already a dependency of this repository (scripts/toutc.mjs) "
+        "and is present on the CI runner; this test is not skipped because "
+        "skipping it is how the viewer's formulae stopped being checked."
+    )
+    done = subprocess.run(  # noqa: S603
+        [node, "-e", blocks + tail], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, f"node refused the block: {done.stderr}"
+    return json.loads(done.stdout)
+
+
+def _footprint_source() -> str:
+    js = _read("viewer.js")
+    for marker in (_FRAME_OPENS, _FRAME_CLOSES, _FOOTPRINT_OPENS, _FOOTPRINT_CLOSES):
+        assert marker in js, f"the field canvas has moved: {marker!r} is gone"
+    frame = js[js.index(_FRAME_OPENS) : js.index(_FRAME_CLOSES)]
+    footprint = js[js.index(_FOOTPRINT_OPENS) : js.index(_FOOTPRINT_CLOSES)]
+    assert "function groundFootprint" in footprint, "the cut did not include groundFootprint"
+    return frame + footprint
+
+
+#: Poses whose whole frame lands on the water: the bottom row short of the
+#: nadir and the top row short of the horizon, so ``project_pixel_to_ground``
+#: answers for both and the comparison is against a number rather than
+#: against a clamp. The quadcopter is absent on purpose — its 99.4 degree
+#: lens has no pitch at which both rows land, which is a fact about the
+#: arena's optics and is asserted separately below.
+_PINNED_FOOTPRINTS = (
+    ("tower", 60.0, -45.0),
+    ("fixed-wing", 500.0, -50.0),
+    ("tower", 60.0, -70.0),
+)
+
+
+def _ground_range_m(camera: CameraModel, pose: CameraPose, py: float) -> float:
+    """Ground range of the frame's centre column at row ``py``, in metres."""
+    fix = project_pixel_to_ground(camera, pose, camera.width / 2.0, py)
+    here = GeoPoint(pose.lat_deg, pose.lon_deg)
+    offset = geodetic_to_local(here, GeoPoint(fix.lat_deg, fix.lon_deg))
+    return math.hypot(offset.east_m, offset.north_m)
+
+
+def test_the_viewers_footprint_is_the_frame_whiteout_vision_projects() -> None:
+    """The near and far edges are the frame's bottom and top rows, in metres.
+
+    The viewer draws a wedge rather than tracing four corner rays, so the
+    thing that can silently go wrong is the range: a footprint computed off
+    the boresight instead of the frame edges looks entirely plausible and is
+    wrong by hundreds of metres. This runs the viewer's own function under
+    node and compares it to ``whiteout.vision.projection`` at the same two
+    pixels.
+    """
+    cases = [
+        (
+            {"z": alt, "heading": 0.0, "pitch": math.radians(pitch), "cls": name},
+            {"hfov": CAMERAS[name].hfov_deg, "vfov": CAMERAS[name].vfov_deg},
+        )
+        for name, alt, pitch in _PINNED_FOOTPRINTS
+    ]
+    tail = (
+        "var cases = " + json.dumps(cases) + ";\n"
+        "process.stdout.write(JSON.stringify(cases.map(function (c) {\n"
+        "  return groundFootprint(c[0], c[1]);\n"
+        "})));\n"
+    )
+    got = _run_viewer_block(_footprint_source(), tail)
+    assert isinstance(got, list)
+
+    for (name, alt, pitch), drawn in zip(_PINNED_FOOTPRINTS, got, strict=True):
+        camera = CAMERAS[name]
+        pose = CameraPose(
+            lat_deg=ARENA_ORIGIN.lat_deg,
+            lon_deg=ARENA_ORIGIN.lon_deg,
+            alt_m=alt,
+            yaw_deg=0.0,
+            pitch_deg=pitch,
+        )
+        assert drawn is not None, f"{name} at {pitch} deg drew no footprint"
+        assert drawn["near"] == pytest.approx(
+            _ground_range_m(camera, pose, float(camera.height)), rel=1e-6
+        )
+        assert drawn["far"] == pytest.approx(_ground_range_m(camera, pose, 0.0), rel=1e-6)
+        assert drawn["halfAngle"] == pytest.approx(math.radians(camera.hfov_deg) / 2.0)
+
+
+def test_a_level_camera_stops_where_the_flat_water_plane_does() -> None:
+    """The quadcopter looks at the horizon (#109), and the wedge must not.
+
+    Its top row is above the horizontal, so there is no projection to compare
+    the far edge to — that is the point. ``project_pixel_to_ground`` refuses
+    a fix past the range where the flat plane's own error reaches a tenth of
+    it, so the wedge stops there rather than drawing ground the projection
+    would not stand behind. The near edge still projects, and is pinned.
+    """
+    camera = CAMERAS["quadcopter"]
+    pose = CameraPose(
+        lat_deg=ARENA_ORIGIN.lat_deg,
+        lon_deg=ARENA_ORIGIN.lon_deg,
+        alt_m=120.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+    )
+    tail = (
+        "process.stdout.write(JSON.stringify(groundFootprint({ z: 120, heading: 0, pitch: 0 },"
+        " { hfov: " + repr(camera.hfov_deg) + ", vfov: " + repr(camera.vfov_deg) + " })));\n"
+    )
+    drawn = _run_viewer_block(_footprint_source(), tail)
+    assert isinstance(drawn, dict)
+    assert drawn["far"] == pytest.approx(max_flat_plane_range_m(120.0), rel=1e-9)
+    assert drawn["near"] == pytest.approx(
+        _ground_range_m(camera, pose, float(camera.height)), rel=1e-6
+    )
+
+
+def test_a_camera_pitched_past_its_own_nadir_starts_underneath_itself() -> None:
+    """A 99.4 degree lens at 60 degrees down has the ground below it in frame.
+
+    The near edge is then zero rather than a range behind the asset, and
+    without that branch ``h / tan(theta)`` goes negative and the wedge is
+    drawn inside out.
+    """
+    camera = CAMERAS["quadcopter"]
+    tail = (
+        "process.stdout.write(JSON.stringify(groundFootprint("
+        "{ z: 120, heading: 0, pitch: "
+        + repr(math.radians(-60.0))
+        + " }, { hfov: "
+        + repr(camera.hfov_deg)
+        + ", vfov: "
+        + repr(camera.vfov_deg)
+        + " })));\n"
+    )
+    drawn = _run_viewer_block(_footprint_source(), tail)
+    assert isinstance(drawn, dict)
+    assert drawn["near"] == 0.0
+    assert drawn["far"] > 0.0
+
+
+def test_the_viewer_declares_the_cameras_whiteout_vision_publishes() -> None:
+    """One table of fields of view, and the page's copy is held to it."""
+    js = _read("viewer.js")
+    block = re.search(r"var CAMERAS = \{(.*?)\};", js, re.DOTALL)
+    assert block is not None, "the viewer's camera table has moved"
+    declared = {
+        name: (float(hfov), float(vfov))
+        for name, hfov, vfov in re.findall(
+            r'"([\w-]+)":\s*\{ hfov: ([\d.]+), vfov: ([\d.]+) \}', block.group(1)
+        )
+    }
+    assert declared, "no cameras were parsed out of the viewer"
+    assert set(declared) == set(CAMERAS)
+    for name, (hfov, vfov) in declared.items():
+        assert hfov == CAMERAS[name].hfov_deg
+        assert vfov == CAMERAS[name].vfov_deg
+
+
+def test_the_field_draws_the_ticketed_layers_in_the_ticketed_order() -> None:
+    """Issue #20: outline, belief over water, footprints, assets, track.
+
+    Order is the whole of it — belief drawn over the assets hides the fleet,
+    and footprints drawn under belief cannot be seen at all.
+    """
+    js = _without_comments(_read("viewer.js"))
+    body = js.split("function drawContent")[1].split("function waterCells")[0]
+    calls = [name for name in re.findall(r"draw(Belief|Outline|Footprints|Assets|Track)\(", body)]
+    assert calls == ["Belief", "Outline", "Footprints", "Assets", "Track"]
+
+
+def test_belief_is_drawn_only_over_water() -> None:
+    """Nothing may imply the vessel could be on land.
+
+    The cells the canvas fills come from the mask's set bits and from nothing
+    else, and the count is checked against the frame before a single quad is
+    drawn — a field and a layout that disagree draw nothing rather than draw
+    the wrong water.
+    """
+    js = _without_comments(_read("viewer.js"))
+    cells = js.split("function waterCells")[1].split("function outlineEdges")[0]
+    assert "if (water[cell])" in cells, "the cell list is not filtered by the water mask"
+    belief = js.split("function drawBelief")[1].split("function screenAngle")[0]
+    assert "field.cells[i]" in belief, "the quads are not indexed through the water cells"
+    assert "codes.length !== field.cells.length" in belief, "a mismatched frame is not refused"
+
+
+def test_the_belief_ramp_is_used_for_belief_and_nothing_else() -> None:
+    """DESIGN.md: no belief-ramp colours outside the belief field."""
+    js = _without_comments(_read("viewer.js"))
+    uses = [line for line in js.splitlines() if "--belief-" in line]
+    assert len(uses) == 1, f"the belief ramp is read in {len(uses)} places: {uses}"
+    assert "beliefRamp" in js.split("--belief-")[0].rsplit("function", 1)[-1]
+    css = _without_comments(_read("viewer.css"))
+    assert "--belief-" not in css, "the belief ramp reached the stylesheet"
+
+
+def test_nothing_on_the_field_glows() -> None:
+    """DESIGN.md's flat rule, and the easiest one to break by accident.
+
+    Named against the canvas properties rather than the bare words: the
+    viewer is full of ``Array.filter``, and a guard that fails on that is a
+    guard somebody deletes.
+    """
+    js = _without_comments(_read("viewer.js"))
+    for banned in (
+        "shadowBlur",
+        "shadowColor",
+        "shadowOffset",
+        "ctx.filter",
+        "globalCompositeOperation",
+    ):
+        assert banned not in js, f"the canvas uses {banned}"
+    css = _without_comments(_read("viewer.css"))
+    assert "blur(" not in css
+    assert "filter:" not in css

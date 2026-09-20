@@ -50,6 +50,23 @@
     "contacts", "truth", "refusals", "belief_field"
   ];
 
+  /* The published camera fields of view, ARENA.md section 4, and the only
+   * thing the arena tells us about the optics. Keyed by the camera names in
+   * whiteout.vision.camera.CAMERAS, which tests/test_viz_shell.py reads this
+   * table against, so the two cannot drift. `cls` is the vehicle class the
+   * episode log spells, which is not the same word. */
+  var CAMERAS = {
+    "quadcopter": { hfov: 114.6, vfov: 99.4 },
+    "fixed-wing": { hfov: 69.0, vfov: 42.6 },
+    "tower": { hfov: 60.0, vfov: 36.1 }
+  };
+
+  var CAMERA_OF_CLASS = {
+    quad: "quadcopter",
+    fixedwing: "fixed-wing",
+    tower: "tower"
+  };
+
   /* The em dash the shell shows wherever the episode log does not carry a
    * value. A zero would be a number the system never produced. */
   var UNKNOWN = "—";
@@ -64,6 +81,8 @@
     selected: null,
     extent: 1000,            /* metres of half-width the field frames */
     origin: null,            /* the drawing frame's origin, as {lat, lon} */
+    field: null,             /* the belief grid's layout, decoded once */
+    fixes: {},               /* contact id -> the t its position last moved */
     failure: null            /* { line, reason } */
   };
 
@@ -193,6 +212,8 @@
     }
     state.failure = null;
     measureExtent();
+    state.field = decodeField(state.records);
+    state.fixes = measureFixAges(state.records);
     state.index = 0;
     state.selected = null;
     state.playing = false;
@@ -709,7 +730,33 @@
     ctx.moveTo(0, Math.round(cy) + half); ctx.lineTo(box.width, Math.round(cy) + half);
     ctx.stroke();
 
+    drawContent(ctx, cx, cy, scale);
     drawScaleBar(ctx, box, step, scale);
+  }
+
+  /* The field's content, in one pass, over the chrome. Everything below is
+   * skipped when there is no record to draw — the empty, loading and error
+   * states get the frame alone, which is the instrument at rest.
+   *
+   * **Measured, not assumed** (#20). Driving `drawField` over all 400 ticks
+   * of the committed episode — 850 water cells, four assets, 876x308 CSS
+   * pixels at devicePixelRatio 1.25 — costs **2.9 ms a frame**, three runs
+   * agreeing to 0.06 ms. The episode's own tick is 500 ms, so real time has
+   * 170x the budget it needs and even the 100x speed chip has room to spare.
+   * Re-measure with `WHITEOUT_VIEWER.drawField` rather than trusting this. */
+  function drawContent(ctx, cx, cy, scale) {
+    var record = current();
+    if (!record || state.phase !== "ready") { return; }
+    function project(east, north) {
+      return [cx + east * scale, cy - north * scale];
+    }
+    if (state.field) {
+      drawBelief(ctx, project, state.field, record.belief_field);
+      drawOutline(ctx, project, state.field);
+    }
+    drawFootprints(ctx, project, record, scale);
+    drawAssets(ctx, project, record);
+    drawTrack(ctx, project, record, state.fixes[state.index]);
   }
 
   /* One grid step, drawn as a bar with end ticks and its length in metres:
@@ -732,6 +779,472 @@
     ctx.font = canvasFont("--t-12", "--font-mono");
     ctx.textBaseline = "alphabetic";
     ctx.fillText(metres(step), x0 + width + size("--s-2"), y + half);
+  }
+
+  /* ── the field's content ─────────────────────────────────────────── */
+
+  /* The layers, in the order they are drawn, and there is exactly one pass:
+   * the channel outline, the belief field over its water, the camera
+   * footprints, the four assets, the current track. Nothing here glows:
+   * there is no shadowBlur, no filter and no second pass at a larger radius
+   * anywhere below. Luminance comes from the ramp (DESIGN.md "Don'ts").
+   *
+   * Everything that does not change during an episode — the cell corners in
+   * metres, the water mask, the outline's edges — is computed once in
+   * `decodeField` and not per frame. A tick redraws 850 quadrilaterals and
+   * six sprites, and nothing else. */
+
+  function decodeBase64(text) {
+    var binary = global.atob(text);
+    var bytes = new global.Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i += 1) { bytes[i] = binary.charCodeAt(i); }
+    return bytes;
+  }
+
+  /* The episode's belief layout: the water mask, and every cell corner as an
+   * offset in metres from the drawing frame's origin.
+   *
+   * `whiteout.types.BeliefGeometry` ships this once, on the log's first
+   * frame, so this looks for the first record that carries one and stops.
+   * A log with none — a run with no belief behind it — leaves the field
+   * layers off, and the chrome is drawn alone. */
+  function decodeField(records) {
+    var carrier = null;
+    for (var i = 0; i < records.length && !carrier; i += 1) {
+      var frame = records[i].belief_field;
+      if (frame && frame.geometry) { carrier = frame.geometry; }
+    }
+    if (!carrier || !Array.isArray(carrier.shape)) { return null; }
+    var along = Number(carrier.shape[0]);
+    var across = Number(carrier.shape[1]);
+    if (!(along > 0 && across > 0)) { return null; }
+
+    var packed = decodeBase64(carrier.water);
+    var water = new global.Uint8Array(along * across);
+    for (var cell = 0; cell < water.length; cell += 1) {
+      water[cell] = (packed[cell >> 3] >> (7 - (cell & 7))) & 1;
+    }
+
+    /* Big-endian float32 lat/lon pairs over the (along + 1) x (across + 1)
+     * corner lattice. Big-endian is the log's wire order and `false` is what
+     * asks DataView for it; the platform's own order would read as garbage
+     * on half the machines in the world and as correct here. */
+    var raw = decodeBase64(carrier.corners);
+    var view = new global.DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    var corners = (along + 1) * (across + 1);
+    var east = new global.Float64Array(corners);
+    var north = new global.Float64Array(corners);
+    for (var corner = 0; corner < corners; corner += 1) {
+      var local = toLocal(
+        state.origin,
+        view.getFloat32(corner * 8, false),
+        view.getFloat32(corner * 8 + 4, false)
+      );
+      east[corner] = local.east;
+      north[corner] = local.north;
+    }
+
+    var field = {
+      along: along,
+      across: across,
+      water: water,
+      east: east,
+      north: north,
+      cells: waterCells(water, along, across),
+      outline: outlineEdges(water, along, across)
+    };
+    growExtentToField(field);
+    return field;
+  }
+
+  /* The (row, column) of each water cell, in the order the mask's set bits
+   * run — which is the order `BeliefFrame.cells` carries its bytes in, and
+   * so the only order that puts a probability on the right piece of water. */
+  function waterCells(water, along, across) {
+    var cells = [];
+    for (var cell = 0; cell < water.length; cell += 1) {
+      if (water[cell]) { cells.push([Math.floor(cell / across), cell % across]); }
+    }
+    return cells;
+  }
+
+  /* Every cell side with water on one side of it and not the other: the
+   * shoreline, as the only thing this viewer knows about it. There is no
+   * terrain here to shade — the arena renders Bellot Strait itself — so the
+   * outline is what says "the vessel is confined to this". */
+  function outlineEdges(water, along, across) {
+    var edges = [];
+    function wet(row, column) {
+      if (row < 0 || column < 0 || row >= along || column >= across) { return 0; }
+      return water[row * across + column];
+    }
+    for (var row = 0; row < along; row += 1) {
+      for (var column = 0; column < across; column += 1) {
+        if (!wet(row, column)) { continue; }
+        if (!wet(row - 1, column)) { edges.push([row, column, row, column + 1]); }
+        if (!wet(row + 1, column)) { edges.push([row + 1, column, row + 1, column + 1]); }
+        if (!wet(row, column - 1)) { edges.push([row, column, row + 1, column]); }
+        if (!wet(row, column + 1)) { edges.push([row, column + 1, row + 1, column + 1]); }
+      }
+    }
+    return edges;
+  }
+
+  /* The extent is measured from the fleet, which on this arena sits inside
+   * the channel, so the channel's own ends fall outside the view unless they
+   * are counted too. */
+  function growExtentToField(field) {
+    var span = state.extent;
+    for (var corner = 0; corner < field.east.length; corner += 1) {
+      span = Math.max(span, Math.abs(field.east[corner]) * 1.1, Math.abs(field.north[corner]) * 1.1);
+    }
+    state.extent = span;
+  }
+
+  /* ── the belief ramp ─────────────────────────────────────────────── */
+
+  var ramp = null;
+
+  /* `--belief-0` through `--belief-5` as 256 steps, built once. The stops are
+   * read from tokens.css rather than spelled here, so the ramp stays one
+   * definition; DESIGN.md forbids these colours anywhere but this layer and
+   * tests/test_viz_shell.py holds the file to it. */
+  function beliefRamp() {
+    if (ramp) { return ramp; }
+    var stops = [];
+    for (var i = 0; i <= 5; i += 1) { stops.push(parseColour(token("--belief-" + i))); }
+    ramp = [];
+    for (var code = 0; code < 256; code += 1) {
+      var position = (code / 255) * (stops.length - 1);
+      var low = Math.min(stops.length - 1, Math.floor(position));
+      var high = Math.min(stops.length - 1, low + 1);
+      ramp.push(mixColour(stops[low], stops[high], position - low));
+    }
+    return ramp;
+  }
+
+  function parseColour(value) {
+    var hex = value.replace("#", "");
+    if (hex.length === 6) { hex += "ff"; }
+    return [
+      parseInt(hex.slice(0, 2), 16),
+      parseInt(hex.slice(2, 4), 16),
+      parseInt(hex.slice(4, 6), 16),
+      parseInt(hex.slice(6, 8), 16) / 255
+    ];
+  }
+
+  function mixColour(low, high, weight) {
+    var out = [];
+    for (var channel = 0; channel < 3; channel += 1) {
+      out.push(Math.round(low[channel] + (high[channel] - low[channel]) * weight));
+    }
+    var alpha = low[3] + (high[3] - low[3]) * weight;
+    return "rgba(" + out[0] + "," + out[1] + "," + out[2] + "," + alpha.toFixed(3) + ")";
+  }
+
+  /* ── the camera footprint ────────────────────────────────────────── */
+
+  /* WGS-84 mean radius, from the ellipsoid this file already carries.
+   * whiteout.vision.projection.EARTH_MEAN_RADIUS_M, same expression. */
+  var EARTH_MEAN_RADIUS_M = (2 * WGS84_A + WGS84_A * (1 - WGS84_F)) / 3;
+
+  /* The flat water plane's error reaches a tenth of the range at
+   * sqrt(0.1) x the horizon, and past that the model means nothing. It is
+   * whiteout.vision.projection's own bound, and it is why a level camera's
+   * footprint stops somewhere rather than running to the horizon. */
+  var MAX_FLAT_PLANE_RANGE_ERROR = 0.10;
+
+  function horizonRangeM(heightM) {
+    return Math.sqrt(2 * EARTH_MEAN_RADIUS_M * heightM);
+  }
+
+  /* The ground the camera's frame covers, as an annular sector about the
+   * asset: `near` and `far` in metres along the ground, `bearing` the
+   * boresight clockwise from North, `halfAngle` the horizontal half field of
+   * view. Radians out, radians in — the log's angles are radians.
+   *
+   * The near and far edges are the bottom and top rows of the frame:
+   * depression theta +/- VFOV/2, and a range of h / tan(depression). A ray
+   * at or above the horizontal never meets the water, so the far edge is
+   * clamped to the flat-plane bound rather than run to infinity. This is the
+   * shape of whiteout.vision.projection's frame corners and not a second
+   * answer to it; tests/test_viz_shell.py runs both and compares metres.
+   *
+   * `null` when there is nothing honest to draw: no camera for the class, no
+   * height above the water, or a frame pointing entirely at the sky.
+   *
+   * `limitM` is how far the caller will stand behind a ground range, and it
+   * defaults to the flat plane's own bound. The canvas passes the arena's
+   * extent instead, because `project_pixel_to_ground`'s own docstring asks
+   * it to: the model bound is 12.4 km from the quadcopter and Bellot Strait
+   * is 6.5 km end to end, so past the arena there is no water to have seen
+   * and a wedge drawn out there is a claim about somebody else's ocean. */
+  function groundFootprint(pose, camera, limitM) {
+    var height = Number(pose.z);
+    if (!camera || !isFinite(height) || height <= 0) { return null; }
+    var bearing = Number(pose.heading);
+    if (!isFinite(bearing)) { return null; }
+    /* Pitch is optional on a Pose and nose-up positive, so the depression
+     * below the horizontal is its negation, and an absent attitude reads as
+     * level rather than as a guess at a tilt. */
+    var pitch = isFinite(Number(pose.pitch)) ? Number(pose.pitch) : 0;
+    var halfVertical = (camera.vfov * Math.PI) / 360;
+    var model = Math.sqrt(MAX_FLAT_PLANE_RANGE_ERROR) * horizonRangeM(height);
+    var limit = isFinite(Number(limitM)) ? Math.min(model, Number(limitM)) : model;
+    var lower = -pitch + halfVertical;
+    var upper = -pitch - halfVertical;
+    if (lower <= 0) { return null; }
+    /* Past the nadir the frame's bottom row looks behind the asset, which on
+     * the quadcopter's 99.4 degree lens is the normal case rather than an
+     * edge one. The near edge is then the ground under it. */
+    var near = lower >= Math.PI / 2 ? 0 : Math.min(limit, height / Math.tan(lower));
+    var far = upper <= 0 ? limit : Math.min(limit, height / Math.tan(upper));
+    if (!(far > near)) { return null; }
+    return { near: near, far: far, bearing: bearing, halfAngle: (camera.hfov * Math.PI) / 360 };
+  }
+
+  function cameraFor(pose) {
+    return CAMERAS[CAMERA_OF_CLASS[String(pose.cls)]] || null;
+  }
+
+  /* ── track age ───────────────────────────────────────────────────── */
+
+  /* When each contact's position last moved, per record. A track that has
+   * been coasting on a two-minute-old fix and one posted four seconds ago
+   * are the same record shape, and the acceptance for this canvas is that
+   * they must not look the same — so the age is measured here, from the log,
+   * rather than asked of a field the log does not carry. */
+  function measureFixAges(records) {
+    var ages = [];
+    var last = {};
+    records.forEach(function (record) {
+      var here = {};
+      (record.contacts || []).forEach(function (contact) {
+        var id = String(contact.contact_id);
+        var held = last[id];
+        if (!held || held.lat !== contact.lat || held.lon !== contact.lon) {
+          held = { lat: contact.lat, lon: contact.lon, since: record.t };
+          last[id] = held;
+        }
+        here[id] = record.t - held.since;
+      });
+      ages.push(here);
+    });
+    return ages;
+  }
+
+  /* ── the layers ──────────────────────────────────────────────────── */
+
+  function drawOutline(ctx, project, field) {
+    var across = field.across;
+    ctx.strokeStyle = token("--n-700");
+    ctx.lineWidth = size("--w-hairline");
+    ctx.beginPath();
+    field.outline.forEach(function (edge) {
+      var a = project(field.east[edge[0] * (across + 1) + edge[1]], field.north[edge[0] * (across + 1) + edge[1]]);
+      var b = project(field.east[edge[2] * (across + 1) + edge[3]], field.north[edge[2] * (across + 1) + edge[3]]);
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+    });
+    ctx.stroke();
+  }
+
+  /* One quadrilateral per water cell, filled from the ramp.
+   *
+   * **The ramp is indexed by how much likelier a cell is than chance, not by
+   * its raw probability**, and that is the whole of what makes this layer
+   * readable. A field over 850 cells that has learned nothing still sums to
+   * 1, so every cell holds about 0.0012 and the brightest cell is brightest
+   * only by rounding — a ramp over the raw values paints a uniform field at
+   * full luminance and says "the vessel is certainly everywhere".
+   *
+   * Against chance it says the true thing instead. A cell nobody has looked
+   * at sits at 1x and draws in the ramp's low blue: DESIGN.md's "flat and
+   * dim". Water a camera has swept and found empty falls below 1x and drains
+   * toward the transparent floor. Water a detection has landed in climbs. So
+   * the picture is *information*, which is what the fleet is actually
+   * accumulating, and the erosion the negative-information update produces
+   * is visible rather than a rounding difference in the top eighth of a ramp.
+   *
+   * The bounds are an eighth of chance and thirty-two times it, on a log
+   * scale, so the two directions are symmetric and neither saturates here. */
+  var BELIEF_FLOOR = 1 / 8;
+  var BELIEF_CEILING = 32;
+  var BELIEF_ALPHA = 0.85;
+
+  /* A byte of `BeliefFrame.cells` to a ramp colour, for one frame. Built per
+   * tick rather than per cell: the decode is linear in the code, so 256
+   * entries cover all 850 cells. */
+  function frameRamp(frame, waterCells) {
+    var colours = beliefRamp();
+    var uniform = 1 / waterCells;
+    var low = Math.log(BELIEF_FLOOR);
+    var span = Math.log(BELIEF_CEILING) - low;
+    var table = [];
+    for (var code = 0; code < 256; code += 1) {
+      var probability = (code / 255) * Number(frame.scale);
+      if (!(probability > 0)) { table.push(null); continue; }
+      var place = (Math.log(probability / uniform) - low) / span;
+      table.push(colours[Math.max(0, Math.min(255, Math.round(place * 255)))]);
+    }
+    return table;
+  }
+
+  function drawBelief(ctx, project, field, frame) {
+    if (!frame || !frame.cells) { return; }
+    var codes = decodeBase64(frame.cells);
+    if (codes.length !== field.cells.length) { return; }
+    var table = frameRamp(frame, field.cells.length);
+    var across = field.across;
+
+    /* Batched by colour, one path per distinct code, and this is not only a
+     * speed choice. Adjacent quads share an edge, and filling them one at a
+     * time leaves an antialiased hairline of background along every seam —
+     * 850 cells of it reads as woven fabric rather than as water. A single
+     * `fill()` over a path that already contains both neighbours covers the
+     * shared edge exactly once, so the seam is gone and no pixel is painted
+     * twice. A uniform field is then one path and one fill. */
+    var paths = {};
+    for (var i = 0; i < codes.length; i += 1) {
+      var colour = table[codes[i]];
+      if (!colour) { continue; }
+      var path = paths[colour];
+      if (!path) { path = paths[colour] = new global.Path2D(); }
+      var row = field.cells[i][0];
+      var column = field.cells[i][1];
+      var topLeft = row * (across + 1) + column;
+      var bottomLeft = (row + 1) * (across + 1) + column;
+      var a = project(field.east[topLeft], field.north[topLeft]);
+      var b = project(field.east[topLeft + 1], field.north[topLeft + 1]);
+      var c = project(field.east[bottomLeft + 1], field.north[bottomLeft + 1]);
+      var d = project(field.east[bottomLeft], field.north[bottomLeft]);
+      path.moveTo(a[0], a[1]);
+      path.lineTo(b[0], b[1]);
+      path.lineTo(c[0], c[1]);
+      path.lineTo(d[0], d[1]);
+      path.closePath();
+    }
+
+    ctx.save();
+    ctx.globalAlpha = BELIEF_ALPHA;
+    Object.keys(paths).forEach(function (colour) {
+      ctx.fillStyle = colour;
+      ctx.fill(paths[colour]);
+    });
+    ctx.restore();
+  }
+
+  /* A bearing clockwise from North, as the canvas angle for a frame whose x
+   * runs East and whose y runs *down* the screen while north runs up it. */
+  function screenAngle(bearing) {
+    return bearing - Math.PI / 2;
+  }
+
+  function drawFootprints(ctx, project, record, scale) {
+    ctx.save();
+    ctx.lineWidth = size("--w-hairline");
+    record.observation.poses.filter(isPlaced).forEach(function (pose) {
+      var footprint = groundFootprint(pose, cameraFor(pose), state.extent);
+      if (!footprint) { return; }
+      var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
+      var apex = project(local.east, local.north);
+      var from = screenAngle(footprint.bearing - footprint.halfAngle);
+      var to = screenAngle(footprint.bearing + footprint.halfAngle);
+      ctx.beginPath();
+      ctx.arc(apex[0], apex[1], footprint.near * scale, from, to, false);
+      ctx.arc(apex[0], apex[1], footprint.far * scale, to, from, true);
+      ctx.closePath();
+      /* The class colour at low alpha, so "who is looking where" is readable
+       * without the wedge competing with the belief underneath it. */
+      ctx.globalAlpha = 0.10;
+      ctx.fillStyle = classColour(pose.cls);
+      ctx.fill();
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = classColour(pose.cls);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function classColour(cls) {
+    var name = String(cls);
+    var known = { fixedwing: "--cls-wing", quad: "--cls-quad", rover: "--cls-rover", tower: "--cls-tower" };
+    return token(known[name] || "--n-400");
+  }
+
+  /* An asset is a dot with a heading tick, in its class colour. A tower's
+   * tick is its pan: the thing about a tower that moves is where it looks. */
+  function drawAssets(ctx, project, record) {
+    var radius = size("--s-1") + 1;
+    record.observation.poses.filter(isPlaced).forEach(function (pose) {
+      var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
+      var at = project(local.east, local.north);
+      var colour = classColour(pose.cls);
+      var bearing = Number(pose.heading);
+      if (isFinite(bearing)) {
+        var angle = screenAngle(bearing);
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = size("--w-hairline");
+        ctx.beginPath();
+        ctx.moveTo(at[0], at[1]);
+        ctx.lineTo(at[0] + Math.cos(angle) * radius * 3, at[1] + Math.sin(angle) * radius * 3);
+        ctx.stroke();
+      }
+      ctx.fillStyle = colour;
+      ctx.beginPath();
+      ctx.arc(at[0], at[1], radius, 0, Math.PI * 2);
+      ctx.fill();
+      if (state.selected === pose.asset_id) {
+        ctx.strokeStyle = token("--accent");
+        ctx.lineWidth = size("--w-hairline");
+        ctx.beginPath();
+        ctx.arc(at[0], at[1], radius * 2.5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    });
+  }
+
+  /* The track, drawn so that it cannot be mistaken for belief: a hard accent
+   * cross where belief is a soft blue wash, and the age of the fix in
+   * seconds beside it. A fix that has stopped moving loses its ring first
+   * and then goes dashed, so a two-minute-old hold does not read as a live
+   * one at a glance. */
+  var FIX_STALE_S = 10;
+
+  function drawTrack(ctx, project, record, ages) {
+    var arm = size("--s-2");
+    (record.contacts || []).forEach(function (contact) {
+      if (!isPlaced({ lat: contact.lat, lon: contact.lon })) { return; }
+      var local = toLocal(state.origin, Number(contact.lat), Number(contact.lon));
+      var at = project(local.east, local.north);
+      var age = ages ? ages[String(contact.contact_id)] : undefined;
+      var stale = typeof age === "number" && age >= FIX_STALE_S;
+      ctx.save();
+      ctx.strokeStyle = contact.state === "lost" ? token("--warn") : token("--accent");
+      ctx.lineWidth = size("--w-bar");
+      if (stale) { ctx.setLineDash([size("--s-1"), size("--s-1")]); }
+      ctx.beginPath();
+      ctx.moveTo(at[0] - arm, at[1]);
+      ctx.lineTo(at[0] + arm, at[1]);
+      ctx.moveTo(at[0], at[1] - arm);
+      ctx.lineTo(at[0], at[1] + arm);
+      ctx.stroke();
+      if (!stale) {
+        ctx.setLineDash([]);
+        ctx.lineWidth = size("--w-hairline");
+        ctx.beginPath();
+        ctx.arc(at[0], at[1], arm * 1.6, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+      if (typeof age === "number") {
+        ctx.fillStyle = token(stale ? "--n-400" : "--n-100");
+        ctx.font = canvasFont("--t-12", "--font-mono");
+        ctx.textBaseline = "middle";
+        ctx.fillText("fix " + age.toFixed(0) + " s", at[0] + arm * 2, at[1]);
+      }
+    });
   }
 
   /* ── wiring ──────────────────────────────────────────────────────── */
@@ -836,8 +1349,16 @@
   global.WHITEOUT_VIEWER = {
     SCHEMA_VERSION: SCHEMA_VERSION,
     BUNDLED_EPISODE: BUNDLED_EPISODE,
+    CAMERAS: CAMERAS,
     parseEpisodeLog: parseEpisodeLog,
     toLocal: toLocal,
+    groundFootprint: groundFootprint,
+    decodeField: decodeField,
+    measureFixAges: measureFixAges,
+    /* Exported so the canvas can be driven and timed from outside the replay
+     * clock. #20 asks for the frame rate measured rather than assumed, and a
+     * canvas nobody can ask to redraw cannot be measured. */
+    drawField: drawField,
     state: state,
     reducedMotion: reducedMotion
   };
