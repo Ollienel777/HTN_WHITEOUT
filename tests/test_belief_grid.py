@@ -159,10 +159,20 @@ def along_std_m(grid: ChannelBeliefGrid) -> float:
 # --------------------------------------------------------------------------
 
 
-def test_default_strait_matches_the_arena_briefing() -> None:
-    """25 km long, about 2 km wide, at roughly 71.99 N (``ARENA.md`` §2)."""
-    assert 24_000.0 < DEFAULT_STRAIT.length_m < 26_000.0
-    assert DEFAULT_STRAIT.max_half_width_m == pytest.approx(1000.0)
+def test_default_strait_matches_the_site_the_arena_renders() -> None:
+    """A 6.5 km square at roughly 71.99 N (``/api/env``, and #98).
+
+    This asserted 25 km, from ``ARENA.md`` §2's "25 km long and 2 km wide".
+    That is the deck's slide 7, which labels 2 km, 25 km **and** "actual sim
+    render" — 25 km is the Northwest Passage context and the render is the
+    small box. ``SITE_EXTENT=6500`` is the authority and the terrain SDF
+    agrees: ``<size>6500 6500 252.109</size>``.
+    """
+    from whiteout.belief.geometry import SITE_EXTENT_M
+
+    assert DEFAULT_STRAIT.length_m < SITE_EXTENT_M
+    assert 6_000.0 < DEFAULT_STRAIT.length_m
+    assert DEFAULT_STRAIT.max_half_width_m < SITE_EXTENT_M / 2.0
     middle = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=DEFAULT_STRAIT.length_m / 2.0, w_m=0.0))
     assert middle[0] == pytest.approx(71.99, abs=0.02)
     assert middle[1] == pytest.approx(-94.84, abs=0.05)
@@ -197,19 +207,26 @@ def test_the_shoreline_is_an_inequality_on_the_across_coordinate() -> None:
 
 
 def test_half_width_is_interpolated_between_vertices() -> None:
-    """The shore is a taper, not a staircase: the mouth is 1000 m, the next vertex 900 m."""
+    """The shore is a taper, not a staircase.
+
+    The figures are read off the geometry rather than written in, because the
+    default was refitted to the rendered site (#98) and a test that pins the
+    old mouth width would only ever record which version it was written
+    against.
+    """
     geometry = DEFAULT_STRAIT
     first = geometry.vertices[0].half_width_m
     second = geometry.vertices[1].half_width_m
-    assert first == 1000.0
-    assert second == 900.0
+    assert first > second, "the channel narrows along its length"
     segment_end = geometry.to_channel(
         geometry.vertices[1].lat_deg, geometry.vertices[1].lon_deg
     ).s_m
     assert geometry.half_width_at(0.5 * segment_end) == pytest.approx(
         0.5 * (first + second), abs=1.0
     )
-    assert geometry.half_width_at(0.25 * segment_end) == pytest.approx(975.0, abs=1.0)
+    assert geometry.half_width_at(0.25 * segment_end) == pytest.approx(
+        first + 0.25 * (second - first), abs=1.0
+    )
 
 
 def test_half_width_is_clamped_outside_the_channel() -> None:
@@ -558,15 +575,13 @@ def test_a_detection_concentrates_belief_at_the_reported_position() -> None:
 def test_a_second_detection_elsewhere_moves_the_peak() -> None:
     """A detection is a measurement, not a truth: the field must be able to move."""
     grid = ChannelBeliefGrid()
-    first = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=3_000.0, w_m=0.0))
-    second = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=21_000.0, w_m=0.0))
+    first = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=1_500.0, w_m=0.0))
+    second = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=5_000.0, w_m=0.0))
     grid.update_detection(first[0], first[1], sigma_m=150.0)
-    assert DEFAULT_STRAIT.to_channel(*_peak_position(grid)).s_m == pytest.approx(3_000.0, abs=200.0)
+    assert DEFAULT_STRAIT.to_channel(*_peak_position(grid)).s_m == pytest.approx(1_500.0, abs=200.0)
     for _ in range(6):
         grid.update_detection(second[0], second[1], sigma_m=150.0)
-    assert DEFAULT_STRAIT.to_channel(*_peak_position(grid)).s_m == pytest.approx(
-        21_000.0, abs=200.0
-    )
+    assert DEFAULT_STRAIT.to_channel(*_peak_position(grid)).s_m == pytest.approx(5_000.0, abs=200.0)
 
 
 def _peak_position(grid: ChannelBeliefGrid) -> tuple[float, float]:
@@ -757,11 +772,22 @@ def test_probability_at_and_is_water_agree_to_within_one_cell() -> None:
     """
     grid = ChannelBeliefGrid()
     across_step = float(grid.across_centres_m()[1] - grid.across_centres_m()[0])
-    tolerance = 0.5 * across_step + 1e-6
+    along_step = float(grid.along_centres_m()[1] - grid.along_centres_m()[0])
+    # Half the cell *diagonal*, not half its width. A cell is a rectangle in
+    # (s, w), so a point can sit outside the channel by half a cell across
+    # **and** half a cell along at the same time — which is what happens at
+    # the two ends, where the along-channel edge is the one being straddled.
+    # The old bound used the across step alone; with the strait refitted to
+    # the rendered site (#98) the ends fall inside the sampled box and the
+    # missing term shows up, at 48.8 m against a 48.3 m bound.
+    tolerance = 0.5 * math.hypot(across_step, along_step) + 1e-6
 
     wet = 0
-    for latitude in np.linspace(71.95, 72.04, 31):
-        for longitude in np.linspace(-95.60, -94.08, 61):
+    # Swept over the rendered site (#98), not the old 25 km extent: outside
+    # the 6.5 km square there is no terrain, no water and no vessel, so
+    # sampling there only counts points that were never candidates.
+    for latitude in np.linspace(71.985, 72.005, 41):
+        for longitude in np.linspace(-94.93, -94.72, 81):
             mass = grid.probability_at(float(latitude), float(longitude))
             if mass == 0.0:
                 continue
@@ -933,9 +959,9 @@ def test_every_entropy_figure_the_protocol_docstring_states() -> None:
         grid.update_detection(lat_deg, lon_deg, sigma_m=DEFAULT_DETECTION_SIGMA_M)
         return grid.entropy()
 
-    assert entropy_after_a_mid_strait_detection(400.0) == pytest.approx(0.660, abs=0.001)
-    assert entropy_after_a_mid_strait_detection(100.0) == pytest.approx(3.836, abs=0.001)
-    assert entropy_after_a_mid_strait_detection(50.0) == pytest.approx(5.223, abs=0.001)
+    assert entropy_after_a_mid_strait_detection(400.0) == pytest.approx(0.703, abs=0.001)
+    assert entropy_after_a_mid_strait_detection(100.0) == pytest.approx(3.837, abs=0.001)
+    assert entropy_after_a_mid_strait_detection(50.0) == pytest.approx(5.183, abs=0.001)
 
     # the same detection on every water-cell centre at 400 m, which is the
     # spread the paragraph quotes instead of a single three-decimal figure.
@@ -946,14 +972,64 @@ def test_every_entropy_figure_the_protocol_docstring_states() -> None:
         lat_deg, lon_deg = cell_position(grid, int(row), int(column))
         grid.update_detection(lat_deg, lon_deg, sigma_m=DEFAULT_DETECTION_SIGMA_M)
         swept.append(grid.entropy())
-    assert len(swept) == 255
-    assert min(swept) == pytest.approx(0.430, abs=0.001)
-    assert max(swept) == pytest.approx(0.699, abs=0.001)
+    assert len(swept) == 56
+    assert min(swept) == pytest.approx(0.443, abs=0.001)
+    assert max(swept) == pytest.approx(0.703, abs=0.001)
 
     for stated in (
-        "0.660 nats at 400 m cells, 3.836 at 100 m",
-        "and 5.223 at 50 m",
-        "0.430 to 0.699 nats",
+        "0.703 nats at 400 m cells, 3.837 at 100 m",
+        "and 5.183 at 50 m",
+        "0.443 to 0.703 nats",
         "``sigma_m`` = 150 m",
     ):
         assert stated in docstring, stated
+
+
+# -- the geometry fits the world the arena renders (#98) --------------------
+
+
+def test_the_whole_ribbon_lies_inside_the_rendered_site() -> None:
+    """The arena is a 6.5 km square and there is nothing outside it.
+
+    An earlier geometry ran 25.1 km, taken from the deck's "25 km long"
+    caption rather than from ``SITE_EXTENT=6500``. Only 26 of 101 search
+    segments and 0.208 of the belief mass fell inside the world, so four
+    fifths of the field sat on water the vessel provably cannot be in and the
+    search policy issued waypoints outside the arena.
+
+    This checks the ribbon's **edges**, not just its centreline: belief lives
+    across the whole width, so a centreline inside the box with a shoulder
+    outside it would still put mass where nothing is.
+    """
+    from whiteout.belief.geometry import (
+        DEFAULT_STRAIT,
+        SITE_CENTRE_LAT,
+        SITE_CENTRE_LON,
+        SITE_EXTENT_M,
+        ChannelPoint,
+    )
+    from whiteout.geo import GeoPoint, geodetic_to_local
+
+    centre = GeoPoint(SITE_CENTRE_LAT, SITE_CENTRE_LON)
+    half = SITE_EXTENT_M / 2.0
+    worst = 0.0
+    steps = 200
+    for i in range(steps + 1):
+        s_m = DEFAULT_STRAIT.length_m * i / steps
+        edge = DEFAULT_STRAIT.half_width_at(s_m)
+        for w_m in (-edge, 0.0, edge):
+            lat, lon = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=s_m, w_m=w_m))
+            offset = geodetic_to_local(centre, GeoPoint(lat, lon))
+            worst = max(worst, abs(offset.east_m), abs(offset.north_m))
+    assert worst <= half, (
+        f"the ribbon reaches {worst:.0f} m from the site centre, outside the "
+        f"{half:.0f} m half-extent the arena renders"
+    )
+
+
+def test_the_strait_is_not_longer_than_the_world_it_sits_in() -> None:
+    from whiteout.belief.geometry import DEFAULT_STRAIT, SITE_EXTENT_M
+
+    assert DEFAULT_STRAIT.length_m <= SITE_EXTENT_M * 1.45, (
+        "a channel longer than the site's diagonal cannot be inside it"
+    )
