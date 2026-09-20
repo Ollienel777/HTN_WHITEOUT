@@ -32,6 +32,7 @@ from whiteout.log import SCHEMA_VERSION, EpisodeLogError, read_episode_log, writ
 from whiteout.policy import DEFAULT_SEARCH_PARAMS, AssetRole
 from whiteout.score import AXES, ScoreError, score_episode, unscorable_criteria
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
+from whiteout.shadow import ShadowSightings, ShadowVessel
 from whiteout.tracks.client import TrackPoster, TracksClient, TracksError, endpoint_from_env
 from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
@@ -386,6 +387,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # decorator over the source, so the loop below cannot tell it
                 # is there.
                 sightings = MotionGate(camera)
+            elif name == "kinematic" and not args.no_vessel:
+                # The fake fleet gets something to find. Without it the run is
+                # a pure search that never succeeds, and `score` answers "not
+                # detected" on two of its five axes — which is honest, and is
+                # also only half of "found and held".
+                #
+                # Seeded from the episode seed rather than from a clock, so the
+                # determinism step still compares two byte-identical logs.
+                sightings = ShadowSightings(
+                    ShadowVessel(seed=seed),
+                    ground_alt_m=GROUND_ALT_M,
+                    seed=seed,
+                )
             coordinator = _coordinator_for(transport, poster=poster, sightings=sightings)
             for _tick in range(args.ticks):
                 observation = transport.observe()
@@ -587,6 +601,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument("--seed", type=int, default=None)
+    run.add_argument(
+        "--no-vessel",
+        action="store_true",
+        help="kinematic only: run a pure search with nothing to find, which is "
+        "what every run did before the shadow vessel existed",
+    )
     run.add_argument("--ticks", type=int, default=400)
     run.add_argument("--out", default="artifacts/episode.jsonl")
     run.add_argument(
