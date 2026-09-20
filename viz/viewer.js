@@ -63,6 +63,11 @@
     source: "",
     selected: null,
     extent: 1000,            /* metres of half-width the field frames */
+    spanEast: 1000,          /* half-width east, metres, with padding */
+    spanNorth: 1000,         /* half-width north, metres, with padding */
+    sweep: null,             /* the accumulated-footprint layer, offscreen */
+    sweptTo: -1,             /* the last tick drawn into it */
+    sweptSource: "",         /* the episode it was accumulated from */
     origin: null,            /* the drawing frame's origin, as {lat, lon} */
     failure: null            /* { line, reason } */
   };
@@ -314,8 +319,44 @@
     renderDials();
     renderTransport();
     renderRail();
+    renderBadge();
     renderError();
     drawField();
+  }
+
+  /* What the track is doing, in the field's top-left, at `--t-48`.
+   *
+   * DESIGN.md beat 3: "big enough to read from the back of the room, and it
+   * is the only time type that size appears on the map". It is DOM rather
+   * than canvas so that it is selectable, announced, and styled by the same
+   * tokens as everything else.
+   *
+   * **Lost is not drawn in `--danger`,** though it is the worst state here.
+   * DESIGN.md allows exactly one red on the field and it belongs to ground
+   * truth; a second red would make the truth marker ambiguous at the moment
+   * the operator most needs to find it. A lost track recedes to `--n-400`
+   * instead, which is what losing something looks like. */
+  var BADGE = {
+    confirming: { label: "CONFIRMING", colour: "--warn" },
+    tracked: { label: "TRACKED", colour: "--ok" },
+    handed_off: { label: "HANDED OFF", colour: "--accent" },
+    lost: { label: "LOST", colour: "--n-400" }
+  };
+
+  function renderBadge() {
+    var badge = el.fieldBadge;
+    if (!badge) { return; }
+    var record = current();
+    var contact = record && record.contacts && record.contacts[0];
+    var shape = contact ? BADGE[contact.state] : null;
+    if (state.phase !== "ready" || !shape) {
+      badge.hidden = true;
+      badge.textContent = "";
+      return;
+    }
+    badge.hidden = false;
+    badge.style.color = token(shape.colour);
+    badge.textContent = shape.label + "  " + clockLabel(Number(record.t));
   }
 
   function renderMeta() {
@@ -562,38 +603,70 @@
     return isFinite(Number(pose.lat)) && isFinite(Number(pose.lon));
   }
 
-  /* The origin is the fleet's centroid in the first record, so the axes cross
-   * where the episode starts rather than at an arbitrary meridian. Measured
-   * once per load, with the extent. */
-  function measureOrigin() {
-    var first = state.records[0];
-    var poses = (first ? first.observation.poses : []).filter(isPlaced);
-    if (!poses.length) { return ARENA_ORIGIN; }
-    var lat = 0;
-    var lon = 0;
-    poses.forEach(function (pose) {
-      lat += Number(pose.lat);
-      lon += Number(pose.lon);
+  /* Every lat/lon the field will draw, across the whole episode: the fleet,
+   * the vessel's true track and the contacts reported on it.
+   *
+   * The frame is measured over all three and not over the fleet alone. A view
+   * framed on the assets puts the vessel off the edge exactly when the
+   * episode gets interesting, and the first version of this did: it centred
+   * on the fleet's positions in record zero, which is where they launch and
+   * not where the search goes. */
+  function drawnPoints(record) {
+    var out = [];
+    (record.observation.poses || []).forEach(function (pose) {
+      if (isPlaced(pose)) { out.push({ lat: Number(pose.lat), lon: Number(pose.lon) }); }
     });
-    return { lat: lat / poses.length, lon: lon / poses.length };
+    ((record.truth && record.truth.targets) || []).forEach(function (target) {
+      if (isPlaced(target)) { out.push({ lat: Number(target.lat), lon: Number(target.lon) }); }
+    });
+    (record.contacts || []).forEach(function (contact) {
+      if (isPlaced(contact)) { out.push({ lat: Number(contact.lat), lon: Number(contact.lon) }); }
+    });
+    return out;
+  }
+
+  /* The origin is the centre of everything the episode draws, so the content
+   * sits in the middle of the field rather than in a corner of it. */
+  function measureOrigin() {
+    var lo = null;
+    var hi = null;
+    state.records.forEach(function (record) {
+      drawnPoints(record).forEach(function (point) {
+        if (!lo) { lo = { lat: point.lat, lon: point.lon }; hi = { lat: point.lat, lon: point.lon }; }
+        lo.lat = Math.min(lo.lat, point.lat); lo.lon = Math.min(lo.lon, point.lon);
+        hi.lat = Math.max(hi.lat, point.lat); hi.lon = Math.max(hi.lon, point.lon);
+      });
+    });
+    if (!lo) { return ARENA_ORIGIN; }
+    return { lat: (lo.lat + hi.lat) / 2, lon: (lo.lon + hi.lon) / 2 };
   }
 
   /* ── the field's chrome ──────────────────────────────────────────── */
 
   var DEFAULT_EXTENT = 1000;   /* metres of half-width before a log says otherwise */
 
+  /* Room left around the content, so a sprite at the extreme is not clipped
+   * by the canvas edge and the scale bar has somewhere to sit. */
+  var FRAME_PAD = 1.12;
+
   /* The extent is a property of the episode, so it is measured once per load
-   * rather than per frame. */
+   * rather than per frame. Half-spans east and north are kept apart: the
+   * channel is long and narrow, and a single square extent sized to its
+   * length would leave the picture four fifths empty. */
   function measureExtent() {
-    var span = DEFAULT_EXTENT;
+    var east = 0;
+    var north = 0;
     state.origin = measureOrigin();
     state.records.forEach(function (record) {
-      record.observation.poses.filter(isPlaced).forEach(function (pose) {
-        var local = toLocal(state.origin, Number(pose.lat), Number(pose.lon));
-        span = Math.max(span, Math.abs(local.east) * 1.2, Math.abs(local.north) * 1.2);
+      drawnPoints(record).forEach(function (point) {
+        var local = toLocal(state.origin, point.lat, point.lon);
+        east = Math.max(east, Math.abs(local.east));
+        north = Math.max(north, Math.abs(local.north));
       });
     });
-    state.extent = span;
+    state.extent = Math.max(DEFAULT_EXTENT, east, north);
+    state.spanEast = Math.max(DEFAULT_EXTENT, east) * FRAME_PAD;
+    state.spanNorth = Math.max(DEFAULT_EXTENT, north) * FRAME_PAD;
   }
 
   /* A round grid step that puts between four and ten lines across the view. */
@@ -627,11 +700,16 @@
     ctx.fillStyle = token("--n-950");
     ctx.fillRect(0, 0, box.width, box.height);
 
-    var span = state.extent;
-    var scale = Math.min(box.width, box.height) / (span * 2);
+    /* One scale for both axes -- the field is a map and a map does not
+     * stretch -- chosen so that the wider-relative-to-its-axis of the two
+     * spans is the one that just fits. */
+    var scale = Math.min(
+      box.width / (state.spanEast * 2),
+      box.height / (state.spanNorth * 2)
+    );
     var cx = box.width / 2;
     var cy = box.height / 2;
-    var step = gridStep(span);
+    var step = gridStep(Math.min(box.width, box.height) / 2 / scale);
 
     /* The grid covers what the canvas can show, not the extent square, or the
      * field is left with an unruled band down each side. */
@@ -656,7 +734,327 @@
     ctx.moveTo(0, Math.round(cy) + half); ctx.lineTo(box.width, Math.round(cy) + half);
     ctx.stroke();
 
+    var project = function (latDeg, lonDeg) {
+      var local = toLocal(state.origin, latDeg, lonDeg);
+      return { x: cx + local.east * scale, y: cy - local.north * scale };
+    };
+
+    drawSwept(ctx, box, project, scale, ratio);
+    drawContent(ctx, project, scale, current());
     drawScaleBar(ctx, box, step, scale);
+  }
+
+  /* ── the field's content ────────────────────────────────────────────
+   *
+   * Drawn back to front, and every layer is a thing the log carries. There
+   * is no layer here the episode did not produce.
+   *
+   *   swept       every footprint reported so far, accumulated
+   *   footprints  the ones swept this tick
+   *   belief      the digest's peak
+   *   intents     where each asset was told to go
+   *   assets      the fleet, by class
+   *   contact     the coordinator's hypothesis
+   *   truth       where the vessel actually was
+   *
+   * **The belief field itself is not here, and cannot be.** The log carries a
+   * BeliefDigest -- entropy, mass, a peak and a grid shape -- not the grid's
+   * cells, so DESIGN.md's "field that erodes" has nothing per-cell to erode.
+   * What is drawn instead is the *evidence*: the footprints that were swept
+   * and reported nothing, accumulating across the episode. That is the same
+   * story from the other side, and it is honest about what the log holds.
+   * Putting the cells in the log is a schema change and its own ticket. */
+
+  /* A footprint, as a path in canvas space. `circle` is a disc about the
+   * sensor; `cone` is the sector its camera covers, which is the shape the
+   * negative-information update actually erodes. */
+  function footprintPath(ctx, project, scale, footprint) {
+    var centre = project(Number(footprint.lat), Number(footprint.lon));
+    var radius = Number(footprint.radius) * scale;
+    if (!isFinite(radius) || radius <= 0) { return false; }
+    ctx.beginPath();
+    if (footprint.kind === "cone" && Number(footprint.half_angle) > 0) {
+      /* Heading is a bearing in radians, clockwise from north; canvas angles
+       * run clockwise from east. */
+      var mid = Number(footprint.heading) - Math.PI / 2;
+      var half = Number(footprint.half_angle);
+      ctx.moveTo(centre.x, centre.y);
+      ctx.arc(centre.x, centre.y, radius, mid - half, mid + half);
+      ctx.closePath();
+      return true;
+    }
+    ctx.arc(centre.x, centre.y, radius, 0, Math.PI * 2);
+    return true;
+  }
+
+  /* The field that erodes.
+   *
+   * DESIGN.md's signature element: "luminance draining out of the map in the
+   * shape of what was looked at". The layer starts as a flat wash over the
+   * frame -- the uniform prior the belief field actually begins from, before
+   * any evidence -- and every footprint that swept and reported nothing is
+   * punched out of it with `destination-out`. What is left glowing is water
+   * the fleet has not ruled out yet, which is the only thing on this map that
+   * says where the vessel might still be.
+   *
+   * It was drawn the other way round first: sweeps *added* luminance, so the
+   * map got brighter where the fleet had already looked. That is backwards --
+   * it paints certainty where the episode means elimination -- and it flooded
+   * the field inside a minute, because one tower's disc covers most of the
+   * channel.
+   *
+   * Accumulated rather than recomputed: at 240 ticks and four sensors this is
+   * a thousand sectors, and redrawing them all on every animation frame is
+   * most of a frame's budget for a picture that only ever gains one tick's
+   * worth. The layer is rebuilt from zero only when the view changes under it
+   * -- a resize, a new episode, or a scrub backwards. */
+  function drawSwept(ctx, box, project, scale, ratio) {
+    /* The chrome draws in every phase, including `empty`, where there is no
+     * episode to have swept anything. The loop below is bounded by the record
+     * count and not by `state.index` for the same reason: a seek clamped
+     * against a shorter log would otherwise index past the end. */
+    var last = Math.min(state.index, state.records.length - 1);
+    if (last < 0) { state.sweep = null; state.sweptTo = -1; return; }
+    var sweep = state.sweep;
+    var stale = !sweep
+      || sweep.width !== Math.round(box.width * ratio)
+      || sweep.height !== Math.round(box.height * ratio)
+      || state.sweptTo > last
+      || state.sweptSource !== state.source;
+    if (stale) {
+      sweep = doc.createElement("canvas");
+      sweep.width = Math.round(box.width * ratio);
+      sweep.height = Math.round(box.height * ratio);
+      state.sweep = sweep;
+      state.sweptTo = -1;
+      state.sweptSource = state.source;
+      var start = sweep.getContext("2d");
+      start.setTransform(ratio, 0, 0, ratio, 0, 0);
+      start.fillStyle = token("--belief-2");
+      start.fillRect(0, 0, box.width, box.height);
+    }
+    var pen = sweep.getContext("2d");
+    pen.setTransform(ratio, 0, 0, ratio, 0, 0);
+    /* Each sweep takes a fraction of what is left, so water looked at once
+     * dims and water swept repeatedly goes dark -- which is what a product of
+     * likelihoods does, and what `whiteout/episode.py:sweep_likelihood` is
+     * doing to the real field at the same moment. It never reaches zero here
+     * for the same reason it never does there: a sensor that sweeps and
+     * misses has not proved the water empty. */
+    pen.globalCompositeOperation = "destination-out";
+    pen.globalAlpha = 0.06;
+    pen.fillStyle = token("--n-000");
+    for (var i = state.sweptTo + 1; i <= last; i += 1) {
+      var reports = state.records[i].observation.reports || [];
+      for (var r = 0; r < reports.length; r += 1) {
+        var report = reports[r];
+        if (!report.negative) { continue; }
+        if (footprintPath(pen, project, scale, report.footprint)) { pen.fill(); }
+      }
+    }
+    pen.globalAlpha = 1;
+    pen.globalCompositeOperation = "source-over";
+    state.sweptTo = last;
+    ctx.globalAlpha = 0.5;
+    ctx.drawImage(sweep, 0, 0, box.width, box.height);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawContent(ctx, project, scale, record) {
+    if (!record) { return; }
+    drawFootprints(ctx, project, scale, record);
+    drawBeliefPeak(ctx, project, scale, record);
+    drawIntents(ctx, project, record);
+    drawAssets(ctx, project, record);
+    drawContacts(ctx, project, record);
+    drawTruth(ctx, project, record);
+  }
+
+  /* This tick's footprints: an outline, and a fill only where the sweep
+   * reported nothing. DESIGN.md gives the swept cone `--m-base` at 30% and
+   * then has it leave the erosion behind; a scrubbable log has no "then", so
+   * the cone is drawn at that weight for the tick it belongs to and the
+   * accumulated layer underneath is what it leaves. */
+  function drawFootprints(ctx, project, scale, record) {
+    var reports = record.observation.reports || [];
+    ctx.lineWidth = size("--w-hairline");
+    for (var i = 0; i < reports.length; i += 1) {
+      var report = reports[i];
+      if (!footprintPath(ctx, project, scale, report.footprint)) { continue; }
+      if (report.negative) {
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = token("--belief-1");
+        ctx.fill();
+      }
+      ctx.globalAlpha = report.negative ? 0.35 : 0.7;
+      ctx.strokeStyle = token(report.negative ? "--n-700" : "--accent");
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* The digest's peak: a ring whose radius carries how much of the belief is
+   * there. Not a heat blob -- a blob would imply a distribution the log does
+   * not carry, and reading a shape off it would be reading something the
+   * system never said. */
+  function drawBeliefPeak(ctx, project, scale, record) {
+    var digest = record.belief_digest || {};
+    var lat = Number(digest.peak_lat);
+    var lon = Number(digest.peak_lon);
+    var mass = Number(digest.peak_p);
+    if (!isFinite(lat) || !isFinite(lon) || !isFinite(mass) || mass <= 0) { return; }
+    var at = project(lat, lon);
+    /* A confident peak is tight; a diffuse one is wide. The exponent is a
+     * drawing choice and nothing downstream reads it. */
+    var radius = size("--sz-dial") * (1.6 - Math.min(1, mass));
+    ctx.globalAlpha = 0.25 + 0.5 * Math.min(1, mass);
+    ctx.strokeStyle = token("--belief-4");
+    ctx.lineWidth = size("--w-bar");
+    ctx.beginPath();
+    ctx.arc(at.x, at.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  var CLASS_COLOUR = {
+    fixedwing: "--cls-wing",
+    quad: "--cls-quad",
+    rover: "--cls-rover",
+    tower: "--cls-tower"
+  };
+
+  function classToken(cls) {
+    return CLASS_COLOUR[cls] || "--n-400";
+  }
+
+  /* A line from each asset to where it was told to go. Dashed, and behind the
+   * sprites, because it is an instruction and not a track. */
+  function drawIntents(ctx, project, record) {
+    var intents = (record.intent && record.intent.intents) || [];
+    var poses = {};
+    (record.observation.poses || []).forEach(function (pose) {
+      if (isPlaced(pose)) { poses[pose.asset_id] = pose; }
+    });
+    ctx.lineWidth = size("--w-hairline");
+    ctx.setLineDash([size("--s-1"), size("--s-1")]);
+    ctx.globalAlpha = 0.45;
+    for (var i = 0; i < intents.length; i += 1) {
+      var intent = intents[i];
+      var pose = poses[intent.asset_id];
+      if (!pose) { continue; }
+      var from = project(Number(pose.lat), Number(pose.lon));
+      var to = project(Number(intent.target_lat), Number(intent.target_lon));
+      ctx.strokeStyle = token(classToken(pose.cls));
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+
+  /* The fleet. A filled dot in the class colour, and a stalk along the
+   * heading so that which way a camera is pointing is readable without
+   * selecting anything. A tower gets no stalk drawn from its speed -- it does
+   * not travel -- but it does get one for where it is looking. */
+  function drawAssets(ctx, project, record) {
+    var poses = record.observation.poses || [];
+    var radius = size("--sz-dot") / 2;
+    for (var i = 0; i < poses.length; i += 1) {
+      var pose = poses[i];
+      if (!isPlaced(pose)) { continue; }
+      var at = project(Number(pose.lat), Number(pose.lon));
+      var colour = token(classToken(pose.cls));
+      var heading = Number(pose.heading);
+      if (isFinite(heading)) {
+        var reach = size("--s-3");
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = size("--w-hairline");
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(at.x, at.y);
+        ctx.lineTo(at.x + Math.sin(heading) * reach, at.y - Math.cos(heading) * reach);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.fillStyle = colour;
+      ctx.beginPath();
+      ctx.arc(at.x, at.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      if (state.selected === pose.asset_id) {
+        ctx.strokeStyle = token("--accent");
+        ctx.lineWidth = size("--w-hairline");
+        ctx.beginPath();
+        ctx.arc(at.x, at.y, radius + size("--s-1"), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  var CONTACT_COLOUR = {
+    unconfirmed: "--n-400",
+    confirming: "--warn",
+    tracked: "--ok",
+    handed_off: "--accent",
+    lost: "--n-600"
+  };
+
+  /* The coordinator's hypothesis, and a thread back to whichever asset is
+   * holding it -- which is what makes a handoff visible as it happens rather
+   * than only as a word in the rail. */
+  function drawContacts(ctx, project, record) {
+    var contacts = record.contacts || [];
+    var poses = {};
+    (record.observation.poses || []).forEach(function (pose) {
+      if (isPlaced(pose)) { poses[pose.asset_id] = pose; }
+    });
+    for (var i = 0; i < contacts.length; i += 1) {
+      var contact = contacts[i];
+      var lat = Number(contact.lat);
+      var lon = Number(contact.lon);
+      if (!isFinite(lat) || !isFinite(lon)) { continue; }
+      var at = project(lat, lon);
+      var colour = token(CONTACT_COLOUR[contact.state] || "--n-400");
+      var holder = poses[contact.assigned_asset_id];
+      if (holder) {
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = size("--w-hairline");
+        ctx.globalAlpha = 0.5;
+        var from = project(Number(holder.lat), Number(holder.lon));
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(at.x, at.y);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = size("--w-bar");
+      ctx.beginPath();
+      ctx.arc(at.x, at.y, size("--s-3"), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /* Ground truth. DESIGN.md: the only red drawn on the field, and a cross
+   * rather than a disc so that it reads as a reference mark and never as
+   * another contact. An arena episode carries no truth and nothing is drawn. */
+  function drawTruth(ctx, project, record) {
+    var targets = (record.truth && record.truth.targets) || [];
+    var arm = size("--s-2");
+    ctx.strokeStyle = token("--truth");
+    ctx.lineWidth = size("--w-hairline");
+    for (var i = 0; i < targets.length; i += 1) {
+      var target = targets[i];
+      var lat = Number(target.lat);
+      var lon = Number(target.lon);
+      if (!isFinite(lat) || !isFinite(lon)) { continue; }
+      var at = project(lat, lon);
+      ctx.beginPath();
+      ctx.moveTo(at.x - arm, at.y); ctx.lineTo(at.x + arm, at.y);
+      ctx.moveTo(at.x, at.y - arm); ctx.lineTo(at.x, at.y + arm);
+      ctx.stroke();
+    }
   }
 
   /* One grid step, drawn as a bar with end ticks and its length in metres:
@@ -697,6 +1095,7 @@
   function wire() {
     el.dialRow = doc.getElementById("dial-row");
     el.canvas = doc.getElementById("field-canvas");
+    el.fieldBadge = doc.getElementById("field-badge");
     el.fileInput = doc.getElementById("file-input");
     el.play = doc.getElementById("play");
     el.stepBack = doc.getElementById("step-back");

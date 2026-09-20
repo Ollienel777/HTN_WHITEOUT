@@ -265,8 +265,15 @@ def test_the_viewers_local_frame_is_named_as_a_drawing_frame() -> None:
 #: The viewer's drawing frame, cut out of ``viewer.js`` so ``node`` can run
 #: it without the page around it. Both markers are asserted before the cut,
 #: so moving the block fails the test rather than silently narrowing it.
+#: The projection block's bounds, cut out of ``viewer.js`` and run under node.
+#: The close marker is the comment that immediately follows ``toLocal``, so the
+#: slice is the ellipsoid constants, ``radii`` and ``toLocal`` and nothing else.
+#: It used to be the comment above ``measureOrigin``, which meant the slice
+#: also carried whatever framing code happened to sit between them -- and it
+#: broke the moment that comment was reworded, for a change that touched no
+#: arithmetic at all.
 _FRAME_OPENS = "var WGS84_A"
-_FRAME_CLOSES = "/* The origin is the fleet's centroid"
+_FRAME_CLOSES = "/* validateLine checks"
 
 #: Offsets in metres about ``ARENA_ORIGIN``, taken to the corners of the
 #: 25 km x 2 km strait and to a couple of points inside it. The axes differ
