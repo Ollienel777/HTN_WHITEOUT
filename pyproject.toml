@@ -45,6 +45,14 @@ whiteout = "whiteout.cli:main"
 include = ["whiteout*"]
 exclude = ["tests*", "viz*", "artifacts*", "fixtures*", "scripts*"]
 
+[tool.setuptools.package-data]
+# The arena's recorded answers about the site it renders (#112). It is data the
+# module ships rather than a test fixture, so it lives beside `whiteout/site.py`
+# and goes into the wheel with it: `load_site()` has to mean the same thing in
+# an installed package as in a checkout. `fixtures*` above is excluded from the
+# wheel, which is why the record is not kept there.
+whiteout = ["data/*.json"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

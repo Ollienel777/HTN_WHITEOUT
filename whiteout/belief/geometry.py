@@ -344,9 +344,31 @@ class StraitGeometry:
 #: arena serves) and the distance-to-shore field ``terrain/course.py`` builds
 #: from it; that is a follow-up and it must be done per site, because
 #: ``competition.lock`` pins three.
+#:
+#: **What #112 changed about that, and what it did not.** The site's own
+#: parameters are a recorded answer now rather than a transcription:
+#: ``whiteout/data/site.json`` and :mod:`whiteout.site` hold what
+#: ``GET :8090/api/env`` and ``GET :8090/api/site`` answered on the SIM-5
+#: arena on 2026-09-20, ``bounds3413`` and ``convergence_deg`` included. The
+#: convergence is not applied anywhere under ``whiteout/`` — see
+#: :mod:`whiteout.vision.projection`, "Grid North, true North, and what
+#: ``convergence_deg`` does and does not reach" — so none of the vertices
+#: below moved with it, and the recorded answer confirms the grid that
+#: section is about. The 470 m the centreline sits off the vessel's track is still open,
+#: and still wants the heightmap.
+
 #: The rendered site's centre, from ``GET :8090/api/env`` (``SITE_LAT`` and
 #: ``SITE_LON``). Everything the arena simulates is within
 #: :data:`SITE_EXTENT_M` / 2 of it, in both east and north.
+#:
+#: **These three now have a record rather than a citation in a comment**
+#: (#112). ``whiteout/data/site.json`` holds the arena's own answers with the
+#: provenance of each beside it, :mod:`whiteout.site` reads it, and
+#: ``tests/test_site.py`` fails if these literals and that record disagree.
+#: They stay literals here because this module is imported by everything and
+#: must not read a file at import time. The record is the source; this is the
+#: copy the gate keeps honest, and ``scripts/arena_site.py`` says so out loud
+#: when a fetch moves one of them.
 SITE_CENTRE_LAT = 71.991960
 SITE_CENTRE_LON = -94.822428
 
