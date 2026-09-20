@@ -82,7 +82,9 @@ per arena, not per run: `whiteout/site.py` reads the record and never opens a
 socket, so a stale record is a silently wrong convergence angle.
 
 **3. The fleet answers.** The cheapest honest check is a short dry run — it
-opens every link, waits for a heartbeat from each asset, and sends nothing:
+opens every link and every camera feed, waits for a heartbeat from each asset,
+and sends nothing: no waypoint to an aircraft, and no track to the judged
+endpoint even when `WHITEOUT_TRACKS_ENDPOINT` is still exported from §4:
 
 ```sh
 WHITEOUT_TRANSPORT=arena WHITEOUT_ARENA_ENDPOINT=10.99.4.1 \

@@ -61,6 +61,21 @@ class _StubFeed:
         )
 
 
+class _StubPoster:
+    """A poster that counts what it was handed and whether it was closed."""
+
+    def __init__(self, client: object = None) -> None:
+        self.client = client
+        self.fixes: list[object] = []
+        self.closed = 0
+
+    def submit(self, fix: object) -> None:
+        self.fixes.append(fix)
+
+    def close(self, timeout_s: float = 5.0) -> None:
+        self.closed += 1
+
+
 class _Detection:
     """What the detector would have returned, at a point that moves."""
 
@@ -74,7 +89,8 @@ class _Detection:
 class _ArenaShapedTransport:
     """A transport that rosters assets the way the arena does, over no network."""
 
-    def __init__(self, fail_at: str | None = None) -> None:
+    def __init__(self, fail_at: str | None = None, fail_close: bool = False) -> None:
+        self._fail_close = fail_close
         self.assets = (
             type("AssetLink", (), {"asset_id": "quadcopter", "cls": "quad"})(),
             type("AssetLink", (), {"asset_id": "tower-1", "cls": "tower"})(),
@@ -116,6 +132,10 @@ class _ArenaShapedTransport:
 
     def close(self) -> None:
         self.closes += 1
+        if self._fail_close:
+            from whiteout.transport import TransportError
+
+            raise TransportError("the link would not close")
 
 
 @pytest.fixture
@@ -221,6 +241,59 @@ def test_a_run_that_fails_partway_still_closes_its_cameras(
     assert all(feed.closed == 1 for feed in feeds), "a camera thread outlived a failed run"
 
 
+def test_a_transport_that_will_not_close_still_closes_the_cameras_and_the_poster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+) -> None:
+    """The failure the guarantee was written for: `transport.close()` raising.
+
+    Run in sequence, that skipped every line under it, leaving four camera
+    threads draining sockets and the poster's worker alive. Each shutdown now
+    has a `finally` of its own.
+    """
+    transport = _ArenaShapedTransport(fail_close=True)
+    posters: list[_StubPoster] = []
+
+    def _poster(client: object) -> _StubPoster:
+        built = _StubPoster(client)
+        posters.append(built)
+        return built
+
+    monkeypatch.setenv("WHITEOUT_ARENA_ENDPOINT", "10.99.4.1")
+    monkeypatch.setenv("WHITEOUT_TRACKS_ENDPOINT", "http://127.0.0.1:1/api/tracks")
+    monkeypatch.setattr(cli, "selected_transport_name", lambda *a, **k: "arena")
+    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: transport)
+    monkeypatch.setattr(cli, "TracksClient", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "TrackPoster", _poster)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 1
+    assert transport.closes == 1
+    assert all(feed.closed == 1 for feed in feeds), "a camera thread outlived a close failure"
+    assert posters and posters[0].closed == 1, "the poster's worker outlived a close failure"
+
+
+def test_a_close_that_raises_something_else_is_diagnosed_not_traced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A non-`TransportError` from a teardown escaped as a traceback."""
+
+    def _boom() -> None:
+        raise OSError("the socket is already gone")
+
+    monkeypatch.setattr(arena, "close", _boom)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 1
+    assert "the socket is already gone" in capsys.readouterr().err
+    assert all(feed.closed == 1 for feed in feeds), "a camera thread outlived a close failure"
+
+
 def test_a_camera_that_will_not_open_does_not_end_the_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,14 +315,19 @@ def test_a_camera_that_will_not_open_does_not_end_the_run(
 # -- what is never posted ----------------------------------------------------
 
 
-def test_without_a_tracks_endpoint_an_arena_run_posts_nothing(
+def test_without_a_tracks_endpoint_an_arena_run_still_tracks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     arena: _ArenaShapedTransport,
     feeds: tuple[_StubFeed, ...],
     seeing: list[float],
 ) -> None:
-    """`WHITEOUT_TRACKS_ENDPOINT` is the only thing that causes a live POST."""
+    """The endpoint gates submission, and only submission.
+
+    It used to gate the `TrackHold` too, so a rehearsal with it unset produced
+    a log in which the cameras saw the vessel every tick and the episode log,
+    the viewer and `whiteout score` all showed an empty sea.
+    """
 
     def _refuse(*_a: object, **_k: object) -> object:
         raise AssertionError("a tracks client was built with no endpoint configured")
@@ -257,7 +335,32 @@ def test_without_a_tracks_endpoint_an_arena_run_posts_nothing(
     monkeypatch.setattr(cli, "TracksClient", _refuse)
     out = tmp_path / "arena.jsonl"
     assert cli.main(["run", "--ticks", "20", "--out", str(out)]) == 0
-    assert _contacts(out) == [], "a contact was held with nowhere to post it"
+    assert _contacts(out), "an arena run with no endpoint recorded no contacts at all"
+
+
+def test_a_dry_run_submits_nothing_even_with_an_endpoint_exported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arena: _ArenaShapedTransport,
+    feeds: tuple[_StubFeed, ...],
+    seeing: list[float],
+    tracks: StubTracksServer,
+) -> None:
+    """`docs/arena.md` §3 sells the dry run as the check that "sends nothing".
+
+    §4 is where the operator is told to export `WHITEOUT_TRACKS_ENDPOINT`, so
+    re-running §3 in that shell used to create and then keep updating a scored
+    track from a run nobody intended to count.
+    """
+
+    def _refuse(*_a: object, **_k: object) -> object:
+        raise AssertionError("a tracks client was built for a dry run")
+
+    monkeypatch.setattr(cli, "TracksClient", _refuse)
+    out = tmp_path / "arena.jsonl"
+    assert cli.main(["run", "--ticks", "20", "--dry-run", "--out", str(out)]) == 0
+    assert tracks.tracks() == [], "a dry run submitted to the judged endpoint"
+    assert _contacts(out), "a dry run stopped tracking as well as submitting"
 
 
 def test_the_kinematic_run_builds_no_camera_and_no_poster(

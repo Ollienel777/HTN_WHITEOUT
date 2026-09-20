@@ -127,9 +127,14 @@ def _coordinator_for(
     if not assets:
         return None
     roles = tuple(AssetRole(asset.asset_id, asset.cls) for asset in assets)
-    hold: TrackHold | None = None
-    if poster is not None:
-        hold = TrackHold(DEFAULT_TRACK_NAME, poster)
+    # The hold is built whether or not there is anywhere to post to. It is
+    # what turns sightings into contacts and into the stand-off the quad is
+    # tasked with, so gating it on the poster made `WHITEOUT_TRACKS_ENDPOINT`
+    # decide whether the fleet *tracks* rather than whether it *submits*: a
+    # rehearsal with the endpoint unset logged an empty sea while the cameras
+    # saw the vessel every tick. `TrackHold` takes an optional poster for
+    # exactly this reason.
+    hold = TrackHold(DEFAULT_TRACK_NAME, poster)
     return Coordinator(roles, hold=hold, sightings=sightings, ground_alt_m=GROUND_ALT_M)
 
 
@@ -161,7 +166,7 @@ def _arena_camera() -> VisionSightings | None:
         return None
 
 
-def _arena_poster() -> TrackPoster | None:
+def _arena_poster(dry_run: bool = False) -> TrackPoster | None:
     """A poster for the tracks API, or ``None`` when no endpoint is configured.
 
     ``WHITEOUT_TRACKS_ENDPOINT`` is the gate, and it is the client's own
@@ -169,7 +174,18 @@ def _arena_poster() -> TrackPoster | None:
     rather than inventing an address, and this turns that into "do not submit"
     rather than into a failed run. So a run posts to a live endpoint exactly
     when that variable names one, and never by default.
+
+    ``--dry-run`` is the second gate, and it wins. ``docs/arena.md`` §3 sells
+    the dry run as "the cheapest honest check", one that "sends nothing", and
+    §4 is where the operator is told to export the endpoint — so without this,
+    re-running §3 in the same shell after §4 would fabricate and then keep
+    updating a scored track from a run nobody intended to count. A dry run
+    still watches and still holds the track (the hold takes no poster); it
+    just has nowhere to send it.
     """
+    if dry_run:
+        print("run: --dry-run; not submitting tracks")
+        return None
     try:
         endpoint = endpoint_from_env()
     except TracksError as exc:
@@ -216,7 +232,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # put a network and a wall clock inside a run that has to be
                 # reproducible, so neither is ever built for it.
                 camera = _arena_camera()
-                poster = _arena_poster()
+                poster = _arena_poster(dry_run=args.dry_run)
             sightings: SightingSource | None = None
             if camera is not None:
                 camera.open()
@@ -261,16 +277,30 @@ def cmd_run(args: argparse.Namespace) -> int:
                     )
                 )
         finally:
-            transport.close()
-            # Both outlive the tick loop on threads of their own, so both are
-            # brought down here: a run that failed partway must not leave four
-            # camera threads draining sockets, and the poster drains what is
-            # pending on the way out so the last held fix is not lost.
-            if camera is not None:
-                camera.close()
-            if poster is not None:
-                poster.close()
+            # Three independent shutdowns, each on threads of its own, so each
+            # gets its own `finally`: a run that failed partway must not leave
+            # four camera threads draining sockets, and the poster drains what
+            # is pending on the way out so the last held fix is not lost. Run
+            # in sequence, `transport.close()` raising would have skipped both
+            # of the lines below it — which is the one case the guarantee was
+            # written for.
+            try:
+                transport.close()
+            finally:
+                try:
+                    if camera is not None:
+                        camera.close()
+                finally:
+                    if poster is not None:
+                        poster.close()
     except TransportError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, VisionError, TracksError) as exc:
+        # `close()` is the one place in this command that can raise something
+        # other than `TransportError` — a socket teardown, a camera thread, a
+        # client. Diagnosed rather than left to print a traceback at the end
+        # of a live arena run.
         print(f"run: {exc}", file=sys.stderr)
         return 1
     out = Path(args.out)
