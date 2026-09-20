@@ -291,3 +291,41 @@ def test_a_hold_with_no_poster_tracks_and_sends_nothing() -> None:
     assert 5 <= offline.posts <= 6, "the hold still knows which fixes were new"
     _heading, speed = offline.course()
     assert speed == pytest.approx(3.0, abs=0.5)
+
+
+def test_a_noisy_fix_is_not_read_as_speed() -> None:
+    """The distance baseline alone fails when fix error is large.
+
+    ``_MIN_COURSE_BASELINE_M`` is 15 m, sized against a fix error of about
+    3 m. Nothing has measured the real one, and the projection's flat-water
+    model is 10% wrong at its own range bound — 200 m at 2 km — so an error
+    well over 15 m is the expected case at range.
+
+    When it is, every adjacent pair clears the distance bound on noise alone,
+    the walk stops at the newest such pair, and that noise is divided by a
+    one-second gap. Measured end to end against a vessel moving at a known
+    3.0 m/s, this reported 10.7, 8.4 and **81.2 m/s** on a field ``ARENA.md``
+    §5 carries in its own example payload.
+
+    Held here against a vessel that does not move at all, which is the
+    sharpest version: every metre of reported speed is error.
+    """
+    import numpy as np
+
+    hold = TrackHold("Sierra One", None)
+    rng = np.random.default_rng(4)
+    sigma_deg = 60.0 / 111_000.0  # 60 m of fix error, in degrees of latitude
+    for tick in range(60):
+        hold.sight(
+            Sighting(
+                t=float(tick),
+                lat_deg=71.995 + float(rng.normal(0.0, sigma_deg)),
+                lon_deg=-94.84 + float(rng.normal(0.0, sigma_deg)) / 0.31,
+                asset_id="quadcopter",
+            )
+        )
+    _, speed = hold.course()
+    assert speed is None or speed < 25.0, (
+        f"a stationary vessel was reported at {speed} m/s, which is fix noise "
+        f"divided by a short baseline"
+    )

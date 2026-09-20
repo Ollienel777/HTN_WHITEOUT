@@ -101,6 +101,25 @@ DEFAULT_ASSOCIATION_SLACK_M = 150.0
 #: enough away to carry a bearing.
 _MIN_COURSE_BASELINE_M = 15.0
 
+#: And the baseline must also span this many seconds.
+#:
+#: The distance threshold alone is not enough, and the reason is that 15 m was
+#: sized against a fix error of about 3 m. Nothing has measured the real one.
+#: The projection's flat-water model is 10% wrong at its own range bound --
+#: 200 m at 2 km -- so a fix error comfortably larger than 15 m is the
+#: expected case at range, not the pessimistic one.
+#:
+#: When it is, *every* adjacent pair clears 15 m on noise alone. ``course``
+#: then takes the most recent qualifying pair, which is the noisiest one
+#: available, and divides that noise by a one-second gap. Measured against a
+#: vessel moving at a known 3.0 m/s, that reported speeds of 10.7, 8.4 and
+#: **81.2 m/s** -- twenty-seven times the truth, on a field ``ARENA.md`` §5
+#: carries in its own example payload.
+#:
+#: Ten seconds is thirty metres of travel at 3 m/s, so the signal beats a
+#: two-sigma fix error rather than merely exceeding a floor.
+_MIN_COURSE_BASELINE_S = 10.0
+
 #: How much sighting history to keep for that baseline. Sixty seconds is
 #: 180 m of travel — far more than the baseline needs, and still small.
 _HISTORY_S = 60.0
@@ -222,6 +241,12 @@ class TrackHold:
         history for the most recent fix at least
         :data:`_MIN_COURSE_BASELINE_M` away and measures against that.
 
+        The pair must also span :data:`_MIN_COURSE_BASELINE_S`. The distance
+        bound alone fails exactly when fix error is large: then every adjacent
+        pair clears it on noise, the walk stops at the *newest* such pair, and
+        the noise is divided by a one-second gap. Against a vessel moving at a
+        known 3.0 m/s that reported 81 m/s.
+
         ``(None, None)`` when no such pair exists — on the first fix, and
         whenever the vessel has been sitting still. Reporting a course from
         two fixes 2 m apart would hand the API sensor noise, and it would
@@ -239,7 +264,10 @@ class TrackHold:
             start = GeoPoint(first.lat_deg, first.lon_deg)
             offset = geodetic_to_local(start, end)
             distance_m = math.hypot(offset.east_m, offset.north_m)
-            if distance_m >= _MIN_COURSE_BASELINE_M:
+            # Both, and the time bound is what stops fix noise being read as
+            # speed: a pair far enough apart in metres may be so only because
+            # both fixes were wrong in opposite directions.
+            if distance_m >= _MIN_COURSE_BASELINE_M and dt >= _MIN_COURSE_BASELINE_S:
                 return bearing_deg(start, end), distance_m / dt
         return None, None
 
