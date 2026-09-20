@@ -83,6 +83,11 @@ class KinematicAsset:
     :param cruise_mps: how fast the airframe closes on a waypoint.
         ``ARENA.md`` §3 makes the fixed-wing the faster of the two, which is
         the whole reason the policy gives it the distant work.
+    :param climb_mps: how fast it changes height toward a commanded
+        ``target_z``. A quadcopter climbs faster than it cruises and a plane
+        slower; that ordering is the only thing this number is asked to get
+        right, because the policy's two altitudes — search at 120 m, hold a
+        contact at 60 m — differ by a minute of climb, not by a second.
     :param mobile: false for a tower, which is **aimed and never sent**.
         Nothing here infers that from ``cls``: the policy already reasons
         about it, and two modules deciding the same fact separately is how
@@ -94,6 +99,7 @@ class KinematicAsset:
     altitude_m: float
     camera: str
     cruise_mps: float
+    climb_mps: float
     mobile: bool
 
 
@@ -112,10 +118,10 @@ class KinematicAsset:
 #: the map, which is why its figure is not a height over water and why #76's
 #: datum question is not settled by this table.
 FLEET: tuple[KinematicAsset, ...] = (
-    KinematicAsset("quadcopter", "quad", 40.0, "quadcopter", 12.0, mobile=True),
-    KinematicAsset("fixed-wing", "fixedwing", 120.0, "fixed-wing", 26.0, mobile=True),
-    KinematicAsset("tower-1", "tower", 15.0, "tower", 0.0, mobile=False),
-    KinematicAsset("tower-2", "tower", 15.0, "tower", 0.0, mobile=False),
+    KinematicAsset("quadcopter", "quad", 40.0, "quadcopter", 12.0, 3.0, mobile=True),
+    KinematicAsset("fixed-wing", "fixedwing", 120.0, "fixed-wing", 26.0, 2.0, mobile=True),
+    KinematicAsset("tower-1", "tower", 15.0, "tower", 0.0, 0.0, mobile=False),
+    KinematicAsset("tower-2", "tower", 15.0, "tower", 0.0, 0.0, mobile=False),
 )
 
 #: Where the two masts stand, and which way each looks: ``(lat, lon, bearing)``
@@ -271,6 +277,12 @@ class KinematicTransport:
             )
         generator = np.random.default_rng(self._seed)
         poses: list[Pose] = []
+        # Towers are numbered among themselves. Passing the fleet index here
+        # happened to work only because the towers are the third and fourth
+        # entries and `2 % 2 == 0`; one more aircraft would have swapped both
+        # masts and their bearings, and a third tower would have stood on top
+        # of the first — silently, in a fixture nobody re-reads.
+        towers = 0
         for asset in FLEET:
             if asset.mobile:
                 east, north = generator.uniform(-_START_SPREAD, _START_SPREAD, size=2)
@@ -278,7 +290,8 @@ class KinematicTransport:
                 lat, lon = start.lat_deg, start.lon_deg
                 heading = float(generator.uniform(0.0, 2.0 * np.pi))
             else:
-                lat, lon, heading = self._tower_station(len(poses))
+                lat, lon, heading = self._tower_station(towers)
+                towers += 1
             poses.append(
                 Pose(
                     asset_id=asset.asset_id,
@@ -305,7 +318,14 @@ class KinematicTransport:
         them they see both sides of the strait, and each is turned to look
         down the channel toward the middle third neither covers.
         """
-        return _TOWER_STATIONS[index % len(_TOWER_STATIONS)]
+        if index >= len(_TOWER_STATIONS):
+            # Wrapping would co-locate two masts, which is not a siting and
+            # would read as one tower doing the work of two.
+            raise TransportError(
+                f"kinematic transport: tower {index} has no station; "
+                f"{len(_TOWER_STATIONS)} are sited in _TOWER_STATIONS"
+            )
+        return _TOWER_STATIONS[index]
 
     def observe(self) -> WorldObservation:
         """Fly the fleet one tick toward what it was last told, and report it.
@@ -351,18 +371,23 @@ class KinematicTransport:
         t: float,
         measured_t: float | None,
     ) -> Pose:
-        """One asset, one tick of travel toward ``target``."""
-        lat, lon, heading, speed = pose.lat, pose.lon, pose.heading, 0.0
+        """One asset, one tick of travel toward ``target``, in all three axes."""
+        lat, lon, z, heading, speed = pose.lat, pose.lon, pose.z, pose.heading, 0.0
         if asset.mobile and target is not None:
             here = geodetic_to_local(ARENA_ORIGIN, GeoPoint(pose.lat, pose.lon))
             there = geodetic_to_local(ARENA_ORIGIN, GeoPoint(target.target_lat, target.target_lon))
             east, north = there.east_m - here.east_m, there.north_m - here.north_m
             remaining = math.hypot(east, north)
-            # A commanded speed of zero means "hold", not "teleport"; an
-            # absent one means cruise. `min` with the remaining distance is
-            # what stops an asset overshooting a near waypoint and then
-            # oscillating across it, which reads on the canvas as a jitter
-            # and in the log as coverage the asset never had.
+            # `speed=0.0` means "unspecified, use cruise" and **not** "hold".
+            # Spelling that out because the policy emits exactly that on every
+            # intent it issues, so this is not an edge case — it is the branch
+            # the entire demo runs on, and an earlier version of this comment
+            # said it meant the opposite of what the code does.
+            #
+            # `min` with the remaining distance is what stops an asset
+            # overshooting a near waypoint and oscillating across it, which
+            # reads on the canvas as a jitter and in the log as coverage the
+            # asset never had.
             cruise = (
                 asset.cruise_mps if target.speed <= 0.0 else min(target.speed, asset.cruise_mps)
             )
@@ -376,13 +401,23 @@ class KinematicTransport:
                 lat, lon = arrived.lat_deg, arrived.lon_deg
                 heading = math.atan2(east, north) % (2.0 * math.pi)
                 speed = step / self._tick_seconds
+            # Altitude is flown too, and this is not symmetry for its own
+            # sake. `target_z` is a real instruction: the policy searches at
+            # 120 m and holds a contact at 60 m, and #111's whole argument is
+            # that a quadcopter directly over the vessel sees less of it than
+            # one standing off. A transport that accepted a commanded height
+            # and reported a different one wrote a command and a contradicting
+            # measurement into the same record, on every tick — which is worse
+            # than not modelling altitude at all, because it looks modelled.
+            climb = min(asset.climb_mps * self._tick_seconds, abs(target.target_z - z))
+            z += math.copysign(climb, target.target_z - z)
         return Pose(
             asset_id=pose.asset_id,
             cls=pose.cls,
             t=t,
             lat=lat,
             lon=lon,
-            z=pose.z,
+            z=z,
             heading=heading,
             speed=speed,
             # Energy is distance flown, not time powered: a loitering quad and

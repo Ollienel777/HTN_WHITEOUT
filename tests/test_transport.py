@@ -35,7 +35,7 @@ from whiteout.transport import (
     selected_transport_name,
 )
 from whiteout.transport.arena import DEFAULT_ROSTER
-from whiteout.transport.kinematic import FLEET
+from whiteout.transport.kinematic import _TOWER_STATIONS, FLEET
 from whiteout.types import VEHICLE_CLASSES, FleetIntent, WaypointIntent
 from whiteout.vision.camera import CAMERAS
 
@@ -642,6 +642,100 @@ def test_the_fake_fleet_is_the_arena_fleet() -> None:
     # none. The old test asserted one asset per class and so pinned the fake
     # to a fleet ARENA.md §3 contradicts.
     assert "rover" in VEHICLE_CLASSES
+
+
+def test_each_tower_gets_its_own_station_whatever_the_fleet_order() -> None:
+    """The masts are numbered among themselves, not among the fleet.
+
+    The first version indexed ``_TOWER_STATIONS`` by the *fleet* position and
+    was correct only because the towers happen to be the third and fourth
+    entries. One more aircraft would have swapped both masts and their
+    bearings; a third tower would have stood on top of the first. Neither
+    would have failed anything — it would have shipped in a fixture.
+    """
+    transport = KinematicTransport(seed=3)
+    transport.connect()
+    placed = {
+        pose.asset_id: (pose.lat, pose.lon)
+        for pose in transport.observe().poses
+        if pose.cls == "tower"
+    }
+    assert len(set(placed.values())) == len(placed), f"two masts share a spot: {placed}"
+    stations = {(lat, lon) for lat, lon, _ in _TOWER_STATIONS}
+    assert set(placed.values()) == stations
+    transport.close()
+
+
+def test_a_third_tower_refuses_rather_than_standing_on_the_first() -> None:
+    """Wrapping the station list would site two masts together, silently."""
+    transport = KinematicTransport(seed=3)
+    with pytest.raises(TransportError, match="has no station"):
+        transport._tower_station(len(_TOWER_STATIONS))
+
+
+def test_an_asset_flies_the_altitude_it_was_commanded() -> None:
+    """``target_z`` is an instruction, not decoration.
+
+    The policy searches at 120 m and holds a contact at 60 m, and #111's
+    stand-off argument is entirely about height. A transport that accepted a
+    commanded altitude and reported a different one wrote a command and a
+    contradicting measurement into the same record on every tick, which is
+    worse than not modelling altitude at all because it looks modelled.
+    """
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    quad = next(asset for asset in FLEET if asset.asset_id == "quadcopter")
+    climbing = WaypointIntent(
+        asset_id="quadcopter",
+        t=0.0,
+        target_lat=start.lat,
+        target_lon=start.lon,
+        target_z=start.z + 60.0,
+        speed=0.0,
+        reason="sweep",
+        task_id="up",
+    )
+    transport.command(FleetIntent(t=0.0, intents=(climbing,)))
+    after = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    assert after.z == pytest.approx(start.z + quad.climb_mps)
+
+    descending = WaypointIntent(
+        asset_id="quadcopter",
+        t=1.0,
+        target_lat=start.lat,
+        target_lon=start.lon,
+        target_z=start.z,
+        speed=0.0,
+        reason="hold",
+        task_id="down",
+    )
+    transport.command(FleetIntent(t=1.0, intents=(descending,)))
+    back = {pose.asset_id: pose for pose in transport.observe().poses}["quadcopter"]
+    assert back.z == pytest.approx(start.z), "an asset climbs but will not descend"
+    transport.close()
+
+
+def test_altitude_stops_at_the_commanded_height_rather_than_oscillating() -> None:
+    """The same arrival rule the horizontal axis has, and for the same reason."""
+    transport = KinematicTransport(seed=3, tick_seconds=1.0)
+    transport.connect()
+    start = {pose.asset_id: pose for pose in transport.observe().poses}["fixed-wing"]
+    intent = WaypointIntent(
+        asset_id="fixed-wing",
+        t=0.0,
+        target_lat=start.lat,
+        target_lon=start.lon,
+        target_z=start.z + 0.5,
+        speed=0.0,
+        reason="sweep",
+        task_id="nudge",
+    )
+    for tick in range(4):
+        transport.command(FleetIntent(t=float(tick), intents=(intent,)))
+        pose = {p.asset_id: p for p in transport.observe().poses}["fixed-wing"]
+        assert pose.z == pytest.approx(start.z + 0.5), f"tick {tick}"
+    transport.close()
 
 
 def test_the_fixed_wing_is_the_faster_airframe_and_a_tower_is_immobile() -> None:

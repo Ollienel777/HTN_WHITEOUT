@@ -25,18 +25,42 @@ determinism step depends on that staying true.
 arena adapter drives. The coordinator tasks the fleet every tick, the aircraft
 fly toward what they were told, and the towers stand where they were sited.
 
-## What it does not show yet, and why that matters
+## Where the episode stops being interesting, measured
 
-**The belief field is uniform for the whole episode, and stays uniform.**
-Nothing in this run erodes it: there is no sighting source behind the
-kinematic transport, and — more to the point — the negative-information update
-(#13) is not merged. A field nobody has looked away from is a fixed point of
-diffusion, so `entropy` is identical at t=199.5 and t=100.0.
+The fleet reaches steady state early, and the honest numbers are these:
 
-That is honest, and it is also the gap between an episode that shows a fleet
-moving and one that shows a fleet *thinking*. The sweeps are visible; the
-reason for them is not. Anyone regenerating this after #13 lands should expect
-the digest to change, and should expect that to be the point.
+| quantity | behaviour |
+|---|---|
+| `covered_fraction` | 0.12 at tick 0, **1.0 by tick 57**, and 1.0 for the remaining 343 |
+| `entropy` | one value, `6.745236`, for every tick of the episode |
+| quadcopter altitude | climbs 40 m → 120 m over the first 27 s, then holds |
+| re-taskings | roughly two per tick, at a **constant rate**, start to finish |
+
+So a before/after comparing tick 0 with tick 400 overstates it: almost all of
+the visible change happens in the first minute.
+
+**Making the episode longer does not fix this, and it was worth checking.** The
+obvious suspicion is that `SearchParams.stale_horizon_s` is 240 s against a
+200 s episode, so a segment can never go stale and be re-swept. A 1200-tick
+probe — 600 s, two and a half times the horizon — says otherwise: `entropy` is
+still constant to six decimal places, `covered_fraction` sits at 1.0 from tick
+57 with one brief dip to 0.96, and the re-tasking rate never changes. The
+horizon is not the binding constraint.
+
+## What is actually missing
+
+**Nothing erodes the belief field.** There is no sighting source behind the
+kinematic transport, and the negative-information update (#13) is not merged.
+A field nobody has looked away from is a fixed point of diffusion, so it stays
+uniform however long the run is — and with the field flat, the policy's
+staleness model is the only thing left varying, and it saturates at tick 57.
+
+That is the gap between an episode that shows a fleet moving and one that
+shows a fleet *thinking*. The sweeps are visible; the reason for them is not.
+Anyone regenerating this after #13 lands should expect these numbers to change,
+should expect the back half to stop being flat, and should revisit whether 400
+ticks is still the right length — at that point a longer run probably does earn
+its bytes.
 
 ## Size
 
