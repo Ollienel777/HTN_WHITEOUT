@@ -60,7 +60,9 @@ from whiteout.geo import GeoError, check_geodetic
 
 __all__ = [
     "CONTACT_STATES",
+    "DEFAULT_MAX_SKEW_S",
     "FOOTPRINT_KINDS",
+    "SYNC_STATUSES",
     "VEHICLE_CLASSES",
     "BeliefDigest",
     "Contact",
@@ -68,6 +70,7 @@ __all__ = [
     "EpisodeRecord",
     "FleetIntent",
     "Pose",
+    "PoseSync",
     "RecordError",
     "SensorFootprint",
     "SensorReport",
@@ -94,6 +97,37 @@ VEHICLE_CLASSES: tuple[str, ...] = ("fixedwing", "quad", "rover", "tower")
 #: Sensor footprint shapes (``SensorFootprint.kind``). ``kind`` decides
 #: circle-versus-cone geometry in the coverage computation.
 FOOTPRINT_KINDS: tuple[str, ...] = ("circle", "cone")
+
+#: How a frame and the pose it was projected with stood in time
+#: (``PoseSync.status``). Four states, because four are what this data model
+#: can actually tell apart; :class:`PoseSync` says which fifth one it cannot.
+#:
+#: ``synchronised``
+#:     A measurement time is known and the frame is within
+#:     ``max_skew_s`` of it, so there is no skew this log can see.
+#: ``telemetry_missing``
+#:     The pose carries no ``measured_t``, so the skew is **unknown**. The
+#:     arena adapter's state, and not a synonym for zero.
+#: ``telemetry_stale``
+#:     A measurement time is known and the frame is further than
+#:     ``max_skew_s`` from it. The one state that is *known* bad.
+#: ``attitude_missing``
+#:     The pose has no ``pitch``/``roll``, so there is no attitude to be
+#:     synchronised with and no projection at all.
+SYNC_STATUSES: tuple[str, ...] = (
+    "synchronised",
+    "telemetry_missing",
+    "telemetry_stale",
+    "attitude_missing",
+)
+
+#: Largest frame-to-fix skew a projection is still called ``synchronised`` at,
+#: seconds. The fixed-wing cruises at 22 m/s, so a quarter-second is 5.5 m of
+#: position error injected into the fix before the detector's own error is
+#: counted at all — which is the size of thing worth a state of its own. It is
+#: a default and a parameter, never a constant: it is a statement about how
+#: much error we will stand behind, and that belongs to the operator.
+DEFAULT_MAX_SKEW_S = 0.25
 
 
 class RecordError(ValueError):
@@ -398,6 +432,162 @@ class Pose:
 
 
 @dataclass(frozen=True, slots=True)
+class PoseSync:
+    """Whether a frame and the pose it was projected with are one instant.
+
+    A camera projection consumes a frame **and** an attitude together. Both
+    are needed and neither is checked against the other today, so a pair that
+    is a quarter of a second apart on the fixed-wing at 22 m/s puts 5.5 m into
+    the fix with every field populated, nothing null, and nothing to look at.
+    That is the failure this record exists to make visible: not a wrong number
+    but an *unqualified* one.
+
+    ``status`` is one of :data:`SYNC_STATUSES`. ``skew_s`` is
+    ``frame_t - pose.measured_t`` in seconds, positive for a fix taken before
+    the frame, and ``max_skew_s`` is the bound the verdict was reached against
+    — carried rather than assumed, because a verdict read next to a different
+    bound is not the verdict that was made.
+
+    **``skew_s`` is ``None`` when the pose reports no measurement time**, and
+    that is the whole point of the field rather than an inconvenience.
+    ``Pose.measured_t`` is ``None`` for exactly one reason — the transport does
+    not know — so the skew is unknown, and there is no number that would be
+    honest in its place. A ``0.0`` there reads as *simultaneous*, which is a
+    measurement, and would report every arena detection as perfectly
+    synchronised: plausible, wrong, and invisible. Issues #80 and #101 held
+    that line for ``measured_t`` and for ``pitch``/``roll``; this holds it one
+    join further on.
+
+    **``frame_t`` is in the pose's clock — ours, the episode's tick timebase —
+    and never the camera's.** This is the mistake the field is most likely to
+    attract, and it is ``measured_t``'s own trap one level up:
+    :func:`whiteout.vision.frames.live_frames` stamps a frame with
+    :func:`time.time`, and :func:`~whiteout.vision.frames.recorded_frames`
+    stamps it with an index over a frame rate. Neither is our tick clock;
+    subtracting one from ``measured_t`` yields an epoch-sized or an
+    arbitrarily offset difference that is not a skew at all. Only a caller
+    that has established the offset may convert one; a caller that has not
+    passes the tick the frame was consumed in, which is what
+    :class:`whiteout.vision.sightings.VisionSightings` does.
+
+    **What ``synchronised`` does not claim.** With the tick as ``frame_t``,
+    this measures the pose's age at the moment the frame was *consumed*, and
+    the frame's own age inside its feed is not tracked at all
+    (:mod:`whiteout.vision.sightings` says so, and a camera thread that keeps
+    only the newest frame cannot say). So ``skew_s`` is a **lower bound** on
+    the true frame-to-attitude skew, and ``synchronised`` means "no skew this
+    log can see", not "none". It is still the state that matters: a pose
+    already 0.4 s old at the tick is unsynchronised whatever the frame's age
+    was, and that is a verdict nothing recorded before.
+
+    **There is no ``attitude_unsynchronised`` state, because this data model
+    cannot tell one.** A ``Pose`` carries a single ``measured_t`` for the
+    position and the attitude together, even though the arena sends them as
+    separate messages, so a stale attitude and a stale fix are one number
+    here. Inventing a state whose inputs do not exist would produce a verdict
+    that never fires, or worse, one that fires on the fix's staleness and is
+    read as the attitude's. If a separate attitude stamp ever arrives it gets
+    its own field and its own state — never a quiet redefinition of these.
+
+    **Precedence, when more than one thing is wrong.** ``attitude_missing``
+    wins: it is the fact that makes the projection *impossible* rather than
+    merely wrong, and it is what the caller acts on first. ``skew_s`` is still
+    carried there when it is known, so the log does not lose the second fact
+    to the first.
+
+    **Flagged, not refused, on the detection.** See
+    :class:`whiteout.vision.detect.VesselDetection` for that decision and its
+    reasons; the refusal is one seam further on, where a pixel becomes a
+    lat/lon somebody is scored on.
+
+    A ``PoseSync`` also belongs on :class:`Detection` — one sensor hit is
+    exactly the scope of one frame-and-pose pair — the moment anything starts
+    writing ``SensorReport``s. Nothing does yet, so the field is not there:
+    the one thing worse than an unqualified number is a qualifier nobody
+    sets.
+    """
+
+    status: str
+    skew_s: float | None
+    max_skew_s: float = DEFAULT_MAX_SKEW_S
+
+    def __post_init__(self) -> None:
+        _as_floats(self, "max_skew_s")
+        if self.skew_s is not None:
+            _as_floats(self, "skew_s")
+        if self.status not in SYNC_STATUSES:
+            raise RecordError(
+                f"sync.status: {self.status!r} is not one of {', '.join(SYNC_STATUSES)}"
+            )
+        if not self.max_skew_s > 0.0:
+            raise RecordError(
+                f"sync.max_skew_s: expected a positive bound, got {self.max_skew_s!r}"
+            )
+        # The status and the number have to agree, checked at construction and
+        # not only on the way in. A record saying `synchronised` beside a skew
+        # of two seconds is worse than no record: every consumer here is built
+        # to trust the status word, and a reader that has to re-derive it from
+        # the number could not tell an unset field from a measured zero.
+        if self.status == "telemetry_missing" and self.skew_s is not None:
+            raise RecordError(
+                f"sync: status is 'telemetry_missing' but skew_s is {self.skew_s!r}; "
+                f"a known skew is not a missing measurement time"
+            )
+        if self.status in ("synchronised", "telemetry_stale"):
+            if self.skew_s is None:
+                raise RecordError(f"sync: status is {self.status!r} but skew_s is null")
+            within = abs(self.skew_s) <= self.max_skew_s
+            if within != (self.status == "synchronised"):
+                raise RecordError(
+                    f"sync: status is {self.status!r} but skew_s is {self.skew_s!r} "
+                    f"against a bound of {self.max_skew_s!r}"
+                )
+
+    @classmethod
+    def for_frame(
+        cls, frame_t: float, pose: Pose, *, max_skew_s: float = DEFAULT_MAX_SKEW_S
+    ) -> PoseSync:
+        """Judge one frame against the pose it is about to be projected with.
+
+        :param frame_t: when the frame was taken, **in ``pose``'s clock** — see
+            the class docstring, which is where that rule is argued.
+        :param pose: the pose the projection will use.
+        :param max_skew_s: the bound; see :data:`DEFAULT_MAX_SKEW_S`.
+
+        Pure and total: every pair of inputs has a verdict, and none of them
+        is an exception. A caller that cannot get a verdict would have to
+        invent one.
+        """
+        skew_s = None if pose.measured_t is None else float(frame_t) - pose.measured_t
+        if pose.pitch is None or pose.roll is None:
+            status = "attitude_missing"
+        elif skew_s is None:
+            status = "telemetry_missing"
+        elif abs(skew_s) > max_skew_s:
+            # Absolute, so a *negative* skew is stale too. A fix stamped after
+            # the frame it is joined to cannot have measured it, and the way
+            # that happens is an unconverted far-side clock -- the mistake
+            # `Pose.measured_t` names. Reading it as fresh would hide it.
+            status = "telemetry_stale"
+        else:
+            status = "synchronised"
+        return PoseSync(status=status, skew_s=skew_s, max_skew_s=max_skew_s)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_json_dict(self)
+
+    @classmethod
+    def from_dict(cls, payload: object, where: str = "sync") -> PoseSync:
+        data = _mapping(payload, where)
+        _check_keys(data, where, PoseSync)
+        return PoseSync(
+            status=_one_of(_str(data, where, "status"), SYNC_STATUSES, where, "status"),
+            skew_s=_optional_float(data, where, "skew_s"),
+            max_skew_s=_float(data, where, "max_skew_s"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SensorFootprint:
     """The ground area a sensor covered during a tick.
 
@@ -665,6 +855,19 @@ class Contact:
     Estimated, never true: ``lat``/``lon`` are the estimator's belief.
     ``assigned_asset_id`` is the asset currently holding the contact, or
     ``None`` when nothing is assigned.
+
+    ``sync`` is how the **fix this position rests on** stood in time against
+    the pose it was projected with (:class:`PoseSync`), and it is why this
+    record and not :class:`Detection` carries it today: a contact is the only
+    thing on the live vision path that reaches the episode log, so it is the
+    only place the viewer and the scorer can be shown that a position they are
+    about to trust was assembled from two things that were not simultaneous.
+    It is the *last* sighting's synchronisation, not a summary of the track's
+    — the position beside it is that sighting's too.
+
+    ``None`` means no synchronisation was established, which is what every
+    contact from a non-camera path is: the same absence as ``measured_t``'s,
+    for the same reason. It is not a claim that the pair was synchronised.
     """
 
     contact_id: str
@@ -675,6 +878,7 @@ class Contact:
     confidence: float
     classification: str
     assigned_asset_id: str | None
+    sync: PoseSync | None = None
 
     def __post_init__(self) -> None:
         _as_floats(self, "t", "lat", "lon", "confidence")
@@ -696,6 +900,9 @@ class Contact:
             confidence=_float(data, where, "confidence"),
             classification=_str(data, where, "classification"),
             assigned_asset_id=_optional_str(data, where, "assigned_asset_id"),
+            sync=(
+                None if data["sync"] is None else PoseSync.from_dict(data["sync"], f"{where}.sync")
+            ),
         )
 
 

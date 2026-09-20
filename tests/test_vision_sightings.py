@@ -28,7 +28,13 @@ from whiteout.vision.sightings import (
 TOWER = CAMERAS["tower"]
 
 
-def _pose(asset_id: str, *, alt: float = 120.0, attitude: bool = True) -> Pose:
+def _pose(
+    asset_id: str,
+    *,
+    alt: float = 120.0,
+    attitude: bool = True,
+    measured_t: float | None = None,
+) -> Pose:
     return Pose(
         asset_id=asset_id,
         cls="tower",
@@ -41,6 +47,7 @@ def _pose(asset_id: str, *, alt: float = 120.0, attitude: bool = True) -> Pose:
         energy_used=0.0,
         pitch=-10.0 if attitude else None,
         roll=0.0 if attitude else None,
+        measured_t=measured_t,
     )
 
 
@@ -120,6 +127,140 @@ def test_without_pitch_and_roll_there_is_no_sighting() -> None:
     source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
     poses = (_pose("tower-1", attitude=False),)
     assert source.sightings(_observation(poses)) == ()
+
+
+def test_a_measured_skew_past_the_bound_is_no_sighting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`telemetry_stale`: the pose is *known* to belong to another instant.
+
+    The tick is at t=1.0, the fix was measured at 0.4, and the bound is a
+    quarter-second. At the fixed-wing's 22 m/s that is 13 m of position error
+    in a lat/lon the tracks API scores, so this one is refused rather than
+    labelled — the only sync state that is.
+    """
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    poses = (_pose("tower-1", measured_t=0.4),)
+    assert source.sightings(_observation(poses)) == ()
+
+
+def test_a_skew_that_is_merely_unknown_is_carried_and_labelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`telemetry_missing` is every arena pose today, and must not blind us.
+
+    The arena adapter reports `measured_t=None` because it has not established
+    the `time_boot_ms` offset, which is the honest answer. Refusing on it would
+    post nothing at all in the arena we are flying in, so the sighting stands
+    and says what it does not know.
+    """
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    (found,) = source.sightings(_observation((_pose("tower-1"),)))
+    assert found.sync is not None
+    assert found.sync.status == "telemetry_missing"
+    assert found.sync.skew_s is None, "an unknown skew is never a zero one"
+
+
+def test_a_fresh_fix_is_carried_as_synchronised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    source = VisionSightings(feeds=(_StubFeed("tower-1", _frame()),))
+    (found,) = source.sightings(_observation((_pose("tower-1", measured_t=0.9),)))
+    assert found.sync is not None
+    assert found.sync.status == "synchronised"
+    assert found.sync.skew_s == pytest.approx(0.1)
+    assert found.sync.max_skew_s == pytest.approx(0.25)
+
+
+def test_the_skew_is_measured_against_the_tick_not_the_frame_s_own_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame's `t` is a wall clock or an index over a frame rate.
+
+    Neither is the clock `measured_t` is in, so subtracting one from the other
+    would yield a number that looks like a skew and is not one. The frame here
+    is stamped at an epoch-sized time and must not move the verdict.
+    """
+    from dataclasses import replace
+
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    frame = replace(_frame(), t=1_780_000_000.0)
+    source = VisionSightings(feeds=(_StubFeed("tower-1", frame),))
+    (found,) = source.sightings(_observation((_pose("tower-1", measured_t=0.9),)))
+    assert found.sync is not None
+    assert found.sync.status == "synchronised"
+
+
+def test_the_detector_is_told_how_the_pair_stood_in_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The detector cannot compute it: a `CameraPose` has no clock in it."""
+    from whiteout.vision import sightings as module
+
+    seen: list[object] = []
+
+    def _capture(*_a: object, **kwargs: object) -> None:
+        seen.append(kwargs.get("sync"))
+        return None
+
+    monkeypatch.setattr(module, "detect_vessel", _capture)
+    VisionSightings(feeds=(_StubFeed("tower-1", _frame()),)).sightings(
+        _observation((_pose("tower-1", measured_t=0.9),))
+    )
+    (sync,) = seen
+    assert getattr(sync, "status", None) == "synchronised"
+
+
+def test_the_skew_bound_is_the_callers_to_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It bounds the error this source will post, so it is not a constant."""
+    from whiteout.geo import GeoPoint
+    from whiteout.vision import sightings as module
+
+    class _Detection:
+        def to_ground(self) -> GeoPoint:
+            return GeoPoint(71.9965, -94.8448)
+
+    monkeypatch.setattr(module, "detect_vessel", lambda *a, **k: _Detection())
+    feeds = (_StubFeed("tower-1", _frame()),)
+    poses = (_pose("tower-1", measured_t=0.4),)
+    assert VisionSightings(feeds=feeds).sightings(_observation(poses)) == ()
+    (found,) = VisionSightings(feeds=feeds, max_skew_s=1.0).sightings(_observation(poses))
+    assert found.sync is not None
+    assert found.sync.status == "synchronised"
+    assert found.sync.max_skew_s == pytest.approx(1.0)
 
 
 def test_a_camera_at_the_water_plane_is_skipped_rather_than_raising() -> None:

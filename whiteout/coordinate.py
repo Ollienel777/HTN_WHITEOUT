@@ -270,6 +270,12 @@ class Coordinator:
         vocabularies on purpose — one is about whether we can still see the
         vessel, the other is the log's lifecycle — so the mapping is written
         out rather than assumed to coincide.
+
+        The last sighting's ``sync`` rides along with its position, because
+        that is whose position this is: the contact's lat/lon is the last
+        fix's, so the qualification on that fix is the qualification on this
+        record. ``None`` when the sighting source did not establish one — it is
+        never filled in with a synchronised-looking default here.
         """
         if self._hold is None or self._hold.last_sighting is None:
             return ()
@@ -290,5 +296,6 @@ class Coordinator:
                 confidence=0.0 if state == "lost" else 1.0,
                 classification="vessel",
                 assigned_asset_id=self._hold.holder,
+                sync=last.sync,
             ),
         )

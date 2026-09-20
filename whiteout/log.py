@@ -82,7 +82,12 @@ __all__ = [
 #: spent on the lat/lon shape above: two shapes that both answered to 2 would
 #: leave the field unable to say "this log is not the shape you expect" about
 #: either of them, which is the whole of what it is for.
-SCHEMA_VERSION = 4
+#:
+#: 5 — ``Contact.sync``, a required record key carrying
+#: :class:`~whiteout.types.PoseSync`: whether the frame a fix came from and the
+#: pose it was projected with belonged to the same instant. Nullable, never
+#: absent, for the reason that field argues.
+SCHEMA_VERSION = 5
 
 #: Members of a record that carry their own copy of the tick's clock.
 _CLOCK_MEMBERS = ("observation", "intent", "belief_digest", "truth")

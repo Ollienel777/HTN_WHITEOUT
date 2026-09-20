@@ -33,12 +33,30 @@ properly needs the frame's own timestamp against `Pose.measured_t`, and the
 arena adapter reports `measured_t` as ``None`` because the clock offset has
 never been established. That is the honest state of it.
 
+**What the join can now say about itself.** Every sighting from here carries a
+:class:`~whiteout.types.PoseSync`, so the pair's skew is *recorded* rather than
+left to this docstring: how old the pose was at the tick the frame was consumed
+in, against ``max_skew_s``. It cannot close the gap above — the frame's own age
+inside its feed is still untracked, so the recorded skew is a lower bound, and
+``PoseSync`` says so where the verdict is defined rather than only here. What it
+does end is the silence: a fix assembled out of two instants is no longer
+indistinguishable, in the log or in the viewer, from one that was not.
+
 What it refuses to do
 ----------------------
 
 - **No pitch or roll, no sighting.** Projection takes three angles; a `Pose`
   with `None` for two of them cannot be turned into a `CameraPose`, and
-  guessing "level" would put the point somewhere confidently wrong.
+  guessing "level" would put the point somewhere confidently wrong. This is
+  ``attitude_missing``, and it was already the rule before the status had a
+  name.
+- **A measured skew past the bound, no sighting.** ``telemetry_stale``: a
+  lat/lon this one posts is scored, and past ``max_skew_s`` the pose is known
+  to have moved further under the frame than the operator said they would
+  stand behind. A skew that is merely *unknown* — ``telemetry_missing``, which
+  is every arena pose today — is **carried and labelled instead**, because
+  refusing it would post nothing at all in the arena we are flying in and
+  would call that caution.
 - **No detection, no sighting.** The detector already returns ``None`` rather
   than a guess, and every candidate it emits has been through the projection,
   so a sighting from here always has a lat/lon behind it.
@@ -52,7 +70,7 @@ import threading
 from dataclasses import dataclass
 
 from whiteout.tracks.maintain import Sighting
-from whiteout.types import Pose, WorldObservation
+from whiteout.types import DEFAULT_MAX_SKEW_S, Pose, PoseSync, WorldObservation
 from whiteout.vision.camera import CAMERAS, CameraModel, VisionError
 from whiteout.vision.detect import DEFAULT_PARAMS, DetectorParams, detect_vessel
 from whiteout.vision.imagery import LumaFrame, MjpegFrames
@@ -191,11 +209,17 @@ class VisionSightings:
         Issue #76 has not settled which datum the arena reports, so this is a
         parameter with the detector's own meaning and default.
     :param params: detector thresholds.
+    :param max_skew_s: how far the pose joined to a frame may have been
+        measured from the tick that consumed it before the sighting is refused
+        (:data:`~whiteout.types.DEFAULT_MAX_SKEW_S`). It bounds the position
+        error this source is willing to post, so it is the operator's number
+        and a parameter rather than a constant.
     """
 
     feeds: tuple[CameraFeed, ...]
     ground_alt_m: float = 0.0
     params: DetectorParams = DEFAULT_PARAMS
+    max_skew_s: float = DEFAULT_MAX_SKEW_S
 
     def open(self) -> None:
         """Start every feed."""
@@ -222,10 +246,25 @@ class VisionSightings:
         return tuple(found)
 
     def _sight(self, asset_id: str, pose: Pose, frame: LumaFrame, t: float) -> Sighting | None:
+        # `t` and not `frame.t`: the frame's own stamp is a wall clock (live) or
+        # an index over a frame rate (a recording), and neither is the clock
+        # `measured_t` is in. Subtracting one from the other would produce a
+        # number that looks like a skew and is not one -- the mistake
+        # `Pose.measured_t` names one level down. The tick that consumed the
+        # frame is in the right clock, and `PoseSync` says what that costs.
+        sync = PoseSync.for_frame(t, pose, max_skew_s=self.max_skew_s)
         if pose.pitch is None or pose.roll is None:
-            # Two of the three angles are missing. Guessing "level" would put
-            # the projected point somewhere confidently wrong, and ARENA.md
-            # §5 scores accuracy.
+            # `sync.status == "attitude_missing"`, spelt on the fields it is
+            # derived from so that the two angles narrow for the `CameraPose`
+            # below. Two of the three angles are missing; guessing "level"
+            # would put the projected point somewhere confidently wrong, and
+            # ARENA.md §5 scores accuracy.
+            return None
+        if sync.status == "telemetry_stale":
+            # Known bad, not merely unknown: the pose was measured further from
+            # this frame than `max_skew_s` allows, so the lat/lon would be off
+            # by whatever the asset covered in between. `telemetry_missing`
+            # deliberately does *not* land here -- see the module docstring.
             return None
         camera_pose = CameraPose(
             lat_deg=pose.lat,
@@ -245,6 +284,7 @@ class VisionSightings:
                 t=t,
                 ground_alt_m=self.ground_alt_m,
                 params=self.params,
+                sync=sync,
             )
         except VisionError:
             # A malformed frame, or a camera below the water plane. Neither is
@@ -258,4 +298,5 @@ class VisionSightings:
             lat_deg=ground.lat_deg,
             lon_deg=ground.lon_deg,
             asset_id=asset_id,
+            sync=sync,
         )

@@ -34,6 +34,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from whiteout.types import PoseSync
 from whiteout.vision.camera import FIXED_WING_CAMERA, QUADCOPTER_CAMERA, TOWER_CAMERA, VisionError
 from whiteout.vision.detect import (
     DEFAULT_PARAMS,
@@ -77,6 +78,7 @@ def detect_on(
     with_vessel: bool = True,
     vessel_px: tuple[float, float] | None = None,
     params: DetectorParams = DEFAULT_PARAMS,
+    sync: PoseSync | None = None,
 ) -> tuple[VesselDetection | None, tuple[float, float] | None]:
     """Render one frame and run the detector over it. Returns the pair."""
     asset_id, camera, pose = asset
@@ -96,6 +98,7 @@ def detect_on(
         t=seed / 10.0,
         ground_alt_m=0.0,
         params=params,
+        sync=sync,
     )
     return found, scene.vessel_px
 
@@ -461,6 +464,47 @@ def test_a_detection_that_would_not_project_is_not_returned() -> None:
     unprojectable = replace(found, max_range_m=1.0)
     with pytest.raises(ProjectionError):
         unprojectable.to_ground()
+
+
+# --------------------------------------------------------------------------
+# a skewed pose qualifies a detection; it never cancels one
+# --------------------------------------------------------------------------
+
+
+def test_a_detection_carries_how_the_frame_and_the_pose_stood_in_time() -> None:
+    """The detector cannot work it out: a ``CameraPose`` has no clock in it."""
+    stale = PoseSync(status="telemetry_stale", skew_s=0.4)
+    found, _ = detect_on(PLAIN_OPEN, 114, vessel_px=(300.0, 250.0), sync=stale)
+    assert found is not None
+    assert found.sync == stale
+
+
+def test_an_unsynchronised_pose_does_not_suppress_the_detection() -> None:
+    """Skew moves the *place*, not the evidence, so it is flagged not refused.
+
+    Refusing here would let one adapter that reports no measurement time — the
+    arena's, correctly — silence a whole camera, and would throw away the
+    presence and the coverage along with the position. The refusal lives at the
+    seam where a pixel becomes a posted lat/lon.
+    """
+    baseline, _ = detect_on(PLAIN_OPEN, 114, vessel_px=(300.0, 250.0))
+    assert baseline is not None
+    for sync in (
+        PoseSync(status="telemetry_missing", skew_s=None),
+        PoseSync(status="telemetry_stale", skew_s=9.0),
+        PoseSync(status="attitude_missing", skew_s=None),
+    ):
+        found, _ = detect_on(PLAIN_OPEN, 114, vessel_px=(300.0, 250.0), sync=sync)
+        assert found is not None
+        assert (found.px, found.py) == (baseline.px, baseline.py)
+        assert found.confidence == baseline.confidence
+
+
+def test_a_caller_that_established_nothing_says_so() -> None:
+    """``None`` is "not established", and it is what a synthetic frame has."""
+    found, _ = detect_on(PLAIN_OPEN, 114, vessel_px=(300.0, 250.0))
+    assert found is not None
+    assert found.sync is None
 
 
 # --------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from whiteout.policy import AssetRole
 from whiteout.tracks.client import TrackPoster, TracksClient
 from whiteout.tracks.maintain import Sighting, TrackHold
 from whiteout.tracks.stub import StubTracksServer
-from whiteout.types import Pose, WorldObservation
+from whiteout.types import Pose, PoseSync, WorldObservation
 
 FLEET = (
     AssetRole("quadcopter", "quad"),
@@ -53,14 +53,15 @@ def _observation(t: float) -> WorldObservation:
 class _SawItAt:
     """A sighting source that reports the vessel at fixed ticks."""
 
-    def __init__(self, ticks: set[float], s_m: float = MID) -> None:
+    def __init__(self, ticks: set[float], s_m: float = MID, sync: PoseSync | None = None) -> None:
         self.ticks = ticks
         self.lat, self.lon = _at(s_m)
+        self.sync = sync
 
     def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
         if observation.t not in self.ticks:
             return ()
-        return (Sighting(observation.t, self.lat, self.lon, "tower-1"),)
+        return (Sighting(observation.t, self.lat, self.lon, "tower-1", sync=self.sync),)
 
 
 @pytest.fixture
@@ -190,6 +191,22 @@ def test_a_contact_is_recorded_for_the_log(hold_and_stub) -> None:
     assert contact.state == "tracked"
     assert contact.assigned_asset_id == "tower-1"
     assert contact.classification == "vessel"
+    assert contact.sync is None, "a source that established nothing invents nothing"
+
+
+def test_a_contact_carries_its_last_fix_s_synchronisation(hold_and_stub) -> None:
+    """The contact's position *is* the last sighting's, so its caveat is too.
+
+    Without this the log would show a lat/lon with every field populated and no
+    way to see that the frame and the attitude behind it were a quarter-second
+    apart — 5.5 m at the fixed-wing's cruise.
+    """
+    hold, _ = hold_and_stub
+    sync = PoseSync(status="telemetry_missing", skew_s=None)
+    coordinator = Coordinator(FLEET, hold=hold, sightings=_SawItAt({2.0}, sync=sync))
+    coordinator.tick(_observation(1.0))
+    (contact,) = coordinator.tick(_observation(2.0)).contacts
+    assert contact.sync == sync
 
 
 # -- the two state changes that move assets ---------------------------------
