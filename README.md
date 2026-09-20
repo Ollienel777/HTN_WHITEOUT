@@ -68,10 +68,10 @@ intents out, and a `Track` leaving by a second path to the scored API.
                   │   belief · contacts · allocation     │
                   └────────▲──────────┬──────────┬───────┘
           WorldObservation │          │FleetIntent│ Track
-                  ┌────────┴──────────▼───────┐  │
-                  │      Transport (Protocol) │  │
-                  └──┬──────────┬─────────────┘  │
-                     │          │                │
+                  ┌────────┴──────────▼───────┐   │
+                  │      Transport (Protocol) │   │
+                  └──┬──────────┬─────────────┘   │
+                     │          │                 │
               ┌──────▼───┐ ┌────▼─────┐   ┌──────▼───────┐
               │kinematic │ │   sitl   │   │  arena       │
               │ fast fake│ │local dev │   │ ArcticSim    │

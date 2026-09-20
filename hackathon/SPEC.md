@@ -168,15 +168,15 @@ intents out. Nothing else crosses it.
                   │   belief · contacts · allocation     │
                   └────────▲──────────┬──────────┬───────┘
           WorldObservation │          │FleetIntent│ Track
-                  ┌────────┴──────────▼───────┐  │
-                  │      Transport (Protocol) │  │
-                  └──┬──────────┬─────────────┘  │
-                     │          │                │
+                  ┌────────┴──────────▼───────┐   │
+                  │      Transport (Protocol) │   │
+                  └──┬──────────┬─────────────┘   │
+                     │          │                 │
               ┌──────▼───┐ ┌────▼─────┐   ┌──────▼───────┐
               │kinematic │ │   sitl   │   │  arena       │
               │ fast fake│ │local dev │   │ ArcticSim    │
-              │  no deps │ │ harness  │   │ ** the one   │
-              │          │ │ ArduPilot│   │  that counts**│
+              │  no deps │ │ harness  │   │ the one that │
+              │          │ │ ArduPilot│   │    counts    │
               └──────────┘ └──────────┘   └──────────────┘
 ```
 
@@ -209,14 +209,27 @@ It is a `Protocol`, not an ABC.
 | **Belief** | `whiteout/belief/` | The decaying field **over the water of the strait**, and the **negative-information** update keyed on real camera footprints. |
 | **Policy** | `whiteout/policy/` | Allocation, information-gain routing, tower placement, the contact lifecycle machine, re-tasking hysteresis, and the **frontier-coverage fallback**. |
 | **Viz** | `viz/` | The run viewer. Static HTML + canvas. Zero build step. Debugging tool *and* presentation material. |
-| **CLI** | `whiteout/cli.py` | `run`, `replay`, `score`, `serve`. |
+| **CLI** | `whiteout/cli.py` | `run` and `serve` work. `score` returns zeros without reading the log and `replay` prints *not implemented yet* — both are stubs, and the table said so for neither. |
 
 **Gone, and why.** `whiteout/sim/` — ArcticSim supplies terrain, vehicles,
 sensing and the target; we were building a second, worse copy.
 `whiteout/tune/` — the sweep needed a fast simulator and a faithful scorer,
-and has neither. `whiteout/score/` survives only as a **development
-instrument** for comparing two policies, rebuilt small against the seven real
-criteria; it is not a target and nothing optimises against it.
+and has neither.
+
+`whiteout/score/` **does not exist, and there is no scorer.** An earlier
+revision of this paragraph said it survived as a development instrument for
+comparing two policies, rebuilt against the seven real criteria. None of that
+is true and it is an expensive thing to believe. What exists is `cmd_score` in
+`whiteout/cli.py`, which sets `scores = {axis: 0.0 for axis in AXES}` without
+reading the log at all, over the **original four** axes and not the sponsor's
+seven. It returns zeros for every episode and can therefore compare nothing.
+
+That is not a gap to be filled; it follows from §10's risk table, which
+already records that the arbiter is gone. The sponsor scores what we POST to
+their API, from data we have no ground truth for, so a scorer of our own would
+be a number we invented grading a run we cannot check. **Nothing in this build
+optimises against a scored objective**, and the demo's evidence is the belief
+field's own measured behaviour rather than a score.
 
 ### The data model
 

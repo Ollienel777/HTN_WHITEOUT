@@ -38,16 +38,24 @@ at video bitrate.
 
 ### What beat 2 needs before it can be performed
 
-Two things, and neither is optional, because beat 2 *is* the demo:
+**One thing: #20.** Beat 2 *is* the demo, so this is worth being exact about.
 
-- **#124** — the episode log must carry the belief field. Today it carries
-  summary statistics only, so there is nothing for a canvas to draw.
-- **#20** — `drawField()` must draw it. Today it draws a grid and a scale bar.
+The data is there. #124 landed as #125, and every record now carries a
+`belief_field` — 850 quantised cells with the geometry on the first record.
+Check it:
 
-Until both land, preflight check 4 renders an instrument with an empty middle,
-and the honest move is to rehearse beats 1, 3, 4, 5 and 6 and leave a hole
-where beat 2 goes. Do not rehearse a beat 2 that narrates a static screen; it
-reads worse than admitting the gap.
+```bash
+python -c "import json;print(sorted(json.loads(open('fixtures/episodes/demo.jsonl').readline())['belief_field']))"
+```
+
+What is missing is the drawing. `drawField()` in `viz/viewer.js` renders a grid
+and a scale bar; `belief_field` appears in that file exactly once, in a list of
+record keys, and nothing reads it. So preflight check 4 gives you a correct
+instrument with an empty middle.
+
+Until #20 lands, rehearse beats 1, 3, 4, 5 and 6 and leave a hole where beat 2
+goes. Do not rehearse a beat 2 that narrates a static screen — it reads worse
+than admitting the gap.
 
 ---
 
