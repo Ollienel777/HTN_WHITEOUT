@@ -350,11 +350,11 @@ class StraitGeometry:
 #: ``whiteout/data/site.json`` and :mod:`whiteout.site` hold what
 #: ``GET :8090/api/env`` and ``GET :8090/api/site`` answered on the SIM-5
 #: arena on 2026-09-20, ``bounds3413`` and ``convergence_deg`` included. The
-#: convergence is **not** a correction to anything — see
-#: :mod:`whiteout.vision.projection`, "Grid North, true North, and why
-#: ``convergence_deg`` is not a bias here" — so none of the vertices below
-#: moved with it, and the recorded answer confirms the grid that argument is
-#: about. The 470 m the centreline sits off the vessel's track is still open,
+#: convergence is not applied anywhere under ``whiteout/`` — see
+#: :mod:`whiteout.vision.projection`, "Grid North, true North, and what
+#: ``convergence_deg`` does and does not reach" — so none of the vertices
+#: below moved with it, and the recorded answer confirms the grid that
+#: section is about. The 470 m the centreline sits off the vessel's track is still open,
 #: and still wants the heightmap.
 
 #: The rendered site's centre, from ``GET :8090/api/env`` (``SITE_LAT`` and

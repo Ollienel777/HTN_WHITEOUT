@@ -1,7 +1,12 @@
 #!/usr/bin/env python
 """Ask the arena what site it is rendering, and record the answer.
 
-The only thing in this repository that talks to ``:8090``. Issue #112.
+What records ``:8090``'s answers. Issue #112.
+
+It is not the only reader of that port: ``scripts/truth_probe.py`` fetches
+``/api/site`` live on every run (#121) rather than reading the record this
+writes, which is two sources for one set of numbers and the thing #112 exists
+to end. Reconciling them is #122, not this script's to do.
 
     python scripts/arena_site.py --endpoint 10.99.4.1          # show it
     python scripts/arena_site.py --endpoint 10.99.4.1 --write   # record it
@@ -62,11 +67,18 @@ The one thing not kept as sent
 
 That ``.env`` is the arena's own and it carries credentials, a live
 ``MAPBOX_TOKEN`` among them. **This repository is public.** So the single
-alteration this script makes to what the arena sent is to replace the value
-of any key that looks like a credential — :data:`SECRET_KEY_MARKERS` — with
-:data:`REDACTED`, in the parsed fields and in the kept body alike. The key
-itself stays, so a redaction reads as a redaction rather than as a gap, and
-no site parameter matches those markers.
+alteration this script makes to what the arena sent is to replace credential
+values with :data:`REDACTED`, in the parsed fields and in the kept body alike.
+The key itself stays, so a redaction reads as a redaction rather than as a
+gap, and no site parameter is touched.
+
+**Two tests, because either alone has a hole.** :func:`is_secret` reads the
+key name against :data:`SECRET_KEY_MARKERS`; :func:`is_secret_value` reads the
+value's shape. A key-name denylist over a file this repository does not
+control cannot catch ``GITHUB_PAT``, ``SENTRY_DSN``, or a ``DATABASE_URL``
+with an inline password — and the CI guard reuses the same predicate, so
+whatever the denylist misses the guard would miss too. Either test firing is
+enough to redact.
 """
 
 from __future__ import annotations
@@ -111,15 +123,87 @@ ENDPOINTS = (("env", "/api/env"), ("site", "/api/site"))
 #: (``MAPBOX_TOKEN``): the arena's ``.env`` is not ours and may grow another.
 SECRET_KEY_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "_KEY")
 
+#: Prefixes that identify a credential whatever its key is called. A key-name
+#: denylist cannot catch ``GITHUB_PAT``, ``SENTRY_DSN`` or a ``DATABASE_URL``
+#: with an inline password, and the ``.env`` being read is not ours to predict
+#: — so the value is examined as well as the key, and either one is enough to
+#: redact. These are the issuer-assigned prefixes that are what they look
+#: like.
+SECRET_VALUE_PREFIXES = (
+    "pk.",
+    "sk-",
+    "sk_",
+    "pk_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "github_pat_",
+    "xox",
+    "AKIA",
+    "ASIA",
+    "AIza",
+    "glpat-",
+    "-----BEGIN",
+)
+
+#: The characters an opaque token is made of. A value outside this set — a
+#: path, a comma-separated list, anything with a space — is not one.
+_TOKEN_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+
+#: How long an opaque mixed-case-and-digits value has to be before it is
+#: treated as a token on its shape alone. Long enough that no site parameter
+#: in the arena's ``.env`` reaches it, short enough to catch a real key.
+_TOKEN_MIN_LEN = 32
+
 #: What a credential's value is replaced with. Says who did it, so that
 #: whoever reads the fixture looks here rather than at the arena.
 REDACTED = "<redacted by scripts/arena_site.py>"
 
 
 def is_secret(key: str) -> bool:
-    """Whether ``key``'s value is a credential and must not be recorded."""
+    """Whether ``key``'s *name* says its value is a credential."""
     folded = str(key).upper()
     return any(marker in folded for marker in SECRET_KEY_MARKERS)
+
+
+def is_secret_value(value: object) -> bool:
+    """Whether a *value* looks like a credential whatever its key is called.
+
+    Three shapes, in increasing order of how much it guesses:
+
+    * an issuer prefix from :data:`SECRET_VALUE_PREFIXES` — those are what
+      they look like;
+    * a URL carrying inline credentials, ``scheme://user:password@host``,
+      which is how a ``DATABASE_URL`` or a ``SENTRY_DSN`` leaks;
+    * an opaque token by shape: :data:`_TOKEN_MIN_LEN` or more characters
+      drawn only from :data:`_TOKEN_CHARS`, with upper case, lower case and a
+      digit in it.
+
+    The third is the one that could misfire, and it is kept tight for that
+    reason. Nothing in the arena's ``.env`` matches it: the long values there
+    are a registry host (dotted, no upper case), a comma-separated month list
+    and a space-separated colour, and a dot, a comma or a space is enough to
+    fail the character test. ``tests/test_site.py`` runs this over the
+    committed record and over every site parameter it must not touch.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text == REDACTED:
+        return False
+    if any(text.startswith(prefix) for prefix in SECRET_VALUE_PREFIXES):
+        return True
+    if "://" in text:
+        authority = text.split("://", 1)[1].split("/", 1)[0]
+        if "@" in authority and ":" in authority.split("@", 1)[0]:
+            return True
+    if len(text) >= _TOKEN_MIN_LEN and set(text) <= _TOKEN_CHARS:
+        return (
+            any(c.isupper() for c in text)
+            and any(c.islower() for c in text)
+            and any(c.isdigit() for c in text)
+        )
+    return False
 
 
 def base_url(endpoint: str) -> str:
@@ -198,8 +282,16 @@ def as_fields(parsed: Any, body: str) -> tuple[dict[str, Any], str | None]:
 
 
 def redact_fields(fields: dict[str, Any]) -> dict[str, Any]:
-    """``fields`` with every credential's value replaced by :data:`REDACTED`."""
-    return {key: (REDACTED if is_secret(key) else value) for key, value in fields.items()}
+    """``fields`` with every credential's value replaced by :data:`REDACTED`.
+
+    Redacted when the key says so **or** the value looks like one. Either is
+    enough, because the denylist cannot know every key the arena's ``.env``
+    might grow and the shapes cannot know every issuer.
+    """
+    return {
+        key: (REDACTED if is_secret(key) or is_secret_value(value) else value)
+        for key, value in fields.items()
+    }
 
 
 def redact_body(body: str) -> str:
@@ -211,8 +303,9 @@ def redact_body(body: str) -> str:
     """
     lines = []
     for line in body.splitlines():
-        key, sep, _ = line.partition("=")
-        lines.append(f"{key}{sep}{REDACTED}" if sep and is_secret(key.strip()) else line)
+        key, sep, value = line.partition("=")
+        secret = sep and (is_secret(key.strip()) or is_secret_value(value))
+        lines.append(f"{key}{sep}{REDACTED}" if secret else line)
     return "\n".join(lines) + ("\n" if body.endswith("\n") else "")
 
 

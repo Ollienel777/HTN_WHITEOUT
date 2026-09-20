@@ -326,16 +326,25 @@ def bearing_deg(origin: GeoPoint, point: GeoPoint) -> float:
     not subtracted from it** (#112). That field, published by ``GET
     :8090/api/site`` and recorded by :mod:`whiteout.site`, is the ~49.8° turn
     between true North and the EPSG:3413 grid the arena renders its terrain
-    in — a frame nothing here enters. The reasoning is written out once, in
-    :mod:`whiteout.vision.projection` under "Grid North, true North, and why
-    ``convergence_deg`` is not a bias here"; the half of it that belongs to
-    this function is that the angle is taken **at the origin of its own
-    frame**, where the tangent plane's North is true North exactly, so there
-    is no convergence of any kind left to carry. That holds for the two
-    callers that matter: ``whiteout/transport/arena.py`` takes a bearing about
-    the tower that is about to be pointed along it, and
-    ``whiteout/tracks/maintain.py`` takes a course about the earlier of the
-    two fixes it runs between.
+    in — a frame nothing under ``whiteout/`` enters, though
+    ``scripts/truth_probe.py`` does and must rotate (#121). The reasoning is
+    written out once, in :mod:`whiteout.vision.projection` under "Grid North,
+    true North, and what ``convergence_deg`` does and does not reach"; the
+    half of it that belongs here is that **what this function returns is
+    built, not received**. It comes from two lat/lon pairs through
+    :func:`geodetic_to_local`, and the angle is taken at the origin of its own
+    frame, where the tangent plane's North is true North exactly — so there is
+    no convergence of any kind left in the answer, whatever the arena's own
+    conventions are. ``whiteout/tracks/maintain.py``, which takes a course
+    about the earlier of the two fixes it runs between, needs nothing more
+    than that.
+
+    **``whiteout/transport/arena.py`` is the one caller that needs more**, and
+    it is not settled. It turns this bearing into a tower's pan, so the answer
+    is only as good as the tower's own yaw reference — and whether ArduPilot
+    hands out a true-North or a grid-North yaw in this arena is the open
+    question that section ends on. If it turned out to be grid North, this
+    function would still be right and that *caller* would need the rotation.
     """
     offset = geodetic_to_local(origin, point)
     return math.degrees(math.atan2(offset.east_m, offset.north_m)) % 360.0

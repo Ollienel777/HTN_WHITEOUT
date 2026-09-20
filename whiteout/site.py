@@ -16,10 +16,10 @@ The fixture, and why the fetch is not in the product
 -----------------------------------------------------
 
 ``whiteout/data/site.json`` is the record. :func:`load_site` reads it and
-never opens a socket; ``scripts/arena_site.py`` is the only thing that talks
-to the arena, it refuses to run without an endpoint named on the command line,
-and it overwrites the record only when asked with ``--write``. That split is
-the whole design, and it has two reasons:
+never opens a socket; ``scripts/arena_site.py`` is what talks to the arena, it
+refuses to run without an endpoint named on the command line, and it
+overwrites the record only when asked with ``--write``. That split is the
+whole design, and it has two reasons:
 
 * **CI cannot reach the arena.** A module that fetched on import would make
   the gate depend on a WireGuard tunnel to a laptop in a venue.
@@ -91,11 +91,14 @@ gate red for a rounding. So it is not preferred, and
 What ``convergence_deg`` is for, and what it is not for
 --------------------------------------------------------
 
-It is **not** a correction to apply to anything we compute. The reasoning is
-written out in :mod:`whiteout.vision.projection`, under "Grid North, true
-North, and why ``convergence_deg`` is not a bias here", and is summarised at
-:func:`whiteout.geo.bearing_deg`; it is not repeated here, because a rule
-repeated in three places is a rule two of which go stale.
+Nothing under ``whiteout/`` applies it as a correction. ``scripts/truth_probe.py``
+does — it reads Gazebo's world coordinates, which are this grid's (#121) — and
+that distinction, along with the one heading-shaped input where the question
+is genuinely open, is written out in :mod:`whiteout.vision.projection` under
+"Grid North, true North, and what ``convergence_deg`` does and does not
+reach", and summarised at :func:`whiteout.geo.bearing_deg`. It is not repeated
+here, because a rule repeated in three places is a rule two of which go
+stale.
 
 What the value is good for is the one check this module does make. For the
 polar aspect of a stereographic projection the convergence at longitude

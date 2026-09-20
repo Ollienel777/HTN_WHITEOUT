@@ -602,6 +602,57 @@ def test_a_credential_is_redacted_in_the_fields_and_in_the_body() -> None:
     assert "MAPBOX_TOKEN=" in kept
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "pk.eyJ1IjoiZXhhbXBsZSIsImEiOiJjbGV4YW1wbGUifQ",
+        "ghp_AAAAbbbbCCCCddddEEEEffff1111",
+        "postgres://user:hunter2@db.internal:5432/arena",
+        "AKIAIOSFODNN7EXAMPLE",
+        "Aa1" + "b" * 40,
+    ],
+)
+def test_a_credential_is_caught_by_its_shape_when_the_key_name_does_not_say(value: str) -> None:
+    """The hole a key-name denylist cannot close, and the CI guard inherits.
+
+    ``SECRET_KEY_MARKERS`` is a substring list over a ``.env`` this repository
+    does not control, so ``GITHUB_PAT``, ``SENTRY_DSN`` and a ``DATABASE_URL``
+    with an inline password all slip through it -- and the guard on the
+    committed record reuses the same predicate, so whatever the denylist
+    misses the guard misses too. The value is therefore read as well as the
+    key, and either firing is enough.
+    """
+    module = _arena_site()
+    assert not module.is_secret("HARMLESS_SETTING")
+    assert module.is_secret_value(value)
+    fields, _ = module.as_fields({"HARMLESS_SETTING": value}, "{}")
+    assert fields["HARMLESS_SETTING"] == module.REDACTED
+
+
+def test_the_shape_test_leaves_every_real_site_parameter_alone() -> None:
+    """The half of that check which could misfire, run over what it must not touch.
+
+    A tight rule is only useful if it is also quiet. This runs it over every
+    field of the committed ``/api/env`` record -- a dotted registry host, a
+    comma-separated month list, a space-separated colour, the asset lines --
+    and fails if it fires on any of them.
+    """
+    module = _arena_site()
+    env = load_site_record()["records"]["env"]["response"]
+    misfired = [
+        key
+        for key, value in env.items()
+        if module.is_secret_value(value) and not module.is_secret(key)
+    ]
+    assert not misfired, f"the value-shape test fired on site parameters: {misfired}"
+
+
+def test_a_redaction_is_not_itself_read_as_a_credential() -> None:
+    """Re-running the script over its own output must be a fixed point."""
+    module = _arena_site()
+    assert not module.is_secret_value(module.REDACTED)
+
+
 def test_a_plain_json_object_is_still_taken_as_it_stands() -> None:
     module = _arena_site()
     fields, kept = module.as_fields({"SITE_LAT": CENTRE_LAT}, "{}")
