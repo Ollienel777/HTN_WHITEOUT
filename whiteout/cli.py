@@ -28,9 +28,10 @@ from whiteout.geo import ARENA_ORIGIN
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
 from whiteout.policy import AssetRole
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
-from whiteout.tracks.client import TrackPoster
+from whiteout.tracks.client import TrackPoster, TracksClient, TracksError, endpoint_from_env
 from whiteout.tracks.maintain import TrackHold
 from whiteout.transport import TransportError, create_transport, selected_transport_name
+from whiteout.transport.arena import host_from_env
 from whiteout.types import (
     BeliefDigest,
     BeliefFrame,
@@ -40,6 +41,9 @@ from whiteout.types import (
     SightingRefusal,
     Truth,
 )
+from whiteout.vision.camera import VisionError
+from whiteout.vision.motion import MotionGate
+from whiteout.vision.sightings import VisionSightings, arena_feeds
 
 #: Ordered scoring axes. The sponsor scores on exactly these four.
 AXES: tuple[str, str, str, str] = (
@@ -50,6 +54,15 @@ AXES: tuple[str, str, str, str] = (
 )
 
 _NOT_YET = "not implemented yet"
+
+#: The water plane's altitude in the datum the poses are reported in, metres
+#: (#76). The arena adapter reports MSL and ``ARENA.md``'s water plane is
+#: ``z = 0`` in the world, so zero is the number here. It is threaded from
+#: this one place into both the coordinator's negative-information update and
+#: the camera path's projection: two defaults that happened to agree would be
+#: two numbers to change, and the day they disagreed the belief and the
+#: sightings would be measuring heights above different surfaces.
+GROUND_ALT_M = 0.0
 
 
 def _resolve_seed(explicit: int | None) -> int | None:
@@ -117,7 +130,53 @@ def _coordinator_for(
     hold: TrackHold | None = None
     if poster is not None:
         hold = TrackHold(DEFAULT_TRACK_NAME, poster)
-    return Coordinator(roles, hold=hold, sightings=sightings)
+    return Coordinator(roles, hold=hold, sightings=sightings, ground_alt_m=GROUND_ALT_M)
+
+
+def _arena_camera() -> VisionSightings | None:
+    """The arena's cameras as a sighting source, or ``None`` if there are none.
+
+    Arena-only, and built here rather than inside :func:`_coordinator_for` so
+    that the run loop keeps something to open and close. The host is the
+    transport's own — :func:`~whiteout.transport.arena.host_from_env` — so the
+    cameras and the MAVLink links can never be pointed at different arenas.
+
+    **A camera that will not open does not end the run.** Each feed is drained
+    by its own thread which records a stream failure instead of raising
+    (:attr:`~whiteout.vision.sightings.CameraFeed.error`), so four assets over
+    a network degrade one at a time to "no sightings from that asset". Only a
+    :class:`~whiteout.vision.camera.VisionError` while *building* the source
+    is caught here, and it too degrades rather than aborting: an arena episode
+    is a live run that cannot be repeated, and half a fleet watching beats
+    none.
+    """
+    try:
+        feeds = arena_feeds(host_from_env())
+        if not feeds:
+            print("run: no cameras in the arena roster; running without sightings")
+            return None
+        return VisionSightings(feeds=feeds, ground_alt_m=GROUND_ALT_M)
+    except VisionError as exc:
+        print(f"run: no camera sightings ({exc}); running blind", file=sys.stderr)
+        return None
+
+
+def _arena_poster() -> TrackPoster | None:
+    """A poster for the tracks API, or ``None`` when no endpoint is configured.
+
+    ``WHITEOUT_TRACKS_ENDPOINT`` is the gate, and it is the client's own
+    (:func:`~whiteout.tracks.client.endpoint_from_env`): unset, it raises
+    rather than inventing an address, and this turns that into "do not submit"
+    rather than into a failed run. So a run posts to a live endpoint exactly
+    when that variable names one, and never by default.
+    """
+    try:
+        endpoint = endpoint_from_env()
+    except TracksError as exc:
+        print(f"run: not submitting tracks ({exc})")
+        return None
+    print(f"run: submitting held tracks to {endpoint}")
+    return TrackPoster(TracksClient(endpoint))
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -141,6 +200,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"run: {exc}", file=sys.stderr)
         return 1
     records: list[EpisodeRecord] = []
+    camera: VisionSightings | None = None
+    poster: TrackPoster | None = None
     # `connect` is inside both the `try/except` and the `try/finally`: a
     # transport that refuses to start — `SPEC.md` §7 makes that sitl's normal
     # path — must produce the diagnostic `base.TransportError` promises, and a
@@ -148,7 +209,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         try:
             transport.connect()
-            coordinator = _coordinator_for(transport)
+            if name == "arena":
+                # Arena-only, deliberately. The gate's determinism step runs
+                # the smoke episode twice on the default kinematic transport
+                # and compares bytes; a camera or a poster on that path would
+                # put a network and a wall clock inside a run that has to be
+                # reproducible, so neither is ever built for it.
+                camera = _arena_camera()
+                poster = _arena_poster()
+            sightings: SightingSource | None = None
+            if camera is not None:
+                camera.open()
+                # The gate keeps ice out of the belief (#107). It is a
+                # decorator over the source, so the loop below cannot tell it
+                # is there.
+                sightings = MotionGate(camera)
+            coordinator = _coordinator_for(transport, poster=poster, sightings=sightings)
             for _tick in range(args.ticks):
                 observation = transport.observe()
                 if coordinator is None:
@@ -186,6 +262,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
         finally:
             transport.close()
+            # Both outlive the tick loop on threads of their own, so both are
+            # brought down here: a run that failed partway must not leave four
+            # camera threads draining sockets, and the poster drains what is
+            # pending on the way out so the last held fix is not lost.
+            if camera is not None:
+                camera.close()
+            if poster is not None:
+                poster.close()
     except TransportError as exc:
         print(f"run: {exc}", file=sys.stderr)
         return 1
