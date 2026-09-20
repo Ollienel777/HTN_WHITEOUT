@@ -80,7 +80,6 @@ __all__ = [
     "DEFAULT_TRACK_NAME",
     "Coordinator",
     "NoSightings",
-    "RefusingSightingSource",
     "SightingSource",
     "TickOutcome",
 ]
@@ -100,26 +99,30 @@ DEFAULT_HOLD_ASSET = "quadcopter"
 
 
 class SightingSource(Protocol):
-    """Whatever saw the vessel this tick."""
+    """Whatever saw the vessel this tick — and whatever it would not stand behind.
 
-    def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
-        """Zero or more sightings, in the observation's timebase."""
-
-
-class RefusingSightingSource(Protocol):
-    """A source that can also say what it *declined* to turn into a sighting.
-
-    Separate from :class:`SightingSource`, and read off the object rather than
-    required of it, so that a source with nothing to refuse — :class:`NoSightings`
-    and every test double — stays a one-method protocol. ``refusals`` describes
-    the most recent ``sightings`` call.
+    **Both methods, not one.** ``refusals`` was briefly optional, discovered on
+    the object, so that a source with nothing to refuse could stay a single
+    method. That is the shape in which a *decorator* — the motion gate, which
+    wraps a source and is deliberately invisible to this loop — silently
+    swallows every refusal the source made, and the episode log goes back to
+    showing a dark camera as an empty sea. Nothing fails; the log is just
+    quietly empty again, which is the failure this whole seam exists to end.
+    So the contract asks for both, every source in ``whiteout/`` answers both,
+    and ``tests/test_coordinate.py`` fails the gate if one stops.
     """
 
     def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
         """Zero or more sightings, in the observation's timebase."""
 
     def refusals(self) -> tuple[SightingRefusal, ...]:
-        """What the last ``sightings`` call dropped, and why."""
+        """What the last ``sightings`` call dropped, and why.
+
+        Empty is the normal answer, and is what a source with nothing to
+        refuse returns for ever. A source that *wraps* another forwards the
+        inner source's refusals; swallowing them makes a camera's silence
+        unreadable.
+        """
 
 
 class NoSightings:
@@ -131,6 +134,10 @@ class NoSightings:
     """
 
     def sightings(self, observation: WorldObservation) -> tuple[Sighting, ...]:
+        return ()
+
+    def refusals(self) -> tuple[SightingRefusal, ...]:
+        """Nothing was refused, because nothing was looked at."""
         return ()
 
 
@@ -256,12 +263,14 @@ class Coordinator:
         )
 
     def _refusals(self) -> tuple[SightingRefusal, ...]:
-        """What the source declined this tick, from a source that can say.
+        """What the source declined this tick.
 
-        Asked of the object rather than of the protocol, the way
-        ``whiteout.cli`` asks a transport for its roster: a source that cannot
-        refuse has nothing to report, and requiring the method would break
-        every one-method source for the sake of an empty tuple.
+        :class:`SightingSource` asks every source for this, and the shipped
+        ones are held to it by a test. The ``getattr`` is tolerance for a
+        hand-written double in somebody's test that predates the method, not a
+        second contract: a source in ``whiteout/`` that quietly lost
+        ``refusals`` would take the episode log's only record of a dark camera
+        with it, so that case is caught at the gate rather than absorbed here.
         """
         refusals = getattr(self._sightings, "refusals", None)
         if not callable(refusals):

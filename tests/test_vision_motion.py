@@ -11,7 +11,7 @@ import pytest
 
 from whiteout.geo import GeoPoint, LocalPoint, local_to_geodetic
 from whiteout.tracks.maintain import Sighting
-from whiteout.types import WorldObservation
+from whiteout.types import PoseSync, SightingRefusal, WorldObservation
 from whiteout.vision.motion import DEFAULT_MOTION_PARAMS, MotionGate, MotionParams
 
 ORIGIN = GeoPoint(71.9900, -94.8400)
@@ -208,3 +208,34 @@ def test_a_nonsense_band_is_refused() -> None:
         MotionParams(min_speed_mps=9.0, max_speed_mps=1.0)
     with pytest.raises(ValueError):
         MotionParams(min_span_s=0.0)
+
+
+# -- the gate is transparent, including about what it did not see -------------
+
+
+def test_the_gate_passes_on_what_its_source_refused() -> None:
+    """ "The run loop does not know it is there" has to include refusals.
+
+    The camera path is headed for `MotionGate(VisionSightings(...))`. A gate
+    that answered only `sightings` would swallow every
+    `SightingRefusal` the source made, so `EpisodeRecord.refusals` would be
+    empty for the whole run and a camera dark for a reason we know would read
+    as an empty sea — with nothing failing anywhere to say so.
+    """
+    refusal = SightingRefusal(
+        asset_id="fixed-wing", t=1.0, sync=PoseSync(status="telemetry_stale", skew_s=0.4)
+    )
+
+    class _Refusing(_Scripted):
+        def refusals(self) -> tuple[SightingRefusal, ...]:
+            return (refusal,)
+
+    gate = MotionGate(source=_Refusing({}))
+    assert gate.sightings(_observation(1.0)) == ()
+    assert gate.refusals() == (refusal,)
+
+
+def test_a_source_that_cannot_refuse_leaves_the_gate_quiet() -> None:
+    """`Sightable` is one method on purpose: the gate wraps anything."""
+    gate = MotionGate(source=_Scripted({}))
+    assert gate.refusals() == ()
