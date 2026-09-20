@@ -1,6 +1,7 @@
 """The water of Bellot Strait, as a centreline and a half-width.
 
-``hackathon/ARENA.md`` §2: the arena is **25 km long and 2 km wide**, a narrow
+``hackathon/ARENA.md`` §2, corrected by ``/api/env`` (#98): the arena is a
+**6.5 km square**, and the water in it is a narrow
 water channel flanked by rocky shores, and the target is a boat. So the
 searchable set is not an area with a hole in it — it is a *ribbon*, and this
 module is the ribbon.
@@ -86,7 +87,7 @@ drops straight in.
 **The one constraint on a polyline** is that its bends must be gentle relative
 to its half-width: ``(s, w)`` stops being one-to-one once the half-width
 exceeds the radius of curvature, because the inside of a tight bend folds over
-itself. The default turns about 3.6° over 25 km, so its radius of curvature is
+itself. The default turns about 1.0° over 6.25 km, so its radius of curvature is
 hundreds of kilometres against a half-width of one, and the fold is nowhere
 near.
 """
@@ -99,6 +100,9 @@ from dataclasses import dataclass, field
 from whiteout.geo import ARENA_ORIGIN, GeoPoint, LocalPoint, geodetic_to_local, local_to_geodetic
 
 __all__ = [
+    "SITE_CENTRE_LAT",
+    "SITE_CENTRE_LON",
+    "SITE_EXTENT_M",
     "DEFAULT_STRAIT",
     "ChannelPoint",
     "ChannelVertex",
@@ -307,17 +311,57 @@ class StraitGeometry:
 #: the arena's extent, ``|w|`` = 1000 m, is pulled 550 m.
 #:
 #: Clicking the real shoreline off the sim (``ARENA.md`` §3) stays the right
-#: way to replace these four vertices, and every function takes any polyline.
+#: way to replace these vertices, and every function takes any polyline.
 #:
 #: The taper is *not* here to make the shoreline bite in the tests, whatever
 #: an earlier version of this comment said: every shoreline test builds its
 #: own ``choked_channel()`` with a matched control, and only
 #: ``test_the_default_mask_has_land_in_it`` touches this geometry's mask.
+#:
+#: **Fitted to the rendered site, not to the deck (#98).** An earlier version
+#: ran 25.1 km, from ``ARENA.md`` §2's "25 km long and 2 km wide". That figure
+#: is the deck's slide 7, which labels 2 km, 25 km *and* "actual sim render" —
+#: 25 km is the Northwest Passage context and the render is the small box.
+#: ``GET :8090/api/env`` is the authority and says ``SITE_EXTENT=6500``, which
+#: ``assets/terrain_fort_ross/model.sdf`` confirms as ``<size>6500 6500
+#: 252.109</size>``. Measured before the correction: **only 26 of 101 search
+#: segments and 0.208 of the belief mass lay inside the world**, so four
+#: fifths of the field sat on water the vessel provably cannot be in, and the
+#: search policy issued waypoints outside the arena.
+#:
+#: **Known imprecise, and stated rather than hidden.** The centreline is the
+#: arc of the old hand-fitted polyline that falls inside the site — trimmed
+#: 100 m at each end, because the ribbon's *corners* reached 3255 m and the
+#: site's half-extent is 3250 — so its
+#: *shape* is inherited and unverified. Against 39 samples of the vessel's own
+#: track taken off the sim — and the vessel follows a widest-path route that
+#: hugs mid-channel, so its track is an empirical sample of the channel centre
+#: — the observed positions sit at ``w`` = +408 to +533 m, inside the ribbon
+#: but roughly 470 m north of this centreline. The ribbon therefore *contains*
+#: the vessel, which is what belief support requires, but the centreline is
+#: not yet the channel's. Fitting it properly wants the heightmap
+#: (``assets/terrain_fort_ross/materials/textures/heightmap.png``, which the
+#: arena serves) and the distance-to-shore field ``terrain/course.py`` builds
+#: from it; that is a follow-up and it must be done per site, because
+#: ``competition.lock`` pins three.
+#: The rendered site's centre, from ``GET :8090/api/env`` (``SITE_LAT`` and
+#: ``SITE_LON``). Everything the arena simulates is within
+#: :data:`SITE_EXTENT_M` / 2 of it, in both east and north.
+SITE_CENTRE_LAT = 71.991960
+SITE_CENTRE_LON = -94.822428
+
+#: The rendered site's extent, metres, from ``SITE_EXTENT``. A square, and the
+#: whole of the world: there is no terrain, no water and no vessel outside it.
+SITE_EXTENT_M = 6500.0
+
 DEFAULT_STRAIT = StraitGeometry(
     vertices=(
-        ChannelVertex(lat_deg=71.9860, lon_deg=-95.2023, half_width_m=1000.0),
-        ChannelVertex(lat_deg=71.9930, lon_deg=-95.0000, half_width_m=900.0),
-        ChannelVertex(lat_deg=71.9975, lon_deg=-94.7400, half_width_m=520.0),
-        ChannelVertex(lat_deg=72.0000, lon_deg=-94.4777, half_width_m=1000.0),
+        ChannelVertex(lat_deg=71.994513, lon_deg=-94.912586, half_width_m=772.0),
+        ChannelVertex(lat_deg=71.995034, lon_deg=-94.882459, half_width_m=728.0),
+        ChannelVertex(lat_deg=71.995556, lon_deg=-94.852333, half_width_m=684.0),
+        ChannelVertex(lat_deg=71.996077, lon_deg=-94.822207, half_width_m=640.0),
+        ChannelVertex(lat_deg=71.996599, lon_deg=-94.792081, half_width_m=596.0),
+        ChannelVertex(lat_deg=71.997120, lon_deg=-94.761955, half_width_m=552.0),
+        ChannelVertex(lat_deg=71.997578, lon_deg=-94.731819, half_width_m=535.0),
     )
 )

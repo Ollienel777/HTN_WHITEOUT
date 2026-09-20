@@ -71,10 +71,10 @@ def _observation(t: float, at: dict[str, float]) -> WorldObservation:
 
 def _fleet_at(**kwargs: float) -> dict[str, float]:
     return {
-        "quadcopter": kwargs.get("quad", 12_000.0),
-        "fixed-wing": kwargs.get("plane", 12_000.0),
-        "tower-1": kwargs.get("tower1", 6_000.0),
-        "tower-2": kwargs.get("tower2", 19_000.0),
+        "quadcopter": kwargs.get("quad", 3_000.0),
+        "fixed-wing": kwargs.get("plane", 3_000.0),
+        "tower-1": kwargs.get("tower1", 1_500.0),
+        "tower-2": kwargs.get("tower2", 4_750.0),
     }
 
 
@@ -94,19 +94,19 @@ def test_the_channel_is_cut_into_segments_along_its_length(policy: SearchPolicy)
 
 
 def test_every_asset_that_reported_gets_an_intent(policy: SearchPolicy) -> None:
-    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(12_000.0))
+    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(3_000.0))
     assert {i.asset_id for i in intent.intents} == {r.asset_id for r in FLEET}
 
 
 def test_an_asset_that_did_not_report_is_not_guessed_at(policy: SearchPolicy) -> None:
     """Silence is not a position."""
     observation = _observation(0.0, {"quadcopter": 12_000.0, "tower-1": 6_000.0})
-    intent = policy.decide(observation, _Belief(12_000.0))
+    intent = policy.decide(observation, _Belief(3_000.0))
     assert {i.asset_id for i in intent.intents} == {"quadcopter", "tower-1"}
 
 
 def test_two_assets_are_never_sent_to_the_same_segment(policy: SearchPolicy) -> None:
-    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(12_000.0))
+    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(3_000.0))
     targets = [(i.target_lat, i.target_lon) for i in intent.intents]
     assert len(set(targets)) == len(targets)
 
@@ -114,7 +114,7 @@ def test_two_assets_are_never_sent_to_the_same_segment(policy: SearchPolicy) -> 
 def test_towers_are_aimed_at_ground_level_and_aircraft_are_sent_up(
     policy: SearchPolicy,
 ) -> None:
-    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(12_000.0))
+    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(3_000.0))
     by_id = {i.asset_id: i for i in intent.intents}
     assert by_id["tower-1"].target_z == 0.0
     assert by_id["tower-1"].reason == "watch"
@@ -129,7 +129,7 @@ def test_belief_is_sampled_through_the_protocol_and_nothing_else(
     policy: SearchPolicy,
 ) -> None:
     """A policy that knew how belief was stored would be rewritten when it changes."""
-    belief = _Belief(12_000.0)
+    belief = _Belief(3_000.0)
     policy.decide(_observation(0.0, _fleet_at()), belief)
     assert belief.queries == len(policy.segments)
 
@@ -137,10 +137,10 @@ def test_belief_is_sampled_through_the_protocol_and_nothing_else(
 def test_the_same_inputs_give_the_same_intent() -> None:
     """Determinism is a hard rule (SPEC.md §5): no clock, no generator."""
     first = SearchPolicy(FLEET, DEFAULT_STRAIT).decide(
-        _observation(0.0, _fleet_at()), _Belief(12_000.0)
+        _observation(0.0, _fleet_at()), _Belief(3_000.0)
     )
     second = SearchPolicy(FLEET, DEFAULT_STRAIT).decide(
-        _observation(0.0, _fleet_at()), _Belief(12_000.0)
+        _observation(0.0, _fleet_at()), _Belief(3_000.0)
     )
     assert first == second
 
@@ -164,9 +164,9 @@ def test_one_asset_works_more_than_one_segment_over_time(policy: SearchPolicy) -
     parked. A static asset never arrives, so nothing is ever marked as looked
     at and staleness never decays — which tests the fixture, not the policy.
     """
-    belief = _Belief(12_000.0)
+    belief = _Belief(3_000.0)
     worked: list[int] = []
-    quad_s = 12_000.0
+    quad_s = 3_000.0
     for tick in range(60):
         policy.decide(_observation(tick * 10.0, _fleet_at(quad=quad_s)), belief)
         index = policy.assignment_of("quadcopter")
@@ -182,7 +182,7 @@ def test_one_asset_works_more_than_one_segment_over_time(policy: SearchPolicy) -
 
 
 def test_a_segment_just_looked_at_loses_its_value(policy: SearchPolicy) -> None:
-    belief = _Belief(12_000.0)
+    belief = _Belief(3_000.0)
     policy.decide(_observation(0.0, _fleet_at()), belief)
     first = policy.assignment_of("quadcopter")
     # Park the quadcopter on it long enough for staleness to bottom out.
@@ -210,8 +210,8 @@ def test_hysteresis_holds_an_asset_through_a_marginal_change() -> None:
         # triangle wave rather than a sine: tests/test_geo.py reserves
         # trigonometry for whiteout/geo.py, and the shape is irrelevant here —
         # what matters is that the ranking of nearby segments keeps changing.
-        wander = 400.0 * (abs((tick % 8) - 4) / 4.0 - 0.5)
-        belief = _Belief(12_000.0 + wander)
+        wander = 150.0 * (abs((tick % 8) - 4) / 4.0 - 0.5)
+        belief = _Belief(3_000.0 + wander)
         observation = _observation(t, _fleet_at())
         sticky.decide(observation, belief)
         jumpy.decide(observation, belief)
@@ -223,7 +223,7 @@ def test_hysteresis_holds_an_asset_through_a_marginal_change() -> None:
 def test_retasks_are_counted_so_a_run_can_show_the_number(policy: SearchPolicy) -> None:
     assert policy.retasks == 0
     for tick in range(6):
-        policy.decide(_observation(tick * 30.0, _fleet_at()), _Belief(12_000.0))
+        policy.decide(_observation(tick * 30.0, _fleet_at()), _Belief(3_000.0))
     assert policy.retasks >= 0
 
 
@@ -236,10 +236,10 @@ def test_a_held_contact_pulls_the_quadcopter_and_only_it(policy: SearchPolicy) -
     Pulling the fixed-wing onto it as well abandons the search for no gain: it
     cannot loiter over the vessel anyway.
     """
-    lat, lon = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=9_000.0, w_m=0.0))
+    lat, lon = DEFAULT_STRAIT.to_position(ChannelPoint(s_m=2_250.0, w_m=0.0))
     intent = policy.decide(
         _observation(0.0, _fleet_at()),
-        _Belief(12_000.0),
+        _Belief(3_000.0),
         held_lat_deg=lat,
         held_lon_deg=lon,
     )
@@ -253,23 +253,23 @@ def test_a_tower_is_never_sent_beyond_its_reach() -> None:
     """Past its camera's range there is no trade-off, only a direction."""
     near = SearchParams(tower_reach_m=1500.0)
     policy = SearchPolicy(FLEET, DEFAULT_STRAIT, near)
-    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(12_000.0))
+    intent = policy.decide(_observation(0.0, _fleet_at()), _Belief(3_000.0))
     by_id = {i.asset_id: i for i in intent.intents}
-    for tower, where in (("tower-1", 6_000.0), ("tower-2", 19_000.0)):
+    for tower, where in (("tower-1", 1_500.0), ("tower-2", 4_750.0)):
         if tower not in by_id:
             continue
         index = policy.assignment_of(tower)
         assert index is not None
-        assert abs(policy.segments[index].s_m - where) <= 2500.0
+        assert abs(policy.segments[index].s_m - where) <= 1800.0
 
 
 def test_the_sweep_asset_is_not_handed_work_under_its_nose() -> None:
     """The fixed-wing cannot loiter, so it overflies a segment it is tasked to."""
-    policy = SearchPolicy(FLEET, DEFAULT_STRAIT, SearchParams(plane_min_reach_m=3000.0))
-    policy.decide(_observation(0.0, _fleet_at(plane=12_000.0)), _Belief(12_000.0))
+    policy = SearchPolicy(FLEET, DEFAULT_STRAIT, SearchParams(plane_min_reach_m=1000.0))
+    policy.decide(_observation(0.0, _fleet_at(plane=3_000.0)), _Belief(3_000.0))
     index = policy.assignment_of("fixed-wing")
     assert index is not None
-    assert abs(policy.segments[index].s_m - 12_000.0) >= 2000.0
+    assert abs(policy.segments[index].s_m - 3_000.0) >= 900.0
 
 
 # -- parameters --------------------------------------------------------------
