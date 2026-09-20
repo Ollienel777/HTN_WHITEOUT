@@ -136,6 +136,7 @@ class CameraFeed:
         self._thread: threading.Thread | None = None
         self._frames = 0
         self._error: str | None = None
+        self._ended = False
 
     @property
     def asset_id(self) -> str:
@@ -155,9 +156,28 @@ class CameraFeed:
         A stream that dies is recorded rather than raised: one camera failing
         must not take the fleet down, so the run continues with three sensors
         and this says which one it lost.
+
+        ``None`` does **not** mean the feed is healthy — a stream that ended
+        cleanly sets no error. :attr:`draining` is the question to ask.
         """
         with self._lock:
             return self._error
+
+    @property
+    def draining(self) -> bool:
+        """Whether the thread is still pulling frames off the stream.
+
+        ``False`` before :meth:`open` and once the drain has stopped, for any
+        reason: a stream error, a clean end of stream, or :meth:`close`.
+
+        This exists because :meth:`latest` keeps returning the last frame it
+        got for ever. That is the right behaviour for a feed that is merely
+        between frames, and the wrong one for a feed that is never getting
+        another — see :meth:`VisionSightings.sightings`, which is the only
+        production reader of a frame and which asks this first.
+        """
+        with self._lock:
+            return self._thread is not None and not self._ended
 
     def open(self) -> None:
         """Start draining the stream."""
@@ -180,6 +200,13 @@ class CameraFeed:
         except (VisionError, OSError) as error:
             with self._lock:
                 self._error = str(error)
+        finally:
+            # In a `finally`, because a stream can also end *cleanly* — an
+            # MJPEG server that closes the connection raises nothing, and a
+            # feed that stopped for a boring reason is as blind as one that
+            # stopped for an interesting one. `error` alone would miss it.
+            with self._lock:
+                self._ended = True
 
     def latest(self) -> LumaFrame | None:
         """The newest frame, or ``None`` if none has arrived. Never blocks."""
@@ -276,11 +303,22 @@ class VisionSightings:
         refused: list[SightingRefusal] = []
         for feed in self.feeds:
             pose = poses.get(feed.asset_id)
-            frame = feed.latest()
+            frame = feed.latest() if feed.draining else None
             if pose is None or frame is None:
                 # Not a refusal. An asset with no pose and a camera with no
                 # frame yet are absences of input, not fixes thrown away, and
                 # counting them would bury the ones that were.
+                #
+                # `draining` is checked before the frame is taken, because a
+                # feed keeps its last frame for ever after its stream dies and
+                # `_sight` re-projects whatever it is handed through the pose
+                # of *this* tick. A dead camera would therefore not go quiet:
+                # it would report the same pixels from a moving airframe every
+                # tick, which is a fix that walks across the water at the
+                # asset's own speed. `MotionGate` reads that as a plausible
+                # vessel, `TrackHold` then defends it against the real one,
+                # and on a judged run it is what gets POSTed. A camera that
+                # has stopped has to stop being a sensor.
                 continue
             sighting = self._sight(feed.asset_id, pose, frame, observation.t)
             if sighting is not None:

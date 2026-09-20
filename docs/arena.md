@@ -84,7 +84,8 @@ socket, so a stale record is a silently wrong convergence angle.
 **3. The fleet answers.** The cheapest honest check is a short dry run — it
 opens every link and every camera feed, waits for a heartbeat from each asset,
 and sends nothing: no waypoint to an aircraft, and no track to the judged
-endpoint even when `WHITEOUT_TRACKS_ENDPOINT` is still exported from §4:
+endpoint even when `WHITEOUT_TRACKS_ENDPOINT` is still exported from step 4
+below:
 
 ```sh
 WHITEOUT_TRANSPORT=arena WHITEOUT_ARENA_ENDPOINT=10.99.4.1 \
@@ -129,8 +130,8 @@ writes the episode log.
 
 ### What that command does not do yet
 
-Read this before the judged run, because each line is a human action that
-nothing in `whiteout run` performs:
+One thing, and it is a human action that nothing in `whiteout run` performs.
+Read it before the judged run:
 
 - **It does not arm or launch anything.** `ArenaTransport.arm_and_launch`
   exists and pipelines the arm and the takeoff (the arm holds about three
@@ -143,23 +144,26 @@ nothing in `whiteout run` performs:
   # without the arena
   transport.arm_and_launch("quadcopter", altitude_m=60.0)
   transport.arm_and_launch("fixed-wing")
-  transport.scan("tower-1")     # a tower is never armed: arm_and_launch
-  transport.scan("tower-2")     # refuses one, and `scan` is its fallback mode
+  transport.scan("tower-1")  # a tower is never armed: arm_and_launch
+  transport.scan("tower-2")  # refuses one, and `scan` is its fallback mode
   ```
 
-- **It posts nothing to the tracks API.** `cmd_run` builds its coordinator with
-  no `TrackPoster`, so the hold that decides what to post is never created. The
-  client, the hold and the stub server are all tested and merged; the wire from
-  the run to them is missing. **A judged run made with this command scores
-  nothing**, whatever the log says.
+**It does open the cameras and post the track** (#132). On the arena
+transport, and only there, the run builds `MotionGate(VisionSightings(...))`
+over the roster's camera feeds and a `TrackPoster` for
+`WHITEOUT_TRACKS_ENDPOINT`, opens the feeds before the loop and closes them
+after it. So the two bullets that used to sit here — "it posts nothing", "it
+runs no vision" — are gone, and a run with the transport and the endpoint both
+set does score. What is still a human action is the one above.
 
-- **It runs no vision.** No `SightingSource` is passed either, so the fleet
-  searches and the belief ages, but nothing ever sees the vessel. The camera
-  path (`VisionSightings`, `MotionGate`) is built and tested; it is not wired.
+Two things to read:
 
-Those three are one wiring ticket, and it is the only thing between this
-repository and a scored run. If you are reading this runbook to prepare the
-judged run, that wiring is the work — not the arena.
+- On stderr, on the way out: **`N of M cameras delivered frames`**, and a line
+  naming any camera that stopped and why. Without it "no contacts" has four
+  indistinguishable causes, and only one of them is "no vessel".
+- On stdout, at the start: **`run: submitting held tracks to …`**, or
+  `not submitting tracks`. If you meant a judged run and see the second, the
+  endpoint is unset and nothing you do later in the run will score.
 
 ### While it runs
 
