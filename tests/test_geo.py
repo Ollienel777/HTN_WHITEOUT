@@ -298,6 +298,14 @@ _TRIGONOMETRY = frozenset(
 #: something the product depends on. That distinction is the one worth keeping
 #: as this list grows -- an entry for a tool is cheap, an entry for a module
 #: the product ships is a standing invitation.
+#:
+#: #25 adds ``whiteout/sim.py``, the offline world. Its trigonometry is the
+#: same kind ``projection.py``'s is: a bearing from an East-North offset, the
+#: half-angle of a camera's cone, a heading turned into a direction. **Every
+#: position it produces or consumes goes through** ``whiteout.geo`` --
+#: ``geodetic_to_local`` in, ``local_to_geodetic`` out -- so there is no frame
+#: conversion here for a second converter to be, and the two guards above walk
+#: it and pass. It is on this list rather than exempt from those.
 _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
     {
         "whiteout/vision/camera.py",
@@ -305,6 +313,7 @@ _TRIGONOMETRY_ALLOWED: frozenset[str] = frozenset(
         "whiteout/vision/scene.py",
         "tests/test_vision_projection.py",
         "scripts/jpeg_quantisation.py",
+        "whiteout/sim.py",
     }
 )
 

@@ -22,12 +22,15 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
-from whiteout.geo import ARENA_ORIGIN
+from whiteout.episode import DEFAULT_TRACK_NAME, run_episode
 from whiteout.log import SCHEMA_VERSION, EpisodeLogError, write_episode_log
 from whiteout.serve import ServeError, open_viewer_server, resolve_port, viewer_url
+from whiteout.sim import SimTransport
+from whiteout.tracks import TrackFix, TrackHold, TrackPoster, TracksClient, TracksError
 from whiteout.transport import TransportError, create_transport, selected_transport_name
-from whiteout.types import BeliefDigest, EpisodeRecord, FleetIntent, Truth
+from whiteout.types import EpisodeRecord
 
 #: Ordered scoring axes. The sponsor scores on exactly these four.
 AXES: tuple[str, str, str, str] = (
@@ -61,33 +64,15 @@ def _resolve_seed(explicit: int | None) -> int | None:
         return None
 
 
-def _placeholder_digest(t: float) -> BeliefDigest:
-    """A belief digest for a build with no belief field yet.
-
-    Every field is finite, and zero-valued apart from the peak, over a 1×1
-    grid, so the record validates and the viewer has something to parse. The
-    belief ticket replaces this; nothing may read these numbers as meaning
-    anything.
-
-    The peak is :data:`~whiteout.geo.ARENA_ORIGIN` rather than ``(0, 0)``: the
-    frame of record is lat/lon (``SPEC.md`` §5), where ``(0, 0)`` is a real
-    place in the Gulf of Guinea and reads as a plausible datum rather than as
-    the placeholder it is.
-    """
-    return BeliefDigest(
-        t=t,
-        entropy=0.0,
-        mass=0.0,
-        peak_lat=ARENA_ORIGIN.lat_deg,
-        peak_lon=ARENA_ORIGIN.lon_deg,
-        peak_p=0.0,
-        covered_fraction=0.0,
-        grid_shape=(1, 1),
-    )
-
-
 def cmd_run(args: argparse.Namespace) -> int:
-    """Drive the selected transport for ``--ticks`` ticks and write its log."""
+    """Run one episode end to end and write its log.
+
+    Observe, believe, decide, track, record — :mod:`whiteout.episode` owns the
+    order and this owns the wiring: which transport, which roles, and whether
+    anything is posted to the tracks API. Posting is **off unless an endpoint
+    is given**, because the gate runs this command twice on every commit and
+    must never open a socket (``SPEC.md`` §6).
+    """
     seed = _resolve_seed(args.seed)
     if seed is None:
         raw = os.environ.get("WHITEOUT_SEED")
@@ -102,11 +87,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     try:
         name = selected_transport_name()
-        transport = create_transport(name, seed=seed, pose_age_seconds=args.pose_age)
+        transport = _build_transport(name, seed=seed, pose_age_seconds=args.pose_age)
     except TransportError as exc:
         print(f"run: {exc}", file=sys.stderr)
         return 1
+
+    try:
+        poster, closing = _open_poster(args.tracks_endpoint)
+    except TracksError as exc:
+        print(f"run: {exc}", file=sys.stderr)
+        return 1
+
     records: list[EpisodeRecord] = []
+    runner = None
     # `connect` is inside both the `try/except` and the `try/finally`: a
     # transport that refuses to start — `SPEC.md` §7 makes that sitl's normal
     # path — must produce the diagnostic `base.TransportError` promises, and a
@@ -114,26 +107,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         try:
             transport.connect()
-            for _tick in range(args.ticks):
-                observation = transport.observe()
-                intent = FleetIntent(t=observation.t, intents=())
-                transport.command(intent)
-                records.append(
-                    EpisodeRecord(
-                        schema_version=SCHEMA_VERSION,
-                        t=observation.t,
-                        observation=observation,
-                        intent=intent,
-                        belief_digest=_placeholder_digest(observation.t),
-                        contacts=(),
-                        truth=Truth(t=observation.t, targets=()),
-                    )
-                )
+            hold = TrackHold(args.track_name, poster)
+            records, runner = run_episode(
+                transport,
+                ticks=args.ticks,
+                hold=hold,
+                schema_version=SCHEMA_VERSION,
+            )
         finally:
             transport.close()
+            if closing is not None:
+                closing.close()
     except TransportError as exc:
         print(f"run: {exc}", file=sys.stderr)
         return 1
+
     out = Path(args.out)
     try:
         written = write_episode_log(out, records)
@@ -141,7 +129,59 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"run: {exc}", file=sys.stderr)
         return 1
     print(f"run: wrote {written} records to {out} (transport={name})")
+    if runner is not None:
+        first = runner.first_detection_t
+        seen = "never" if first is None else f"t={first:.1f}s"
+        print(
+            f"run: {runner.detections} detections, first {seen}; "
+            f"track {hold.state} after {hold.posts} posts"
+        )
     return 0
+
+
+def _build_transport(name: str, *, seed: int, pose_age_seconds: float | None) -> Any:
+    """The far side of the seam for this run.
+
+    ``kinematic`` — ``SPEC.md`` §7's fake, and the default — is served by
+    :class:`whiteout.sim.SimTransport`: a channel with a vessel in it and a
+    fleet that flies the waypoints it is given, which is what an episode needs
+    to be an episode. It is built **here**, in the composition root, rather
+    than by :func:`~whiteout.transport.create_transport`, because the transport
+    package is guarded against importing :mod:`whiteout.sim` at all
+    (``tests/test_transport.py``) — an adapter to a real vehicle must not know
+    what a simulated one would do. Every other name goes to the registry,
+    which is the one place that turns the environment variable into an object.
+    """
+    if name == "kinematic":
+        return SimTransport(seed=seed, pose_age_seconds=pose_age_seconds)
+    return create_transport(name, seed=seed, pose_age_seconds=pose_age_seconds)
+
+
+class _NullPoster:
+    """A poster that accepts fixes and sends nothing, for a run with no endpoint.
+
+    The alternative is threading an optional through
+    :class:`~whiteout.tracks.TrackHold`, which would put "are we posting?" into
+    the one class whose job is deciding *what* to post. A hold with this behind
+    it still counts its posts, so an offline run reports the same numbers a
+    live one would.
+    """
+
+    def submit(self, fix: TrackFix) -> None:
+        """Accept and drop."""
+
+
+def _open_poster(endpoint: str | None) -> tuple[Any, Any]:
+    """The thing fixes go to, and the thing that has to be closed afterwards.
+
+    ``None`` for the endpoint means an offline run: nothing opens, nothing is
+    sent, and the second element is ``None`` so the caller's ``finally`` has
+    nothing to do.
+    """
+    if endpoint is None:
+        return _NullPoster(), None
+    poster = TrackPoster(TracksClient(endpoint))
+    return poster, poster
 
 
 def cmd_score(args: argparse.Namespace) -> int:
@@ -219,6 +259,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, default=None)
     run.add_argument("--ticks", type=int, default=400)
     run.add_argument("--out", default="artifacts/episode.jsonl")
+    run.add_argument(
+        "--tracks-endpoint",
+        default=None,
+        help=(
+            "post the episode's track to this tracks API base URL. Omitted, the run "
+            "is entirely offline and opens no socket, which is what the gate needs"
+        ),
+    )
+    run.add_argument(
+        "--track-name",
+        default=DEFAULT_TRACK_NAME,
+        help="the name this episode reports its one track under",
+    )
     run.add_argument(
         "--pose-age",
         type=float,

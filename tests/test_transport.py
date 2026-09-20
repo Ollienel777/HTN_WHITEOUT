@@ -918,7 +918,11 @@ def test_the_cli_diagnoses_a_transport_fault_and_still_closes(
     import whiteout.cli as cli
 
     refusing = _RefusingTransport(fail_at)
-    monkeypatch.setattr(cli, "create_transport", lambda *a, **k: refusing)
+    # The composition root, not the registry: `kinematic` is served by
+    # `whiteout.sim.SimTransport`, which `cli` builds itself because the
+    # transport package may not import the sim at all (the no-leak guards
+    # above). `_build_transport` is the one place every name goes through.
+    monkeypatch.setattr(cli, "_build_transport", lambda *a, **k: refusing)
     out = tmp_path / "episode.jsonl"
     assert cli.main(["run", "--ticks", "3", "--out", str(out)]) == 1
     stderr = capsys.readouterr().err

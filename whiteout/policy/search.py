@@ -168,6 +168,25 @@ class SearchPolicy:
         """The channel, cut into the intervals this policy reasons about."""
         return self._segments
 
+    def covered_fraction(self, now: float) -> float:
+        """Share of the channel looked at recently enough to still count.
+
+        A segment counts when its staleness is below one, which is
+        :attr:`SearchParams.stale_horizon_s` after it was last seen. Coverage
+        that decays rather than accumulates is the honest version for a moving
+        target: water swept ten minutes ago is not water you currently know
+        about, and a monotonically rising number would read as progress while
+        the vessel walked back through the part that was cleared first.
+        """
+        if not self._segments:
+            return 0.0
+        horizon = self._params.stale_horizon_s
+        fresh = sum(
+            1.0 - self._coverage.staleness(segment.index, now, horizon)
+            for segment in self._segments
+        )
+        return fresh / float(len(self._segments))
+
     @property
     def retasks(self) -> int:
         """How many times an asset has been moved off a target it had.
