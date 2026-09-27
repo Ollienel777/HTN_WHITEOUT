@@ -326,13 +326,25 @@ def main(argv: list[str] | None = None) -> int:
     best_label, best_roster, best_share = max(scored, key=lambda row: row[2])
     print(f"\nBest of the three: {best_label.rstrip(':')} at {best_share:.1%}\n")
 
-    print(
-        "The heights are the ones the towers have where they stand now. There"
-        "\nis no terrain model here, so read the ground elevation at any"
-        "\nproposed point off gzweb and re-score it with --at before trusting a"
-        "\nrow: reach scales with height, and a site at sea level is worth far"
-        "\nless than this says.\n"
-    )
+    if terrain is None:
+        print(
+            'Ground elevation is ASSUMED, not measured: these are the '
+            'heights the towers have where they stand now.'
+        )
+        print(
+            'Reach scales with height, and a site at sea level scores '
+            'nothing at all - the detector refuses a camera that is not '
+            'above the water plane.'
+        )
+        print(
+            'Both recommendations this script once printed put a tower at '
+            '0.0 m (#136). Pass --heightmap to measure instead.'
+        )
+        print()
+    else:
+        print('Ground elevation measured from the heightmap (#136).')
+        print()
+")
     if best_roster is AS_SITED:
         print("  Nothing to change: the current siting already wins.")
         return 0
