@@ -519,7 +519,7 @@ def test_backlog_draft_is_deleted() -> None:
     """The criterion is deletion from the repository, so ask the index.
 
     Checking the working tree instead would turn this red for an untracked
-    local copy -- and `docs/build/PLAN.md` describes a planning lap that
+    local copy -- and the harness's hackathon pack describes a planning lap that
     recreates the file -- which has nothing to do with issue #4.
     """
     tracked = subprocess.run(

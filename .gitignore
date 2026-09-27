@@ -1,6 +1,8 @@
 # Loop scratch memory: one run only, truncated at the end of each run
 .claude/ideation-log.md
-.claude/build-log.md
+.claude/harness/log.md
+.claude/harness/status.md
+.claude/scheduled_tasks.lock
 .claude/settings.local.json
 .claude/worktrees/
 
@@ -24,8 +26,6 @@ node_modules/
 out/
 dist/
 build/
-# `build/` above matches at any depth; the build loop's brief must stay tracked
-!docs/build/
 # Episode logs, wheels and sweep output. A report that is meant to ship gets
 # committed with `git add -f`.
 artifacts/

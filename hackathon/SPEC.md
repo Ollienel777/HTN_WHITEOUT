@@ -468,7 +468,7 @@ target; its absence is normal and never blocks the gate, the demo or a ticket.
 | **M2 Wow** | (a) The `sitl` transport drives ≥4 ArduPilot vehicles for real **inside the Docker image D46 builds**, and the run is recorded as a committed episode log that the viewer replays everywhere else. If D46 reports SITL unobtainable inside its timebox, M2(a) exits as "not obtainable", recorded with the reason, and the §3 fallback applies. (b) A **completed overnight sweep with a decided operating point and an ablation table**, whichever policy wins. M2(b) does **not** require the tuned set to beat the frontier baseline — if frontier wins, that is the result, and §10's top risk row says we ship frontier. |
 | **M3 Prizes** | Every clause of the §3 table is visibly met. The `arena` adapter exists as a documented stub with a runbook, and the sponsor's weights can be entered and applied in under two minutes. |
 | **M4 Polish** | The viewer passes the `ui-craft` rubric at 1440×900, with real episode data, and every state handled (no log, log loading, log malformed, episode running, episode finished, no contacts, many contacts). |
-| **M5 Submission** | Per `docs/build/SUBMIT.md`: repo, README with the architecture diagram and the four-axis argument, badge IDs, WHITEOUT selected on Devpost before the 18:00Z lock, demo video. |
+| **M5 Submission** | Per the harness hackathon pack's `SUBMIT.md`: repo, README with the architecture diagram and the four-axis argument, badge IDs, WHITEOUT selected on Devpost before the 18:00Z lock, demo video. |
 
 **M0 runs one ticket at a time.** While any M0 ticket is open, no other
 milestone's ticket is eligible.

@@ -1,6 +1,6 @@
 # Event
 
-Fill this in before running `/ideate`. Both loops read it, and nothing here is
+Fill this in before running `/harness:ideate`. Both loops read it, and nothing here is
 a rule. **`TODO` marks a field not filled in yet.** The loops treat it as
 unknown, never as a value. Replace it, or write `none`. Every time needs an IANA
 timezone, for example `America/Toronto`.
