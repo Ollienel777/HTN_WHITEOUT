@@ -7,9 +7,10 @@ session, so it covers only what is easy to get wrong.
 
 | question | read |
 |---|---|
-| How the harness fits together, and how to run an event with it | `docs/HARNESS.md` |
-| Running the ideation loop | `docs/ideation/README.md`, or `/ideate` |
-| Running the build loop | `docs/build/README.md`, or `/build-loop` |
+| This repo's harness settings | `.claude/harness/profile.md` (`node PLUGIN/bin/harness.mjs profile`) |
+| Running the ideation loop | `/harness:ideate` |
+| Running the build loop | `/harness:build-loop` |
+| The loops' rules | the harness plugin's `brief/` (`Ollienel777/claude-harness`) |
 | What we are building, and its gate commands | `hackathon/SPEC.md` (exists once the build starts) |
 | Bringing the arena up and flying a run against it | `docs/arena.md` |
 | The design direction | `hackathon/DESIGN.md`, and the `ui-craft` skill |
@@ -62,7 +63,7 @@ tell its work from yours.
   `.env.example` holds names only. Every external service sits behind an
   adapter with a fixture-backed fake, so the app, CI and the demo fallback all
   run without keys.
-- **Convert event times with `node scripts/toutc.mjs`.** Git Bash's `date` on
+- **Convert event times with `node PLUGIN/bin/harness.mjs utc DAY HH:MM ZONE`.** Git Bash's `date` on
   Windows has no timezone data and silently treats every zone as UTC. In
   PowerShell, a bare `date` prints local time.
 - **No attribution stamps.** No "Generated with…", `Co-Authored-By` or session
@@ -72,13 +73,8 @@ tell its work from yours.
 
 ## Changing the loops' briefs
 
-`docs/ideation/` and `docs/build/` steer unattended agents. Load the
-`prompt-writing` skill before editing them.
-
-- **Every rule lives in exactly one file.** Amend it where it lives, rather
-  than adding a summary elsewhere. The copy nobody amends is the one someone
-  reads.
-- **One concern per PR.**
-- **Running loops never edit their own brief.** They record lessons as `docs`
-  cards (build) or in `hackathon/ideation/LESSONS.md` (ideation) for you to
-  apply.
+The briefs live in the harness repo (`Ollienel777/claude-harness`), not here,
+so a running loop can never edit the rules it follows. Change them there,
+through a PR, after loading the `harness:prompt-writing` skill. A run records
+what it learned under **lessons** in its report; carry each one to the harness
+repo's `LESSONS.md`.
