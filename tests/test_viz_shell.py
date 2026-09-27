@@ -399,8 +399,8 @@ def _viewer_frame_metres(offsets: tuple[tuple[float, float], ...]) -> list[dict[
     node = shutil.which("node")
     assert node is not None, (
         "node is needed to pin the viewer's arithmetic to whiteout.geo. It is "
-        "already a dependency of this repository (scripts/toutc.mjs) and is "
-        "present on the CI runner; this test is not skipped because skipping "
+        "present on the CI runner and on every machine that runs the harness "
+        "loop; this test is not skipped because skipping "
         "it is how the viewer's formulae stopped being checked at all."
     )
     js = _read("viewer.js")
@@ -482,8 +482,8 @@ def _run_viewer_block(blocks: str, tail: str) -> object:
     node = shutil.which("node")
     assert node is not None, (
         "node is needed to pin the viewer's field canvas to whiteout.vision. "
-        "It is already a dependency of this repository (scripts/toutc.mjs) "
-        "and is present on the CI runner; this test is not skipped because "
+        "It is present on the CI runner and on every machine that runs the "
+        "harness loop; this test is not skipped because "
         "skipping it is how the viewer's formulae stopped being checked."
     )
     done = subprocess.run(  # noqa: S603
